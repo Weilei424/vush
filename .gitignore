@@ -1,0 +1,12 @@
+/target
+
+# AI agent instructions and config
+/CLAUDE.md
+/AGENTS.md
+/GEMINI.md
+/.claude/
+/.codex/
+/.gemini/
+
+# Agent-generated phase specs and plans
+/docs/superpowers/
