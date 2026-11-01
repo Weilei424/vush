@@ -1,6 +1,6 @@
 # Backlog — Vush
 
-> **Status:** MVP planning baseline, 2026-11-01. Phase 0 implemented 2026-11-01 (first CI run pending); Phases 1–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
+> **Status:** MVP planning baseline, 2026-11-01. Phase 0 complete 2026-11-01 (CI green on all four targets); Phases 1–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
 
 ## Status legend
 
@@ -40,9 +40,9 @@
   - [x] Root `CLAUDE.md` and `AGENTS.md` rewritten for Vush (2026-11-01).
   - [x] README: Development (commands, single-test example), supported targets table, optional local arm64 Docker check (verified: passed under emulation in 84s), MVP non-goals, compatibility policy.
   - [x] Refresh local `CLAUDE.md`/`AGENTS.md` with the actual layout, commands, toolchain and CI.
-- [~] P0.6 Verify clean commands and `vush --help` / `vush --version`; record actual paths/commands in phase plan (plan Task 6).
+- [x] P0.6 Verify clean commands and `vush --help` / `vush --version`; record actual paths/commands in phase plan (plan Task 6).
   - [x] All four check commands pass locally on 1.99.1; every tracked file stages as `100644`; agent files and `docs/superpowers/` stay ignored.
-  - [ ] First CI run green on all four runners plus `fmt` after the user pushes.
+  - [x] First CI run green on all four runners plus `fmt` (run 41338362501 on `13e08f1`, 2026-11-01).
 
 ## Phase 1 Execution Checklist — Input model and validation
 
