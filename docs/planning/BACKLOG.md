@@ -1,6 +1,6 @@
 # Backlog — Vush
 
-> **Status:** MVP planning baseline, 2026-11-01. No work marked complete: repository and source have not been inspected. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
+> **Status:** MVP planning baseline, 2026-11-01. Phase 0 implemented 2026-11-01 (first CI run pending); Phases 1–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
 
 ## Status legend
 
@@ -127,6 +127,7 @@
 
 - [x] Phase 0: minimal Cargo workspace/crate boundaries and actual repository conventions. Decided 2026-11-01: `crates/vush` (bin), `crates/vush-core`, `crates/vush-http`; toolchain pinned in `rust-toolchain.toml`; CI on Linux x86_64/arm64 and macOS arm64/x86_64.
 - [ ] Phase 1: schema names, default resource limits, exact source-location validation behavior.
+- [ ] Phases 1–2: where the plan compiler and the protocol-neutral executor trait live (e.g. trait in `vush-core`, implemented by `vush-http`) so crate dependencies stay acyclic; whether `crates/vush` needs a library target for testability.
 - [ ] Phase 2: maintained HTTP/TLS/YAML (where applicable) dependencies and retry/pooling implementation.
 - [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership.
 - [ ] Phase 5: hard cap vs target request-rate, burst/fairness policy, retry attempt rate, scheduling tick precision, emergency signals.
