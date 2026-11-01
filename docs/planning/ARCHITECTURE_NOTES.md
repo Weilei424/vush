@@ -1,6 +1,6 @@
 # Architecture Notes — Vush
 
-> **Status:** Proposed MVP architecture (v0.1, 2026-11-01). This is a baseline for phase-by-phase agent planning, **not** an as-built description. No repository or source code was supplied or inspected. Names, configuration examples, crate paths, and implementation libraries are illustrative unless explicitly marked as requirements.
+> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI) exists so far. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
 >
 > **Project name:** **Vush** (confirmed 2026-11-01). **CLI binary:** `vush` (e.g., `vush run test.yaml`). Repository: `https://github.com/Weilei424/vush`. Cargo packages (decided in Phase 0): `vush`, `vush-core`, `vush-http`. Final command flags remain to be determined during the relevant phase. This document is canonical for architecture decisions; `IMPLEMENTATION_PLAN.md` owns phase scope and `BACKLOG.md` owns execution status.
 
@@ -94,23 +94,24 @@ A Cargo workspace with clear ownership boundaries and a modest crate count rathe
 
 ```text
 Cargo.toml          # virtual manifest: shared package fields, lints, dependency versions
+Cargo.lock
 rust-toolchain.toml # pinned toolchain shared by local development and CI
+.github/workflows/ci.yml  # fmt + clippy/test matrix on the four supported targets
 crates/
   vush/            # binary: CLI, config adapter, reports and command handling
+    tests/         # CLI integration tests
   vush-core/       # typed workload plan, scenario interpreter, VU state, coordinator
   vush-http/       # HTTP ProtocolExecutor implementation
   vush-metrics/    # optional later extraction from core when justified by dependencies
-examples/
-tests/
-benchmarks/        # or benches/ per actual harness
-AGENTS.md          # or CLAUDE.md/GEMINI.md at repo root; only one needed by workflow
+examples/          # later phases
+benchmarks/        # or benches/ per actual harness (Phase 7)
 docs/planning/
   ARCHITECTURE_NOTES.md
   IMPLEMENTATION_PLAN.md
   BACKLOG.md
 ```
 
-This directory tree is **suggested**, not a claim about an existing repository. Agent must inspect the actual repo and adapt paths before planning a phase.
+The workspace manifest, the three crates, the toolchain file and the CI workflow exist as of Phase 0. `vush-metrics`, `examples/` and the benchmark directory are still proposals; confirm against the actual tree before planning a phase. Root agent-instruction files (`CLAUDE.md`, `AGENTS.md`) are local-only and gitignored.
 
 Potential dependencies to assess per phase: Tokio for async runtime/tasks/time; a mature async HTTP stack (e.g., reqwest atop hyper) with TLS/HTTP2; Serde for typed JSON/config; an actively maintained YAML parser; clap for CLI; bounded histograms or equivalent for quantiles. Evaluate maintenance, version, licensing, and memory/throughput before committing. Avoid version pins in this baseline.
 
