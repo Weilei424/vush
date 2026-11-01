@@ -1,6 +1,6 @@
 # Implementation Plan — Vush
 
-> **Status:** Baseline roadmap, not an approved per-phase implementation plan (2026-11-01). **No code has been implemented or inspected** as part of this document. Planning is intentionally broken into explicit phases so the coding agent can invoke `plan on phase N`, read repo context, design that phase, create a phase-specific spec/plan, obtain approval, and then request separate implementation confirmation.
+> **Status:** Baseline roadmap (2026-11-01). Phase 0 has been designed, approved and implemented (first CI run pending); Phases 1–8 are not yet planned in detail and remain baseline scope. Planning is intentionally broken into explicit phases so the coding agent can invoke `plan on phase N`, read repo context, design that phase, create a phase-specific spec/plan, obtain approval, and then request separate implementation confirmation.
 >
 > Architecture source: `ARCHITECTURE_NOTES.md`. Execution checklist: `BACKLOG.md`. Suggested canonical location: `docs/planning/`. If a real repo already has these docs at root or another discovered canonical location, use the existing paths; do not create duplicates.
 
@@ -25,12 +25,12 @@ rust-toolchain.toml
 crates/vush/src/...        # binary: CLI, config loading, reports
 crates/vush-core/src/...   # workload plan, scheduler, scenario runner
 crates/vush-http/src/...   # HTTP ProtocolExecutor
+crates/*/tests/...         # integration tests live with their crate (e.g. crates/vush/tests/cli.rs)
 examples/{smoke,flow,rate}.*
-tests/...
 benches/ or benchmarks/...
 docs/planning/{BACKLOG,IMPLEMENTATION_PLAN,ARCHITECTURE_NOTES}.md
-docs/superpowers/specs/
-docs/superpowers/plans/
+docs/superpowers/specs/    # local only (gitignored)
+docs/superpowers/plans/    # local only (gitignored)
 ```
 
 A root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` is required by the user's planning skill. The agent must discover one from the actual repository; do not overwrite existing instructions. Exact source paths below are candidate paths, not assertions of existing files.
@@ -201,16 +201,17 @@ Every phase-specific plan created under `plan on phase N` must include:
 - Security review for untrusted config/targets, redaction, timeouts and memory limits relevant to changes.
 - A verified end-to-end CLI behavior once a feature is user-visible.
 
-Recommended generic commands after scaffolding (use actual package names and repo CI configuration):
+Repository check commands (the same ones CI runs; see `README.md` and `.github/workflows/ci.yml`):
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo build --workspace --release
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo test --workspace --doc --locked   # --all-targets skips doctests
+cargo build --workspace --release       # release build (not run in CI yet)
 ```
 
-The intended user-facing executable is `vush` (for example, `vush run test.yaml` and `vush validate test.yaml`); command flags and Cargo package names will be finalized in the relevant phase. Feature-specific integration/benchmark commands are deliberately deferred to the phase spec when fixtures/harness names exist; do not invent existing paths or executable names.
+The intended user-facing executable is `vush` (for example, `vush run test.yaml` and `vush validate test.yaml`). The Cargo packages are `vush`, `vush-core` and `vush-http` (decided in Phase 0); command flags will be finalized in the relevant phase. Feature-specific integration/benchmark commands are deliberately deferred to the phase spec when fixtures/harness names exist; do not invent existing paths or executable names.
 
 ## 4. MVP dependency / scope map
 
