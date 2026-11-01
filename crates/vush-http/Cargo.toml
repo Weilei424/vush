@@ -1,0 +1,11 @@
+[package]
+name = "vush-http"
+description = "HTTP protocol executor for Vush"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
