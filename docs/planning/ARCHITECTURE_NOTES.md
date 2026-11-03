@@ -1,6 +1,6 @@
 # Architecture Notes — Vush
 
-> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI) exists so far. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
+> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI), the P1.1 plan types in `vush-core` and the schema reference (`docs/config-schema.md`) exist so far. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
 >
 > **Project name:** **Vush** (confirmed 2026-11-01). **CLI binary:** `vush` (e.g., `vush run test.yaml`). Repository: `https://github.com/Weilei424/vush`. Cargo packages: `vush`, `vush-core`, `vush-http` (decided in Phase 0), plus `vush-config` (decided in P1.1, created in P1.2). Final command flags remain to be determined during the relevant phase. This document is canonical for architecture decisions; `IMPLEMENTATION_PLAN.md` owns phase scope and `BACKLOG.md` owns execution status.
 
@@ -78,7 +78,7 @@ Global Setup -> Scenario Setup -> VU Setup              v
 |---|---|---|
 | CLI | Commands, invoking `vush-config`, output selection, process exit mapping, signals | HTTP flow execution, parsing test files |
 | Input adapter / Plan Compiler (`vush-config`) | YAML/JSON decoding, defaults, strict validation, source locations in errors, compilation into typed, immutable plan | Runtime network I/O or VU scheduling |
-| `WorkloadPlan` (`vush_core::plan`) | Typed, read-only plan with all text forms parsed and defaults resolved; `WorkloadPlan::new` is the only way to get one | Parsing libraries, serde, reading the environment, clock or files, holding secret values |
+| `WorkloadPlan` (`vush_core::plan`) | Typed, read-only plan with all text forms parsed and defaults resolved; `WorkloadPlan::new` is the only way to get one | Parsing libraries, serde, reading the environment, clock or files, holding environment values |
 | Workload Coordinator | Global lifecycle, scenario activation, stop/drain sequencing, fairness and capacity budgets | HTTP protocol details |
 | Scheduler / Rate Controller | Closed/open load models, intended timestamps, ramp stages, per-scenario/global request-start budgets, admission/expiry accounting | Parsing and response validation |
 | VU Manager | VU identity, persistent/resettable state, reuse, resource limits, per-VU lifecycle | Global queue policy |
@@ -89,7 +89,7 @@ Global Setup -> Scenario Setup -> VU Setup              v
 | DropEventSink | Best-effort bounded sampled records of rejected/expired work | Truth source for drop counts; replay |
 | Reporter | Human summary, versioned JSON, thresholds and CI exit-code mapping | Modifying ongoing load |
 
-### Rust workspace structure (crate layout decided in Phase 0)
+### Rust workspace structure (crate layout decided in Phase 0 and P1.1)
 
 A Cargo workspace with clear ownership boundaries and a modest crate count rather than premature micro-crates:
 
@@ -107,6 +107,8 @@ crates/
   vush-metrics/    # optional later extraction from core when justified by dependencies
 examples/          # later phases
 benchmarks/        # or benches/ per actual harness (Phase 7)
+docs/
+  config-schema.md # schema v1 reference: the YAML/JSON test file format
 docs/planning/
   ARCHITECTURE_NOTES.md
   IMPLEMENTATION_PLAN.md
@@ -193,7 +195,7 @@ Loops must have static/configured maximum iterations and execution deadline; con
 
 ## 5. Configuration schema
 
-Schema v1, the YAML/JSON test file format, is defined in [`docs/config-schema.md`](../config-schema.md). If that document and this one ever disagree, it wins. YAML and JSON encode the same typed plan, `vush_core::plan::WorkloadPlan`.
+Schema v1, the YAML/JSON test file format, is defined in [`docs/config-schema.md`](../config-schema.md). It owns the file format: keys, types, defaults and text forms. Runtime semantics stay owned by this document, and a conflict on those is a bug to resolve. YAML and JSON encode the same typed plan, `vush_core::plan::WorkloadPlan`.
 
 ## 6. Quality gates / architectural verification
 
