@@ -11,6 +11,7 @@ mod step;
 mod template;
 mod threshold;
 mod value;
+mod workload;
 
 pub use json_path::{JsonPath, JsonPathSegment};
 pub use load::{ClosedStop, ClosedVusLoad, LoadModel, QueuePolicy, RateSchedule, Stage};
@@ -23,3 +24,4 @@ pub use step::{
 pub use template::{Template, TemplatePart, VarRef};
 pub use threshold::{Bound, BoundOp, PercentileStat, Threshold, ThresholdCheck};
 pub use value::{ByteSize, JsonNumber, Rate, RateUnit, Ratio, ValueError, parse_duration};
+pub use workload::{PlanDraft, PlanError, PlanErrorKind, Scenario, StatePolicy, WorkloadPlan};
