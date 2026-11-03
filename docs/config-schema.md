@@ -7,7 +7,7 @@ A Vush test is declared in a YAML or JSON file. The two formats use the same key
 Conventions used throughout:
 
 - All keys are `snake_case`.
-- Unknown keys are errors. They are never ignored.
+- Unknown keys are errors. They are never ignored. Duplicate keys in a map are errors too, in both YAML and JSON.
 - Durations, rates, sizes and percentages are strings in both formats (`"5s"` in JSON). Counts such as `vus`, `count` and `max_vus` are plain integers.
 - In YAML, put quotation marks around any value that contains `${`.
 
@@ -25,7 +25,7 @@ Units are always required.
 - `KB`, `MB` and `GB` are powers of 1000. `KiB`, `MiB` and `GiB` are powers of 1024.
 - Rates are whole numbers. Write `30/m` instead of `0.5/s`.
 - Whether a zero rate is acceptable depends on where it is used. `0/s` is valid as a ramp `start` or a stage target, but a fixed `rate` must be above zero.
-- Numbers, booleans and `null` in `json` bodies and in comparisons (`equals`, `gt` and so on) are ordinary JSON values. Integers keep their exact value. `NaN` and infinity are not allowed.
+- Numbers, booleans and `null` in `json` bodies and in comparisons (`equals`, `gt` and so on) are ordinary JSON values. Integers keep their exact value. An integer too large for a 64-bit unsigned value is an error. `NaN` and infinity are not allowed.
 
 ## Variables
 
@@ -59,7 +59,7 @@ Templates are accepted in these places:
 - string values inside a `json` body (keys are always plain text)
 - string values in `expect` and `when` comparisons: `equals`, `not_equals` and `contains` in both, plus `body_contains` in `expect`
 
-Everywhere else a string is plain text, including `name`, `method` and `tls.ca_file`.
+Everywhere else a string is plain text, including `method` and `tls.ca_file`. A request `name` is a fixed metrics label, so `${` in it is an error.
 
 The `var` field in a `when` condition names a variable with the same reference form, without the `${}`: `var: token`, `var: scenario.x`. JSON assertions use `path` instead (see [JSON paths](#json-paths)).
 
@@ -182,10 +182,14 @@ Each model is either fixed or ramping. A fixed load uses the fixed keys below. A
 ```yaml
 # 20 users for 5 minutes
 load: { model: closed_vus, vus: 20, duration: 5m }
+```
 
+```yaml
 # 5 users, each running 10 iterations and then stopping
 load: { model: closed_vus, vus: 5, iterations: 10 }
+```
 
+```yaml
 # ramping: up to 100 users, hold, then down
 load:
   model: closed_vus
@@ -206,7 +210,9 @@ load:
 ```yaml
 # 20 iterations per second for 10 minutes
 load: { model: iteration_rate, rate: 20/s, duration: 10m, max_vus: 200 }
+```
 
+```yaml
 # ramping: up to 50 iterations per second, hold, then down
 load:
   model: iteration_rate
@@ -221,14 +227,16 @@ load:
 ### `request_rate`
 
 - `vus` (1 or more) is required. These are the users that generate the requests.
-- `rate` counts physical HTTP request starts, including retries. It is a target, and the run reports it against what was achieved. A flow whose steps depend on each other may not be able to reach the target.
+- `rate` counts physical HTTP request starts. How retries count against it is not specified yet. It is a target, and the run reports it against what was achieved. A flow whose steps depend on each other may not be able to reach the target.
 - Fixed: `rate` and `duration`.
 - Ramping: `stages` and an optional `start`, the same as for `iteration_rate`.
 
 ```yaml
 # 200 requests per second for 5 minutes
 load: { model: request_rate, vus: 50, rate: 200/s, duration: 5m }
+```
 
+```yaml
 # ramping: up to 500 requests per second over 5 minutes
 load:
   model: request_rate
@@ -247,7 +255,7 @@ A step list holds steps in order. A step is a map with exactly one key, which na
 
 | Key | Type | Required | Default |
 |---|---|---|---|
-| `name` | string, a label for metrics. It can't contain templates | no | none |
+| `name` | string, a fixed label for metrics. `${` in it is an error | no | none |
 | `method` | an HTTP method: uppercase letters, digits and `-`, starting with a letter. Any method is allowed | yes | |
 | `path` or `url` | template; exactly one. `path` is joined to `base_url`. `url` is used as written | yes | |
 | `query`, `headers` | map of string to template. Order is kept | no | empty |
@@ -266,9 +274,9 @@ A failed required step ends the current iteration. A failed optional step (`requ
 |---|---|---|---|
 | `attempts` | integer, 2 or more. The total number of attempts, including the first | yes | |
 | `backoff` | duration. A fixed delay between attempts | no | `100ms` |
-| `allow_non_idempotent` | boolean. Must be `true` to retry `POST` and `PATCH` | no | `false` |
+| `allow_non_idempotent` | boolean. Must be `true` to retry any method other than `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` and `TRACE` | no | `false` |
 
-Retries are off unless you add a `retry` block. They happen on transport errors and `5xx` responses. Every attempt counts as a physical request attempt.
+Retries are off unless you add a `retry` block. They happen on transport errors and `5xx` responses. Every attempt counts as a physical request attempt. Any method is allowed, so a custom method is not retried unless `allow_non_idempotent` is `true`.
 
 #### `expect`
 
