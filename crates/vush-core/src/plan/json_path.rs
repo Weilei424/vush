@@ -89,8 +89,11 @@ mod tests {
             ("$.a", vec![field("a")]),
             ("$.access_token", vec![field("access_token")]),
             ("$.a-b", vec![field("a-b")]),
+            ("$.accessToken", vec![field("accessToken")]),
             ("$.0", vec![field("0")]),
             ("$[2]", vec![Index(2)]),
+            ("$[4294967295]", vec![Index(u32::MAX)]),
+            ("$[01]", vec![Index(1)]),
             (
                 "$.a.b[0].c",
                 vec![field("a"), field("b"), Index(0), field("c")],
@@ -125,6 +128,8 @@ mod tests {
             "$.é",
             "$[4294967296]",
             "$[?(@.x)]",
+            "$.a[0]b",
+            "$[0]x",
         ] {
             assert!(text.parse::<JsonPath>().is_err(), "{text}");
         }
