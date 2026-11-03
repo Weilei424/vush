@@ -2,7 +2,7 @@
 
 > **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI) exists so far. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
 >
-> **Project name:** **Vush** (confirmed 2026-11-01). **CLI binary:** `vush` (e.g., `vush run test.yaml`). Repository: `https://github.com/Weilei424/vush`. Cargo packages (decided in Phase 0): `vush`, `vush-core`, `vush-http`. Final command flags remain to be determined during the relevant phase. This document is canonical for architecture decisions; `IMPLEMENTATION_PLAN.md` owns phase scope and `BACKLOG.md` owns execution status.
+> **Project name:** **Vush** (confirmed 2026-11-01). **CLI binary:** `vush` (e.g., `vush run test.yaml`). Repository: `https://github.com/Weilei424/vush`. Cargo packages: `vush`, `vush-core`, `vush-http` (decided in Phase 0), plus `vush-config` (decided in P1.1, created in P1.2). Final command flags remain to be determined during the relevant phase. This document is canonical for architecture decisions; `IMPLEMENTATION_PLAN.md` owns phase scope and `BACKLOG.md` owns execution status.
 
 ## 1. Vision and scope
 
@@ -76,8 +76,9 @@ Global Setup -> Scenario Setup -> VU Setup              v
 
 | Component | Owns | Must not own |
 |---|---|---|
-| CLI | Commands, configuration loading, output selection, process exit mapping, signals | HTTP flow execution |
-| Input adapter / Plan Compiler | YAML/JSON decoding, defaults, strict validation, compilation into typed, immutable plan | Runtime network I/O or VU scheduling |
+| CLI | Commands, invoking `vush-config`, output selection, process exit mapping, signals | HTTP flow execution, parsing test files |
+| Input adapter / Plan Compiler (`vush-config`) | YAML/JSON decoding, defaults, strict validation, source locations in errors, compilation into typed, immutable plan | Runtime network I/O or VU scheduling |
+| `WorkloadPlan` (`vush_core::plan`) | Typed, read-only plan with all text forms parsed and defaults resolved; `WorkloadPlan::new` is the only way to get one | Parsing libraries, serde, reading the environment, clock or files, holding secret values |
 | Workload Coordinator | Global lifecycle, scenario activation, stop/drain sequencing, fairness and capacity budgets | HTTP protocol details |
 | Scheduler / Rate Controller | Closed/open load models, intended timestamps, ramp stages, per-scenario/global request-start budgets, admission/expiry accounting | Parsing and response validation |
 | VU Manager | VU identity, persistent/resettable state, reuse, resource limits, per-VU lifecycle | Global queue policy |
@@ -98,8 +99,9 @@ Cargo.lock
 rust-toolchain.toml # pinned toolchain shared by local development and CI
 .github/workflows/ci.yml  # fmt + clippy/test matrix on the four supported targets
 crates/
-  vush/            # binary: CLI, config adapter, reports and command handling
+  vush/            # binary: CLI, reports and command handling
     tests/         # CLI integration tests
+  vush-config/     # YAML/JSON reading, defaults, file:line errors, builds the plan (from P1.2)
   vush-core/       # typed workload plan, scenario interpreter, VU state, coordinator
   vush-http/       # HTTP ProtocolExecutor implementation
   vush-metrics/    # optional later extraction from core when justified by dependencies
@@ -111,7 +113,7 @@ docs/planning/
   BACKLOG.md
 ```
 
-The workspace manifest, the three crates, the toolchain file and the CI workflow exist as of Phase 0. `vush-metrics`, `examples/` and the benchmark directory are still proposals; confirm against the actual tree before planning a phase. Root agent-instruction files (`CLAUDE.md`, `AGENTS.md`) are local-only and gitignored.
+The workspace manifest, the three crates, the toolchain file and the CI workflow exist as of Phase 0. `vush-config` arrives in P1.2. `vush-metrics`, `examples/` and the benchmark directory are still proposals; confirm against the actual tree before planning a phase. Root agent-instruction files (`CLAUDE.md`, `AGENTS.md`) are local-only and gitignored.
 
 Potential dependencies to assess per phase: Tokio for async runtime/tasks/time; a mature async HTTP stack (e.g., reqwest atop hyper) with TLS/HTTP2; Serde for typed JSON/config; an actively maintained YAML parser; clap for CLI; bounded histograms or equivalent for quantiles. Evaluate maintenance, version, licensing, and memory/throughput before committing. Avoid version pins in this baseline.
 
@@ -131,7 +133,7 @@ Record both `scheduled_at` and `started_at` where the scheduling model applies. 
 
 ### 4.2 Load models
 
-1. **Closed VU model:** N persistent VUs independently loop through scenarios; each VU starts the next iteration only after its previous iteration ends. Supports fixed VUs and ramping active VU counts.
+1. **Closed VU model:** N persistent VUs independently loop through scenarios; each VU starts the next iteration only after its previous iteration ends. Supports fixed VUs and ramping active VU counts. A fixed run stops after a duration or after a per-VU iteration count (the smoke-test form).
 2. **Open iteration-arrival model:** planned new scenario iteration starts at fixed/ramped rate, independently of iteration completion. An admitted iteration acquires an available bounded VU worker; each VU retains its own state on reuse. No overlapping iterations on one VU. Reject when admission capacity exhausted.
 3. **Request-start rate model:** explicit workload control for physical HTTP request starts, not complete iteration starts. It is implemented at the HTTP step boundary with configurable global/per-scenario budgets and a defined VU/iteration demand source. Complex flows may be unable to achieve a requested target because dependent steps are serial; report achieved vs target and waiting/backlog. Configure this as an explicit distinct mode or pacing policy; **never** imply iteration rate equals request rate.
 
@@ -147,7 +149,7 @@ Initial default for request rate: rate is a **non-guaranteed target with bounded
 
 ### 4.4 Scenario runner
 
-Supported declarative operations in MVP: `http`, `wait`, `if/else`, `repeat` with a bounded count, extract from JSON path/header, assertions on HTTP status/content/selected JSON fields, and interpolation into subsequent requests. A failed required step aborts the **current iteration**, records the reason, then permits a subsequent iteration. There is no automatic continuation through a failed token dependency.
+Supported declarative operations in MVP: `request`, `wait`, `if/else`, `repeat` with a bounded count, extract from JSON path/header, assertions on HTTP status/content/selected JSON fields, and interpolation into subsequent requests. With no expected status configured, any 4xx or 5xx response fails the step, so a smoke test of a broken endpoint can't pass silently. A failed required step aborts the **current iteration**, records the reason, then permits a subsequent iteration. There is no automatic continuation through a failed token dependency: a missing extracted value or unset variable fails the step and is never replaced with an empty string.
 
 Setup/teardown scopes: global once, per-scenario once per run, and per-VU upon allocation/disposal. All use the same bounded declarative operations with constraints appropriate to the scope. **Provisional failure policy:** global setup failure aborts all scheduling; scenario setup failure disables that scenario while other scenarios may run; per-VU setup failure retires that VU and records failure; teardown failure affects run status and report, not retrospective request metrics. Finalize in Phase 3/4.
 
@@ -189,65 +191,9 @@ Loops must have static/configured maximum iterations and execution deadline; con
 - Non-idempotent request retries (e.g., POST) are **off by default** and require explicit user configuration.
 - Use deterministic clocks/injected timer or simulated scheduler tests where possible to verify scheduling semantics without flaky sleeps.
 
-## 5. Example configuration shape — NON-NORMATIVE
+## 5. Configuration schema
 
-This is a *conversation artifact* for agent design discussions, **not** approved YAML schema. JSON must encode the exact same typed plan. Final naming/validation rules belong to Phase 1.
-
-```yaml
-schema_version: 1
-name: storefront-load
-base_url: https://api.example.com
-http:
-  version: auto           # http1/http2/auto: illustrative
-  pool_scope: shared      # shared/scenario/vu
-  timeout: 5s
-  retries: 0
-  max_response_bytes: 1048576
-  cookie_scope: vu
-load:
-  mode: iteration_rate    # closed_vus | iteration_rate | request_rate
-  rate: 100
-  duration: 60s
-  max_vus: 1000
-admission:
-  queue_capacity: 2000
-  max_wait: 2s
-  on_full: drop_newest
-metrics:
-  detailed_request_events: false
-thresholds:
-  - metric: http_request_duration_p95
-    operator: lt
-    value: 500ms
-scenarios:
-  - name: signed-in-user
-    steps:
-      - request:
-          method: POST
-          path: /login
-          json: { username: '${USER}', password: '${PASSWORD}' }
-          expect: { status: 200 }
-          extract:
-            token: { json_path: '$.access_token' }
-      - request:
-          method: GET
-          path: /profile
-          headers: { Authorization: 'Bearer ${token}' }
-          expect: { status: 200 }
-      - wait: 500ms
-      - if:
-          field: token
-          operator: exists
-        then:
-          - repeat:
-              count: 2
-              steps:
-                - request:
-                    method: GET
-                    path: /products
-```
-
-**Important:** credentials are shown as variable placeholders. Real secret loading, escaping, assertions, and hook/schema syntax must be designed and tested, not assumed from this example.
+Schema v1, the YAML/JSON test file format, is defined in [`docs/config-schema.md`](../config-schema.md). If that document and this one ever disagree, it wins. YAML and JSON encode the same typed plan, `vush_core::plan::WorkloadPlan`.
 
 ## 6. Quality gates / architectural verification
 
@@ -262,9 +208,9 @@ scenarios:
 
 | Decision still open | Default working assumption | Resolve by |
 |---|---|---|
-| Exact crate count and filenames | **Decided:** `vush` (bin), `vush-core`, `vush-http` under `crates/` | Phase 0 ✓ |
+| Exact crate count and filenames | **Decided:** `vush` (bin), `vush-core`, `vush-http` under `crates/`, plus `vush-config` from P1.2 | Phase 0, P1.1 ✓ |
 | YAML parser, HTTP library, histogram implementation | Evaluate maintained libraries by feature/performance/security | Phases 1, 2, 6 |
-| YAML/JSON schema and error location reporting | Versioned, typed, strict validation | Phase 1 |
+| YAML/JSON schema and error location reporting | Schema v1 **decided** (scenario-owned load, tagged steps); error locations still open | P1.1 ✓, P1.2–P1.4 |
 | HTTP connection pool isolation algorithm | Shared by default, scenario/VU variants selectable | Phase 2/4 |
 | Setup failure policies and hook data lifetime | Abort global / skip failed scenario / retire failed VU | Phase 3/4 |
 | Virtual-user reuse for open arrivals | Persistent bounded reusable VU pool; one iteration per VU | Phase 4/5 |
@@ -272,7 +218,7 @@ scenarios:
 | Fairness, budgets, queue topology and expiry | Bounded per-scenario admissions with clear global limits | Phase 5 |
 | Threshold/error exit-code precedence | Stable tested mapping documented with JSON schema | Phase 6 |
 | Signals vs endless drain | Respect normal drain; define emergency interruption separately | Phase 5/8 |
-| Default limits (timeouts, buffers, loops, events) | Safe finite documented values chosen by measurements | Phases 1–6 |
+| Default limits (timeouts, buffers, loops, events) | Provisional values set in P1.1; adjust from measurements | Phases 1–6 |
 | Numerical performance SLOs | Benchmark and publish baseline first | Phase 7 |
 
 ## 8. Agent collaboration / change control
