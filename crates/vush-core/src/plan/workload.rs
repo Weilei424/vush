@@ -101,6 +101,9 @@ impl WorkloadPlan {
     /// and for each scenario its `name`, `load`, `setup`, `teardown`,
     /// `vu_setup`, `vu_teardown` and `steps`. Inside an `if`, `then` comes
     /// before `else`.
+    ///
+    /// The walk over nested steps is recursive, and a stack overflow can't be
+    /// caught, so callers bound the nesting depth before building a draft.
     pub fn new(draft: PlanDraft) -> Result<WorkloadPlan, Vec<PlanError>> {
         let mut errors = Vec::new();
         check_steps(&draft.setup, "setup", &mut errors);
@@ -513,6 +516,45 @@ mod tests {
                     "scenarios[1].name".to_string(),
                     PlanErrorKind::DuplicateScenarioName("a".to_string())
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_list_is_walked_in_document_order() {
+        let mut first = scenario("a");
+        first.setup = vec![repeat(vec![])];
+        first.teardown = vec![repeat(vec![])];
+        first.vu_setup = vec![repeat(vec![])];
+        first.vu_teardown = vec![repeat(vec![])];
+        first.steps = vec![if_then(vec![repeat(vec![])], vec![repeat(vec![])])];
+        let mut second = scenario("a");
+        second.load = LoadModel::ClosedVus(ClosedVusLoad::Ramping {
+            start: 0,
+            stages: vec![],
+        });
+        second.setup = vec![repeat(vec![])];
+        second.steps.clear();
+        let mut d = draft(vec![first, second, scenario("a")]);
+        d.setup = vec![repeat(vec![])];
+        d.teardown = vec![repeat(vec![])];
+        let paths: Vec<String> = errors(d).into_iter().map(|(path, _)| path).collect();
+        assert_eq!(
+            paths,
+            [
+                "setup[0].repeat.steps",
+                "teardown[0].repeat.steps",
+                "scenarios[0].setup[0].repeat.steps",
+                "scenarios[0].teardown[0].repeat.steps",
+                "scenarios[0].vu_setup[0].repeat.steps",
+                "scenarios[0].vu_teardown[0].repeat.steps",
+                "scenarios[0].steps[0].if.then[0].repeat.steps",
+                "scenarios[0].steps[0].if.else[0].repeat.steps",
+                "scenarios[1].name",
+                "scenarios[1].load.stages",
+                "scenarios[1].setup[0].repeat.steps",
+                "scenarios[1].steps",
+                "scenarios[2].name",
             ]
         );
     }
