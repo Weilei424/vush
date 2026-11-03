@@ -1,6 +1,6 @@
 # Backlog — Vush
 
-> **Status:** MVP planning baseline, 2026-11-01. Phase 0 complete 2026-11-01 (CI green on all four targets); Phases 1–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
+> **Status:** MVP planning baseline, 2026-11-01. Phase 0 complete 2026-11-01 (CI green on all four targets); Phase 1 in progress; Phases 2–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
 
 ## Status legend
 
@@ -59,15 +59,27 @@
   - [x] All four check commands pass and `vush-core` still has no dependencies (plan Task 7).
   - [ ] CI green on all four runners plus `fmt` after the user pushes (plan Task 7).
 - [ ] P1.2 Parse equivalent YAML/JSON into the same plan; select maintained YAML library. Creates `crates/vush-config` (decided 2026-11-02).
-- [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields. Includes a step-nesting depth limit enforced in `vush-config` before a draft is built. Rejects the reserved words `env`, `global`, `scenario` and `vu` as `extract` variable names.
+  - Numbers follow the `JsonNumber` variant rule in `value.rs`, and integers too large for `u64` are errors.
+  - Duplicate map keys are errors in both formats.
+  - YAML number forms such as `010`, `0x10` and `.inf` are decided with the library.
+- [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields.
+  - A nesting depth limit covering steps, `when` conditions and `json` values, enforced in `vush-config` before a draft is built.
+  - An upper bound on durations.
+  - `extract` names must match the variable-name pattern and avoid the reserved words (`env`, `global`, `scenario`, `vu`).
+  - Scope rules include `extract` in `teardown`.
+  - `${` in a request `name` is an error.
+  - A `retry` on any method other than GET, HEAD, PUT, DELETE, OPTIONS and TRACE needs `allow_non_idempotent`.
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
-- [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. Fixtures include the `docs/config-schema.md` example so the doc can't drift.
+  - Diagnostics stay bounded and don't echo text beyond `ValueError`'s bounded span.
+  - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
+  - The README links `docs/config-schema.md` once `vush validate` exists.
+- [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. Fixtures include the `docs/config-schema.md` example so the doc can't drift. Fixtures also check the documented defaults tables against the `Default` impls and constants.
 
 ## Phase 2 Execution Checklist — HTTP executor
 
 - [ ] P2.1 Implement protocol-neutral request/observation/error boundary.
 - [ ] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies.
-- [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries.
+- [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on.
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
 - [ ] P2.5 Implement bounded body capture and safe error diagnostics.
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
@@ -140,7 +152,7 @@
 - [ ] Phase 1: exact source-location validation behavior. Schema names and provisional default limits decided 2026-11-02 (P1.1).
 - [ ] Phase 2: where the protocol-neutral executor trait lives (e.g. trait in `vush-core`, implemented by `vush-http`) so crate dependencies stay acyclic. The plan compiler's home is decided: `crates/vush-config` (2026-11-02, P1.1), so `crates/vush` doesn't need a library target for it.
 - [ ] Phase 2: maintained HTTP/TLS/YAML (where applicable) dependencies and retry/pooling implementation.
-- [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership.
+- [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership. Also whether `all` and `any` stop at the first decisive condition (the schema example relies on it), whether `vu.id` and `vu.iteration` start at 0 or 1, what exceeding `max_response_size` or `deadline` does, and how `exists` treats JSON `null`.
 - [ ] Phase 5: hard cap vs target request-rate, burst/fairness policy, retry attempt rate, scheduling tick precision, emergency signals.
 - [ ] Phase 6: percentile algorithm, metrics schema and exit-code precedence, default threshold behavior.
 - [ ] Phase 7: realistic measured numerical performance SLOs and benchmark controls.
