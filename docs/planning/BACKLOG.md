@@ -59,7 +59,7 @@
   - [x] All four check commands pass and `vush-core` still has no dependencies (plan Task 7).
   - [ ] CI green on all four runners plus `fmt` after the user pushes (plan Task 7).
 - [ ] P1.2 Parse equivalent YAML/JSON into the same plan; select maintained YAML library. Creates `crates/vush-config` (decided 2026-11-02).
-  - Numbers follow the `JsonNumber` variant rule in `value.rs`, and integers too large for `u64` are errors.
+  - Numbers follow the `JsonNumber` variant rule in `value.rs`. Integers outside the range `i64::MIN` to `u64::MAX` are errors, never stored as `Float`.
   - Duplicate map keys are errors in both formats.
   - YAML number forms such as `010`, `0x10` and `.inf` are decided with the library.
 - [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields.
@@ -70,7 +70,7 @@
   - `${` in a request `name` is an error.
   - A `retry` on any method other than GET, HEAD, PUT, DELETE, OPTIONS and TRACE needs `allow_non_idempotent`.
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
-  - Diagnostics stay bounded and don't echo text beyond `ValueError`'s bounded span.
+  - Diagnostics stay bounded and don't echo text beyond `ValueError`'s bounded span. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
   - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
   - The README links `docs/config-schema.md` once `vush validate` exists.
 - [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. Fixtures include the `docs/config-schema.md` example so the doc can't drift. Fixtures also check the documented defaults tables against the `Default` impls and constants.
