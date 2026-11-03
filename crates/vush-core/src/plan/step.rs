@@ -110,7 +110,7 @@ pub struct RetryPolicy {
     pub attempts: u32,
     /// A fixed delay between attempts.
     pub backoff: Duration,
-    /// Allow retrying POST and PATCH.
+    /// Allow retrying any method other than GET, HEAD, PUT, DELETE, OPTIONS and TRACE.
     pub allow_non_idempotent: bool,
 }
 
