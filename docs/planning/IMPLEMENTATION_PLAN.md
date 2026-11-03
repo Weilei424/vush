@@ -1,6 +1,6 @@
 # Implementation Plan — Vush
 
-> **Status:** Baseline roadmap (2026-11-01). Phase 0 is complete (designed, approved, implemented; CI green 2026-11-01); Phases 1–8 are not yet planned in detail and remain baseline scope. Planning is intentionally broken into explicit phases so the coding agent can invoke `plan on phase N`, read repo context, design that phase, create a phase-specific spec/plan, obtain approval, and then request separate implementation confirmation.
+> **Status:** Baseline roadmap (2026-11-01). Phase 0 is complete (designed, approved, implemented; CI green 2026-11-01); Phase 1 is in progress; Phases 2–8 are not yet planned in detail and remain baseline scope. Planning is intentionally broken into explicit phases so the coding agent can invoke `plan on phase N`, read repo context, design that phase, create a phase-specific spec/plan, obtain approval, and then request separate implementation confirmation.
 >
 > Architecture source: `ARCHITECTURE_NOTES.md`. Execution checklist: `BACKLOG.md`. Suggested canonical location: `docs/planning/`. If a real repo already has these docs at root or another discovered canonical location, use the existing paths; do not create duplicates.
 
@@ -16,7 +16,7 @@ Deliver **Vush**, an efficient Rust HTTP smoke/load-testing CLI (`vush`) for Lin
 - **Measured performance.** Track scheduler lag, generator capacity and memory. Do not conflate server overload with load-generator saturation.
 - **Planning-only handoff.** `plan on phase N` creates/updates phase-specific specs and plans and stops before code, exactly as the provided skill requires.
 
-### Source tree (crate layout decided in Phase 0; other paths still proposed)
+### Source tree (crate layout decided in Phase 0 and P1.1; other paths still proposed)
 
 ```text
 Cargo.toml                 # virtual workspace manifest
@@ -29,6 +29,7 @@ crates/vush-http/src/...   # HTTP ProtocolExecutor
 crates/*/tests/...         # integration tests live with their crate (e.g. crates/vush/tests/cli.rs)
 examples/{smoke,flow,rate}.*
 benches/ or benchmarks/...
+docs/config-schema.md      # schema v1 reference: the YAML/JSON test file format
 docs/planning/{BACKLOG,IMPLEMENTATION_PLAN,ARCHITECTURE_NOTES}.md
 docs/superpowers/specs/    # local only (gitignored)
 docs/superpowers/plans/    # local only (gitignored)
@@ -212,7 +213,7 @@ cargo test --workspace --doc --locked   # --all-targets skips doctests
 cargo build --workspace --release       # release build (not run in CI yet)
 ```
 
-The intended user-facing executable is `vush` (for example, `vush run test.yaml` and `vush validate test.yaml`). The Cargo packages are `vush`, `vush-core` and `vush-http` (decided in Phase 0); command flags will be finalized in the relevant phase. Feature-specific integration/benchmark commands are deliberately deferred to the phase spec when fixtures/harness names exist; do not invent existing paths or executable names.
+The intended user-facing executable is `vush` (for example, `vush run test.yaml` and `vush validate test.yaml`). The Cargo packages are `vush`, `vush-core` and `vush-http` (decided in Phase 0), plus `vush-config` (decided in P1.1, created in P1.2); command flags will be finalized in the relevant phase. Feature-specific integration/benchmark commands are deliberately deferred to the phase spec when fixtures/harness names exist; do not invent existing paths or executable names.
 
 ## 4. MVP dependency / scope map
 
