@@ -9,6 +9,27 @@ const REFERENCE_EXPECTED: &str =
 
 const UNTERMINATED_EXPECTED: &str = "a closing } for every ${ (write $${ for a literal ${)";
 
+/// How many characters of a reference an error echoes.
+const ECHO_LIMIT: usize = 64;
+
+/// The text a template error shows for a `${` whose reference starts at `after`.
+///
+/// A typo can leave anything after the `${`, such as the rest of a JSON body
+/// with credentials in it, so only `${` and the leading run of reference
+/// characters (`[A-Za-z0-9_.]`, at most [`ECHO_LIMIT`]) are echoed. The run is
+/// followed by `}` when that is the next character, and by `…` otherwise.
+fn echo_reference(after: &str) -> String {
+    let len = after
+        .bytes()
+        .take(ECHO_LIMIT)
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))
+        .count();
+    // The run is ASCII, so `len` is a character boundary.
+    let (name, next) = after.split_at(len);
+    let end = if next.starts_with('}') { '}' } else { '…' };
+    format!("${{{name}{end}")
+}
+
 /// Whether `text` is a variable name: `[A-Za-z_][A-Za-z0-9_]*`.
 fn is_name(text: &str) -> bool {
     let mut chars = text.chars();
@@ -109,14 +130,14 @@ impl FromStr for Template {
                 let Some(end) = reference.find('}') else {
                     return Err(ValueError {
                         expected: UNTERMINATED_EXPECTED,
-                        input: rest[dollar..].to_owned(),
+                        input: echo_reference(reference),
                     });
                 };
                 let var = reference[..end]
                     .parse()
                     .map_err(|error: ValueError| ValueError {
                         expected: error.expected,
-                        input: format!("${{{}}}", error.input),
+                        input: echo_reference(reference),
                     })?;
                 if !literal.is_empty() {
                     parts.push(TemplatePart::Text(std::mem::take(&mut literal)));
@@ -162,6 +183,7 @@ mod tests {
             ("a$${b}c${d}", vec![t("a${b}c"), v("d")]),
             ("$", vec![t("$")]),
             ("$$", vec![t("$$")]),
+            ("$$${x}", vec![t("$${x}")]),
             ("cost: $5", vec![t("cost: $5")]),
             (body, vec![t(body)]),
             (
@@ -217,9 +239,32 @@ mod tests {
             "${global.a.b}",
             "${é}",
             "${a${b}}",
+            "${aé}",
+            "${scenario.}",
+            "${scenario.1a}",
         ] {
             assert!(text.parse::<Template>().is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn template_errors_do_not_echo_following_text() {
+        let cases = [
+            (r#"{"note":"${oops","api_key":"AKIA-SECRET"}"#, "${oops…"),
+            ("${foo.bar}", "${foo.bar}"),
+            ("${token", "${token…"),
+            ("x ${a} then ${b", "${b…"),
+            ("${}", "${}"),
+            ("${ token }", "${…"),
+        ];
+        for (text, want) in cases {
+            let err = text.parse::<Template>().unwrap_err();
+            assert_eq!(err.input, want, "{text}");
+        }
+
+        let huge = format!("${{{}", "a".repeat(2_000_000));
+        let err = huge.parse::<Template>().unwrap_err();
+        assert_eq!(err.input.chars().count(), 2 + 64 + 1);
     }
 
     #[test]
