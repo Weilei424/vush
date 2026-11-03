@@ -46,11 +46,22 @@
 
 ## Phase 1 Execution Checklist — Input model and validation
 
-- [ ] P1.1 Agree versioned YAML/JSON configuration shape and typed immutable workload plan.
-- [ ] P1.2 Parse equivalent YAML/JSON into the same plan; select maintained YAML library.
-- [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields.
+> P1.1 spec: `docs/superpowers/specs/2026-11-02-phase-1-1-config-shape-and-plan-design.md` · Plan: `docs/superpowers/plans/2026-11-02-phase-1-1-config-shape-and-plan.md` (local only; `docs/superpowers/` is gitignored).
+
+- [~] P1.1 Agree versioned YAML/JSON configuration shape and typed immutable workload plan (design approved 2026-11-02).
+  - [x] Value types in `vush_core::plan`: durations, rates, sizes and percentages, parsed from text with exact-value and rejection tables (plan Task 1).
+  - [x] `Template` and `VarRef`: `${...}` parsing with `env`, `global`, `scenario`, `vu` scopes and `$${` escaping (plan Task 2).
+  - [x] `JsonPath`: the `$.a.b[0].c` subset (plan Task 3).
+  - [x] Plan data model: HTTP settings and limits with schema defaults, the three load models, steps, comparisons and thresholds (plan Task 4).
+  - [x] `WorkloadPlan::new` as the only constructor: reports every structural error with a file-key path; the plan is read-only and `Send + Sync` (plan Task 5).
+  - [x] `docs/config-schema.md`: schema v1 reference with one complete YAML + JSON example, built through the public API in a test (plan Task 6).
+  - [x] Replace `ARCHITECTURE_NOTES.md` §5 with a pointer to the schema doc; refresh local `CLAUDE.md`/`AGENTS.md` (plan Tasks 6–7).
+  - [x] All four check commands pass and `vush-core` still has no dependencies (plan Task 7).
+  - [ ] CI green on all four runners plus `fmt` after the user pushes (plan Task 7).
+- [ ] P1.2 Parse equivalent YAML/JSON into the same plan; select maintained YAML library. Creates `crates/vush-config` (decided 2026-11-02).
+- [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields. Includes a step-nesting depth limit enforced in `vush-config` before a draft is built. Rejects the reserved words `env`, `global`, `scenario` and `vu` as `extract` variable names.
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
-- [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests.
+- [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. Fixtures include the `docs/config-schema.md` example so the doc can't drift.
 
 ## Phase 2 Execution Checklist — HTTP executor
 
@@ -126,8 +137,8 @@
 ## Known architectural questions to settle when reached (not blockers to overall roadmap)
 
 - [x] Phase 0: minimal Cargo workspace/crate boundaries and actual repository conventions. Decided 2026-11-01: `crates/vush` (bin), `crates/vush-core`, `crates/vush-http`; toolchain pinned in `rust-toolchain.toml`; CI on Linux x86_64/arm64 and macOS arm64/x86_64.
-- [ ] Phase 1: schema names, default resource limits, exact source-location validation behavior.
-- [ ] Phases 1–2: where the plan compiler and the protocol-neutral executor trait live (e.g. trait in `vush-core`, implemented by `vush-http`) so crate dependencies stay acyclic; whether `crates/vush` needs a library target for testability.
+- [ ] Phase 1: exact source-location validation behavior. Schema names and provisional default limits decided 2026-11-02 (P1.1).
+- [ ] Phase 2: where the protocol-neutral executor trait lives (e.g. trait in `vush-core`, implemented by `vush-http`) so crate dependencies stay acyclic. The plan compiler's home is decided: `crates/vush-config` (2026-11-02, P1.1), so `crates/vush` doesn't need a library target for it.
 - [ ] Phase 2: maintained HTTP/TLS/YAML (where applicable) dependencies and retry/pooling implementation.
 - [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership.
 - [ ] Phase 5: hard cap vs target request-rate, burst/fairness policy, retry attempt rate, scheduling tick precision, emergency signals.
