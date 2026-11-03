@@ -22,7 +22,8 @@ Deliver **Vush**, an efficient Rust HTTP smoke/load-testing CLI (`vush`) for Lin
 Cargo.toml                 # virtual workspace manifest
 rust-toolchain.toml
 .github/workflows/ci.yml
-crates/vush/src/...        # binary: CLI, config loading, reports
+crates/vush/src/...        # binary: CLI, reports
+crates/vush-config/src/... # YAML/JSON reading, defaults, file:line errors, builds the plan (from P1.2)
 crates/vush-core/src/...   # workload plan, scheduler, scenario runner
 crates/vush-http/src/...   # HTTP ProtocolExecutor
 crates/*/tests/...         # integration tests live with their crate (e.g. crates/vush/tests/cli.rs)
@@ -57,7 +58,7 @@ A root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` is required by the user's planni
 
 **Goal:** Convert declarative files into the same validated, immutable typed workload representation.
 
-**Deliverables:** Config versioning, YAML/JSON input adapters, schema/semantic validation, typed plan and `validate`/`dry-run` CLI commands, example configs.
+**Deliverables:** Schema v1 reference (`docs/config-schema.md`), typed plan in `vush-core`, `crates/vush-config` with YAML/JSON input adapters and schema/semantic validation, `validate`/`dry-run` CLI commands, example configs.
 
 **Tasks:**
 1. Design a **single schema** with explicit load modes, scenario steps, hooks, HTTP, limits and thresholds; mark unsupported features clearly.
