@@ -174,7 +174,9 @@ pub struct IfStep {
 /// A bounded loop over steps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepeatStep {
+    /// How many times the steps run, 1 or more.
     pub count: NonZeroU32,
+    /// A time limit for the whole loop.
     pub deadline: Duration,
     pub steps: Vec<Step>,
 }
