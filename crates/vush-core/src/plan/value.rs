@@ -1,4 +1,4 @@
-//! Text-form value types: durations, rates, sizes, percentages and numbers.
+//! Text-form value types: durations, rates, sizes and percentages, plus `JsonNumber`.
 
 use std::fmt;
 use std::str::FromStr;
@@ -9,17 +9,25 @@ use std::time::Duration;
 pub struct ValueError {
     /// What the position accepts, e.g. `a duration such as 500ms, 5s, 5m or 1h30m`.
     pub expected: &'static str,
-    /// The rejected text, verbatim.
+    /// The rejected text, verbatim. `Display` bounds and escapes it, because it
+    /// can hold text that followed a typo, such as credentials or a whole body.
     pub input: String,
 }
 
+/// How many characters of [`ValueError::input`] `Display` prints.
+const DISPLAY_INPUT_LIMIT: usize = 64;
+
 impl fmt::Display for ValueError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "invalid value \"{}\": expected {}",
-            self.input, self.expected
-        )
+        f.write_str("invalid value \"")?;
+        let mut chars = self.input.chars();
+        for c in chars.by_ref().take(DISPLAY_INPUT_LIMIT) {
+            write!(f, "{}", c.escape_debug())?;
+        }
+        if chars.next().is_some() {
+            f.write_str("…")?;
+        }
+        write!(f, "\": expected {}", self.expected)
     }
 }
 
@@ -216,6 +224,14 @@ impl FromStr for Ratio {
 }
 
 /// A JSON number, keeping integers exact.
+///
+/// Adapters build these the same way so equal files give equal plans: `Int`
+/// when an integer fits `i64`, `UInt` only above `i64::MAX`, `Float` for a
+/// number written with a fraction or exponent. An integer too large for `u64`
+/// is rejected, never stored as `Float`.
+///
+/// Equality is structural, for comparing plans. Comparing a response value
+/// against a `JsonNumber` must be numeric.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JsonNumber {
     Int(i64),
@@ -229,6 +245,30 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn value_error_display_is_bounded_and_escaped() {
+        let short = ValueError {
+            expected: "x",
+            input: "5".to_string(),
+        };
+        assert_eq!(short.to_string(), "invalid value \"5\": expected x");
+
+        let exact = ValueError {
+            expected: "x",
+            input: "a".repeat(64),
+        };
+        assert!(!exact.to_string().contains('…'));
+
+        let long = ValueError {
+            expected: "x",
+            input: "a\nb".repeat(1000),
+        };
+        let text = long.to_string();
+        assert!(!text.contains('\n'));
+        assert!(text.contains('…'));
+        assert!(text.chars().count() < 200);
+    }
+
+    #[test]
     fn durations_parse_to_exact_values() {
         let cases = [
             ("500ms", Duration::from_millis(500)),
@@ -239,6 +279,9 @@ mod tests {
             ("1s500ms", Duration::from_millis(1500)),
             ("1m5ms", Duration::from_millis(60_005)),
             ("0s", Duration::ZERO),
+            ("18446744073709551615ms", Duration::from_millis(u64::MAX)),
+            ("5124095576030h25m51s615ms", Duration::from_millis(u64::MAX)),
+            ("05m", Duration::from_secs(300)),
         ];
         for (text, want) in cases {
             assert_eq!(parse_duration(text), Ok(want), "{text}");
@@ -281,6 +324,7 @@ mod tests {
             ("300/m", 300, RateUnit::Minute),
             ("5/h", 5, RateUnit::Hour),
             ("0/s", 0, RateUnit::Second),
+            ("18446744073709551615/s", u64::MAX, RateUnit::Second),
         ];
         for (text, count, per) in cases {
             assert_eq!(text.parse::<Rate>(), Ok(Rate { count, per }), "{text}");
@@ -319,6 +363,8 @@ mod tests {
             ("64KiB", 65_536),
             ("1MiB", 1_048_576),
             ("1GiB", 1_073_741_824),
+            ("18446744073709551615B", u64::MAX),
+            ("17179869183GiB", 17_179_869_183 << 30),
         ];
         for (text, want) in cases {
             assert_eq!(text.parse::<ByteSize>(), Ok(ByteSize(want)), "{text}");
@@ -382,6 +428,7 @@ mod tests {
             "1 %",
             "１%",
             "99999999999%",
+            "1844674407370956%",
         ] {
             assert!(text.parse::<Ratio>().is_err(), "{text}");
         }
