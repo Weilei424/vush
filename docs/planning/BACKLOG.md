@@ -47,6 +47,8 @@
 ## Phase 1 Execution Checklist — Input model and validation
 
 > P1.1 spec: `docs/superpowers/specs/2026-11-02-phase-1-1-config-shape-and-plan-design.md` · Plan: `docs/superpowers/plans/2026-11-02-phase-1-1-config-shape-and-plan.md` (local only; `docs/superpowers/` is gitignored).
+>
+> P1.2 spec: `docs/superpowers/specs/2026-11-03-phase-1-2-yaml-json-reader-design.md` · Plan: `docs/superpowers/plans/2026-11-03-phase-1-2-yaml-json-reader.md` (local only).
 
 - [x] P1.1 Agree versioned YAML/JSON configuration shape and typed immutable workload plan (design approved 2026-11-02, finished 2026-11-03).
   - [x] Value types in `vush_core::plan`: durations, rates, sizes and percentages, parsed from text with exact-value and rejection tables (plan Task 1).
@@ -58,22 +60,33 @@
   - [x] Replace `ARCHITECTURE_NOTES.md` §5 with a pointer to the schema doc; refresh local `CLAUDE.md`/`AGENTS.md` (plan Tasks 6–7).
   - [x] All four check commands pass and `vush-core` still has no dependencies (plan Task 7).
   - [x] CI green on all four runners plus `fmt` after the user pushes (plan Task 7). Run 41595459312 on `176c882`, 2026-11-03.
-- [ ] P1.2 Parse equivalent YAML/JSON into the same plan; select maintained YAML library. Creates `crates/vush-config` (decided 2026-11-02).
-  - Numbers follow the `JsonNumber` variant rule in `value.rs`. Integers outside the range `i64::MIN` to `u64::MAX` are errors, never stored as `Float`.
-  - Duplicate map keys are errors in both formats.
-  - YAML number forms such as `010`, `0x10` and `.inf` are decided with the library.
+- [ ] P1.2 Parse equivalent YAML/JSON into the same plan, with `saphyr-parser` as the YAML library and no Serde. Creates `crates/vush-config` (decided 2026-11-02, design approved 2026-11-03).
+  - [ ] Crate scaffold, `ConfigError`, the located value tree and the reading budget (plan Task 1).
+  - [ ] One number rule for both formats, and the rule for unquoted YAML values (plan Task 2). Integers outside the range `i64::MIN` to `u64::MAX` are errors, never stored as `Float`. `010`, `0x10`, `.inf` and similar forms are errors.
+  - [ ] Strict JSON reader with locations, cross-checked against `serde_json` in tests (plan Task 3).
+  - [ ] YAML reader: aliases, merge keys, rejected forms and limits (plan Task 4). Duplicate map keys are errors in both formats.
+  - [ ] Compile `http` and `limits`, merged over the file level (plan Task 5).
+  - [ ] Compile the three load models (plan Task 6).
+  - [ ] Compile steps, requests, comparisons and conditions (plan Task 7).
+  - [ ] Compile thresholds and the whole file, add `parse` and `load`, and locate `PlanError`s (plan Task 8).
+  - [ ] Whole-crate tests: the schema example from both formats equals a hand-built plan, plus equivalence, diagnostics, limits, secrets and robustness (plan Task 9).
+  - [ ] `docs/config-schema.md` file rules, local docs and all four check commands (plan Task 10).
+  - [ ] CI green on all four runners after the user pushes (plan Task 10).
 - [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields.
-  - A nesting depth limit covering steps, `when` conditions and `json` values, enforced in `vush-config` before a draft is built.
+  - The nesting limit moved to P1.2, because the reader needs it to survive hostile files. It covers steps, `when` conditions and `json` values.
+  - Values P1.2 lets through because the plan's types can hold them: `attempts` below 2, and a fixed `rate` of zero.
+  - A threshold naming an unknown scenario.
+  - Whether an empty `status: []`, or an empty `all` or `any`, is an error.
   - An upper bound on durations.
   - `extract` names must match the variable-name pattern and avoid the reserved words (`env`, `global`, `scenario`, `vu`).
   - Scope rules include `extract` in `teardown`.
   - `${` in a request `name` is an error.
   - A `retry` on any method other than GET, HEAD, PUT, DELETE, OPTIONS and TRACE needs `allow_non_idempotent`.
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
-  - Diagnostics stay bounded and don't echo text beyond `ValueError`'s bounded span. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
+  - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
   - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
   - The README links `docs/config-schema.md` once `vush validate` exists.
-- [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. Fixtures include the `docs/config-schema.md` example so the doc can't drift. Fixtures also check the documented defaults tables against the `Default` impls and constants.
+- [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. P1.2 already checks the `docs/config-schema.md` example against a hand-built plan, so here it becomes a CLI fixture too. Fixtures also check the documented defaults tables and file limits against the `Default` impls and constants.
 
 ## Phase 2 Execution Checklist — HTTP executor
 
@@ -149,9 +162,9 @@
 ## Known architectural questions to settle when reached (not blockers to overall roadmap)
 
 - [x] Phase 0: minimal Cargo workspace/crate boundaries and actual repository conventions. Decided 2026-11-01: `crates/vush` (bin), `crates/vush-core`, `crates/vush-http`; toolchain pinned in `rust-toolchain.toml`; CI on Linux x86_64/arm64 and macOS arm64/x86_64.
-- [ ] Phase 1: exact source-location validation behavior. Schema names and provisional default limits decided 2026-11-02 (P1.1).
+- [x] Phase 1: exact source-location validation behavior. Schema names and provisional default limits decided 2026-11-02 (P1.1). Decided 2026-11-03 (P1.2): every error carries a key path and a line and column in both formats, and never quotes a value from the file.
 - [ ] Phase 2: where the protocol-neutral executor trait lives (e.g. trait in `vush-core`, implemented by `vush-http`) so crate dependencies stay acyclic. The plan compiler's home is decided: `crates/vush-config` (2026-11-02, P1.1), so `crates/vush` doesn't need a library target for it.
-- [ ] Phase 2: maintained HTTP/TLS/YAML (where applicable) dependencies and retry/pooling implementation.
+- [ ] Phase 2: maintained HTTP/TLS dependencies and retry/pooling implementation. The YAML library is decided: `saphyr-parser` (2026-11-03, P1.2).
 - [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership. Also whether `all` and `any` stop at the first decisive condition (the schema example relies on it), whether `vu.id` and `vu.iteration` start at 0 or 1, what exceeding `max_response_size` or `deadline` does, and how `exists` treats JSON `null`.
 - [ ] Phase 5: hard cap vs target request-rate, burst/fairness policy, retry attempt rate, scheduling tick precision, emergency signals.
 - [ ] Phase 6: percentile algorithm, metrics schema and exit-code precedence, default threshold behavior.
