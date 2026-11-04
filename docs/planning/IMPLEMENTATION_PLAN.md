@@ -63,7 +63,7 @@ A root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` is required by the user's planni
 
 **Tasks:**
 1. Design a **single schema** with explicit load modes, scenario steps, hooks, HTTP, limits and thresholds; mark unsupported features clearly.
-2. Implement typed deserialization, checked defaults, helpful source-aware error messages, unknown-field handling and schema-version guard.
+2. Read both formats into one located value tree, then compile it with checked defaults, helpful source-aware error messages, unknown-field handling and a schema-version guard.
 3. Validate resource limits, bounded loops, variable references, schedule incompatibilities, nonzero capacities and duration formats.
 4. Compile to immutable plan; add YAML-vs-JSON equivalent-plan tests, malformed config fixture tests and versioning docs.
 
