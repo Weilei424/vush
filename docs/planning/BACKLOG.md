@@ -48,7 +48,7 @@
 
 > P1.1 spec: `docs/superpowers/specs/2026-11-02-phase-1-1-config-shape-and-plan-design.md` · Plan: `docs/superpowers/plans/2026-11-02-phase-1-1-config-shape-and-plan.md` (local only; `docs/superpowers/` is gitignored).
 
-- [~] P1.1 Agree versioned YAML/JSON configuration shape and typed immutable workload plan (design approved 2026-11-02).
+- [x] P1.1 Agree versioned YAML/JSON configuration shape and typed immutable workload plan (design approved 2026-11-02, finished 2026-11-03).
   - [x] Value types in `vush_core::plan`: durations, rates, sizes and percentages, parsed from text with exact-value and rejection tables (plan Task 1).
   - [x] `Template` and `VarRef`: `${...}` parsing with `env`, `global`, `scenario`, `vu` scopes and `$${` escaping (plan Task 2).
   - [x] `JsonPath`: the `$.a.b[0].c` subset (plan Task 3).
@@ -57,7 +57,7 @@
   - [x] `docs/config-schema.md`: schema v1 reference with one complete YAML + JSON example, built through the public API in a test (plan Task 6).
   - [x] Replace `ARCHITECTURE_NOTES.md` §5 with a pointer to the schema doc; refresh local `CLAUDE.md`/`AGENTS.md` (plan Tasks 6–7).
   - [x] All four check commands pass and `vush-core` still has no dependencies (plan Task 7).
-  - [ ] CI green on all four runners plus `fmt` after the user pushes (plan Task 7).
+  - [x] CI green on all four runners plus `fmt` after the user pushes (plan Task 7). Run 41595459312 on `176c882`, 2026-11-03.
 - [ ] P1.2 Parse equivalent YAML/JSON into the same plan; select maintained YAML library. Creates `crates/vush-config` (decided 2026-11-02).
   - Numbers follow the `JsonNumber` variant rule in `value.rs`. Integers outside the range `i64::MIN` to `u64::MAX` are errors, never stored as `Float`.
   - Duplicate map keys are errors in both formats.
