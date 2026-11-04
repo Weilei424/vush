@@ -117,7 +117,9 @@ docs/planning/
 
 The workspace manifest, the three crates, the toolchain file and the CI workflow exist as of Phase 0. `vush-config` arrives in P1.2. `vush-metrics`, `examples/` and the benchmark directory are still proposals; confirm against the actual tree before planning a phase. Root agent-instruction files (`CLAUDE.md`, `AGENTS.md`) are local-only and gitignored.
 
-Potential dependencies to assess per phase: Tokio for async runtime/tasks/time; a mature async HTTP stack (e.g., reqwest atop hyper) with TLS/HTTP2; Serde for typed JSON/config; an actively maintained YAML parser; clap for CLI; bounded histograms or equivalent for quantiles. Evaluate maintenance, version, licensing, and memory/throughput before committing. Avoid version pins in this baseline.
+Potential dependencies to assess per phase: Tokio for async runtime/tasks/time; a mature async HTTP stack (e.g., reqwest atop hyper) with TLS/HTTP2; Serde for JSON report output; clap for CLI; bounded histograms or equivalent for quantiles. Evaluate maintenance, version, licensing, and memory/throughput before committing. Avoid version pins in this baseline.
+
+Config reading is decided (P1.2): `vush-config` uses `saphyr-parser` events for YAML and its own strict JSON reader, and both build one tree with a location on every value. There is no Serde on this path, because typed deserializers turned big integers into floats and couldn't locate later errors in JSON.
 
 ## 4. Runtime semantics / contracts
 
@@ -211,8 +213,8 @@ Schema v1, the YAML/JSON test file format, is defined in [`docs/config-schema.md
 | Decision still open | Default working assumption | Resolve by |
 |---|---|---|
 | Exact crate count and filenames | **Decided:** `vush` (bin), `vush-core`, `vush-http` under `crates/`, plus `vush-config` from P1.2 | Phase 0, P1.1 ✓ |
-| YAML parser, HTTP library, histogram implementation | Evaluate maintained libraries by feature/performance/security | Phases 1, 2, 6 |
-| YAML/JSON schema and error location reporting | Schema v1 **decided** (scenario-owned load, tagged steps); error locations still open | P1.1 ✓, P1.2–P1.4 |
+| YAML parser, HTTP library, histogram implementation | YAML parser **decided**: `saphyr-parser`. Evaluate the others by feature/performance/security | P1.2 ✓, Phases 2, 6 |
+| YAML/JSON schema and error location reporting | **Decided:** schema v1 (scenario-owned load, tagged steps); every error has a key path and a line and column in both formats, and never quotes a value from the file. P1.4 renders them | P1.1 ✓, P1.2 ✓ |
 | HTTP connection pool isolation algorithm | Shared by default, scenario/VU variants selectable | Phase 2/4 |
 | Setup failure policies and hook data lifetime | Abort global / skip failed scenario / retire failed VU | Phase 3/4 |
 | Virtual-user reuse for open arrivals | Persistent bounded reusable VU pool; one iteration per VU | Phase 4/5 |
