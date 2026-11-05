@@ -106,23 +106,24 @@ impl<'a> MapReader<'a> {
         found
     }
 
-    /// The first present key wins. Each later present key is a conflict.
+    /// The key written first in the file wins. Each later present key is a conflict.
     pub(super) fn at_most_one(
         &mut self,
         keys: &[&'static str],
         errors: &mut Errors,
     ) -> Option<(&'static str, &'a Node)> {
         let mut winner: Option<(&'static str, &'a Node)> = None;
-        for &key in keys {
-            let Some(at) = self.position(key) else {
+        for at in 0..self.entries.len() {
+            let entry = &self.entries[at];
+            let Some(&key) = keys.iter().find(|&&k| k == entry.key) else {
                 continue;
             };
             self.used[at] = true;
             match winner {
-                None => winner = Some((key, &self.entries[at].value)),
+                None => winner = Some((key, &entry.value)),
                 Some((first, _)) => errors.push(
                     &child(self.path, key),
-                    Some(self.entries[at].key_location),
+                    Some(entry.key_location),
                     format!("`{first}` and `{key}` can't be used together"),
                 ),
             }
@@ -350,6 +351,30 @@ mod tests {
             errors[0]
                 .message
                 .contains("`path` and `url` can't be used together")
+        );
+    }
+
+    #[test]
+    fn conflicts_follow_document_order() {
+        let (found, errors) = run("{url: b, path: a}", |node, errors| {
+            let mut map = MapReader::new(node, "r", errors).unwrap();
+            map.exactly_one(&["path", "url"], errors)
+                .map(|(key, _)| key)
+        });
+        assert_eq!(found, Some("url"));
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path, "r.path");
+        assert_eq!(
+            errors[0].location,
+            Some(Location {
+                line: 1,
+                column: 10
+            })
+        );
+        assert!(
+            errors[0]
+                .message
+                .contains("`url` and `path` can't be used together")
         );
     }
 
