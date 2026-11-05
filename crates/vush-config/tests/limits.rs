@@ -53,8 +53,10 @@ fn json_steps(n: usize) -> String {
     format!(r#"{{"request": {{"method": "GET", "path": "/", "json": {body}}}}}"#)
 }
 
-/// Each shape with the deepest allowed `n` and one more.
-fn shapes() -> [(&'static str, fn(usize) -> String, usize); 4] {
+/// A shape's name, its builder, and the deepest `n` that is allowed.
+type Shape = (&'static str, fn(usize) -> String, usize);
+
+fn shapes() -> [Shape; 4] {
     [
         ("repeat", repeat_steps, 41),
         ("if", if_steps, 41),
