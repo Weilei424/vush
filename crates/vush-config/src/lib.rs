@@ -8,6 +8,7 @@ mod error;
 mod json;
 mod node;
 mod scalar;
+mod yaml;
 
 pub use error::{ConfigError, Location};
 
