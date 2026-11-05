@@ -75,6 +75,10 @@ impl<'a> MapReader<'a> {
         }
     }
 
+    pub(super) fn path(&self) -> &'a str {
+        self.path
+    }
+
     fn position(&self, key: &str) -> Option<usize> {
         self.entries.iter().position(|e| e.key == key)
     }
