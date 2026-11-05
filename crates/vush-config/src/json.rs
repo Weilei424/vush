@@ -4,7 +4,7 @@
 
 use crate::MAX_DEPTH;
 use crate::error::{Errors, Location};
-use crate::node::{Budget, Entry, Node, NodeKind, dedupe_keys};
+use crate::node::{Budget, EMPTY_FILE, Entry, Node, NodeKind, dedupe_keys, depth_message};
 use crate::scalar::parse_number;
 
 /// Reads `text` into a tree. `None` means a fatal problem was recorded.
@@ -23,7 +23,7 @@ pub(crate) fn read(text: &str, errors: &mut Errors) -> Option<Node> {
     }
     reader.skip_whitespace();
     if reader.peek().is_none() {
-        reader.errors.push("", None, "the file is empty");
+        reader.errors.push("", None, EMPTY_FILE);
         return None;
     }
     let node = reader.value(1).ok()?;
@@ -164,10 +164,7 @@ impl Reader<'_> {
 
     fn enter(&mut self, level: usize, at: Location) -> Result<(), Fatal> {
         if level > MAX_DEPTH {
-            return self.fatal_at(
-                at,
-                &format!("nesting is deeper than the limit of {MAX_DEPTH} levels"),
-            );
+            return self.fatal_at(at, &depth_message());
         }
         self.charge(at, 1, 0)
     }
