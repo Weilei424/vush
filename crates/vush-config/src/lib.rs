@@ -4,6 +4,7 @@
 
 #![allow(dead_code)] // Removed in Task 8, once parse() uses everything.
 
+mod compile;
 mod error;
 mod json;
 mod node;
