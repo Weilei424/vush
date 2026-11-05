@@ -6,6 +6,7 @@
 
 mod error;
 mod node;
+mod scalar;
 
 pub use error::{ConfigError, Location};
 
