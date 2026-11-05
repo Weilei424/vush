@@ -62,7 +62,7 @@
   - [x] CI green on all four runners plus `fmt` after the user pushes (plan Task 7). Run 41595459312 on `176c882`, 2026-11-03.
 - [ ] P1.2 Parse equivalent YAML/JSON into the same plan, with `saphyr-parser` as the YAML library and no Serde. Creates `crates/vush-config` (decided 2026-11-02, design approved 2026-11-03).
   - [x] Crate scaffold, `ConfigError`, the located value tree and the reading budget (plan Task 1).
-  - [ ] One number rule for both formats, and the rule for unquoted YAML values (plan Task 2). Integers outside the range `i64::MIN` to `u64::MAX` are errors, never stored as `Float`. `010`, `0x10`, `.inf` and similar forms are errors.
+  - [x] One number rule for both formats, and the rule for unquoted YAML values (plan Task 2). Integers outside the range `i64::MIN` to `u64::MAX` are errors, never stored as `Float`. `010`, `0x10`, `.inf` and similar forms are errors.
   - [ ] Strict JSON reader with locations, cross-checked against `serde_json` in tests (plan Task 3).
   - [ ] YAML reader: aliases, merge keys, rejected forms and limits (plan Task 4). Duplicate map keys are errors in both formats.
   - [ ] Compile `http` and `limits`, merged over the file level (plan Task 5).
