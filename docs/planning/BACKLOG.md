@@ -69,7 +69,7 @@
   - [x] Compile the three load models (plan Task 6).
   - [x] Compile steps, requests, comparisons and conditions (plan Task 7).
   - [x] Compile thresholds and the whole file, add `parse` and `load`, and locate `PlanError`s (plan Task 8).
-  - [ ] Whole-crate tests: the schema example from both formats equals a hand-built plan, plus equivalence, diagnostics, limits, secrets and robustness (plan Task 9).
+  - [x] Whole-crate tests: the schema example from both formats equals a hand-built plan, plus equivalence, diagnostics, limits, secrets and robustness (plan Task 9).
   - [ ] `docs/config-schema.md` file rules, local docs and all four check commands (plan Task 10).
   - [ ] CI green on all four runners after the user pushes (plan Task 10).
 - [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields.
