@@ -1,5 +1,6 @@
 //! Turns the located value tree into a plan draft.
 
+mod load;
 mod reader;
 mod settings;
 
