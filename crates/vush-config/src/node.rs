@@ -5,7 +5,15 @@ use std::collections::HashMap;
 use vush_core::plan::JsonNumber;
 
 use crate::error::{Errors, Location, display_key};
-use crate::{MAX_TEXT_BYTES, MAX_VALUES};
+use crate::{MAX_DEPTH, MAX_TEXT_BYTES, MAX_VALUES};
+
+/// Message for a file with nothing in it. Both readers use it.
+pub(crate) const EMPTY_FILE: &str = "the file is empty";
+
+/// Message for nesting past `MAX_DEPTH`. Both readers use it.
+pub(crate) fn depth_message() -> String {
+    format!("nesting is deeper than the limit of {MAX_DEPTH} levels")
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Node {
