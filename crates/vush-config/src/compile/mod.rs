@@ -4,6 +4,237 @@ mod load;
 mod reader;
 mod settings;
 mod step;
+mod threshold;
+
+use vush_core::plan::{
+    HttpSettings, JsonNumber, PlanDraft, ResourceLimits, Scenario, StatePolicy, Step, Template,
+};
+
+use self::reader::{MapReader, child, item, list, one_of, parsed, string};
+use crate::error::{Errors, Location};
+use crate::node::{Node, NodeKind};
+
+/// Builds the draft. Returns `None` only when something was recorded.
+/// Stops early only for a bad `schema_version`, because the rest of the file
+/// may then follow a different format.
+pub(crate) fn compile(root: &Node, errors: &mut Errors) -> Option<PlanDraft> {
+    let mut map = MapReader::new(root, "", errors)?;
+    let version = map.required("schema_version", errors)?;
+    match &version.kind {
+        NodeKind::Invalid => return None,
+        NodeKind::Number(JsonNumber::Int(1) | JsonNumber::UInt(1)) => {}
+        _ => {
+            errors.push(
+                "schema_version",
+                Some(version.location),
+                "schema_version must be 1",
+            );
+            return None;
+        }
+    }
+
+    let mut ok = true;
+    let name = map
+        .required("name", errors)
+        .and_then(|n| string(n, "name", errors))
+        .map(str::to_owned);
+    ok &= name.is_some();
+
+    let base_url = match map.optional("base_url") {
+        Some(n) => {
+            let url = parsed(n, "base_url", str::parse::<Template>, errors);
+            ok &= url.is_some();
+            url
+        }
+        None => None,
+    };
+
+    let http = match map.optional("http") {
+        Some(n) => settings::http(n, "http", &HttpSettings::default(), errors),
+        None => HttpSettings::default(),
+    };
+    let (limits, max_request_rate) = match map.optional("limits") {
+        Some(n) => settings::limits(n, "limits", &ResourceLimits::default(), errors),
+        None => (ResourceLimits::default(), None),
+    };
+
+    let setup = hook(&mut map, "setup", http.timeout, errors, &mut ok);
+    let teardown = hook(&mut map, "teardown", http.timeout, errors, &mut ok);
+
+    let thresholds = match map.optional("thresholds") {
+        Some(n) => {
+            let list = threshold::thresholds(n, "thresholds", errors);
+            ok &= list.is_some();
+            list.unwrap_or_default()
+        }
+        None => Vec::new(),
+    };
+
+    let mut scenarios = Vec::new();
+    if let Some(n) = map.required("scenarios", errors) {
+        match list(n, "scenarios", errors) {
+            Some(items) => {
+                for (index, element) in items.iter().enumerate() {
+                    match scenario(element, &item("scenarios", index), &http, &limits, errors) {
+                        Some(built) => scenarios.push(built),
+                        None => ok = false,
+                    }
+                }
+            }
+            None => ok = false,
+        }
+    } else {
+        ok = false;
+    }
+    map.finish(errors);
+
+    if !ok {
+        return None;
+    }
+    Some(PlanDraft {
+        name: name?,
+        base_url,
+        http,
+        limits,
+        max_request_rate,
+        setup,
+        teardown,
+        thresholds,
+        scenarios,
+    })
+}
+
+/// Reads an optional step list, empty when absent.
+fn hook(
+    map: &mut MapReader<'_>,
+    key: &str,
+    timeout: std::time::Duration,
+    errors: &mut Errors,
+    ok: &mut bool,
+) -> Vec<Step> {
+    let Some(n) = map.optional(key) else {
+        return Vec::new();
+    };
+    let path = child(map.path(), key);
+    match step::steps(n, &path, timeout, errors) {
+        Some(steps) => steps,
+        None => {
+            *ok = false;
+            Vec::new()
+        }
+    }
+}
+
+fn scenario(
+    node: &Node,
+    path: &str,
+    file_http: &HttpSettings,
+    file_limits: &ResourceLimits,
+    errors: &mut Errors,
+) -> Option<Scenario> {
+    let mut map = MapReader::new(node, path, errors)?;
+    let mut ok = true;
+
+    let name = map
+        .required("name", errors)
+        .and_then(|n| string(n, &child(path, "name"), errors))
+        .map(str::to_owned);
+    ok &= name.is_some();
+
+    let load = map
+        .required("load", errors)
+        .and_then(|n| load::load(n, &child(path, "load"), errors));
+    ok &= load.is_some();
+
+    let http = match map.optional("http") {
+        Some(n) => settings::http(n, &child(path, "http"), file_http, errors),
+        None => file_http.clone(),
+    };
+    let (limits, max_request_rate) = match map.optional("limits") {
+        Some(n) => settings::limits(n, &child(path, "limits"), file_limits, errors),
+        None => (file_limits.clone(), None),
+    };
+
+    let state = match map.optional("state") {
+        Some(n) => {
+            let choices = [
+                ("persist", StatePolicy::Persist),
+                ("reset_each_iteration", StatePolicy::ResetEachIteration),
+            ];
+            let state = one_of(n, &child(path, "state"), &choices, errors);
+            ok &= state.is_some();
+            state.unwrap_or(StatePolicy::Persist)
+        }
+        None => StatePolicy::Persist,
+    };
+
+    let timeout = http.timeout;
+    let setup = hook(&mut map, "setup", timeout, errors, &mut ok);
+    let teardown = hook(&mut map, "teardown", timeout, errors, &mut ok);
+    let vu_setup = hook(&mut map, "vu_setup", timeout, errors, &mut ok);
+    let vu_teardown = hook(&mut map, "vu_teardown", timeout, errors, &mut ok);
+
+    let steps = map
+        .required("steps", errors)
+        .and_then(|n| step::steps(n, &child(path, "steps"), timeout, errors));
+    ok &= steps.is_some();
+    map.finish(errors);
+
+    if !ok {
+        return None;
+    }
+    Some(Scenario {
+        name: name?,
+        load: load?,
+        http,
+        limits,
+        max_request_rate,
+        state,
+        setup,
+        teardown,
+        vu_setup,
+        vu_teardown,
+        steps: steps?,
+    })
+}
+
+/// Finds the value a plan error path points at, or the deepest one reached.
+/// Paths look like `scenarios[1].steps[0].repeat.steps`.
+pub(crate) fn locate(root: &Node, path: &str) -> Location {
+    let mut at = root;
+    if path.is_empty() {
+        return at.location;
+    }
+    for segment in path.split('.') {
+        let (key, mut indexes) = match segment.find('[') {
+            Some(i) => segment.split_at(i),
+            None => (segment, ""),
+        };
+        if !key.is_empty() {
+            let NodeKind::Map(entries) = &at.kind else {
+                return at.location;
+            };
+            match entries.iter().find(|e| e.key == key) {
+                Some(entry) => at = &entry.value,
+                None => return at.location,
+            }
+        }
+        while let Some(rest) = indexes.strip_prefix('[') {
+            let Some((digits, after)) = rest.split_once(']') else {
+                return at.location;
+            };
+            let NodeKind::List(items) = &at.kind else {
+                return at.location;
+            };
+            match digits.parse::<usize>().ok().and_then(|n| items.get(n)) {
+                Some(next) => at = next,
+                None => return at.location,
+            }
+            indexes = after;
+        }
+    }
+    at.location
+}
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -48,5 +279,277 @@ pub(crate) mod testing {
             "{yaml}: {:?} lacks {fragment:?}",
             errors[0].message
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::{NonZeroU32, NonZeroU64};
+    use std::time::Duration;
+
+    use vush_core::plan::{
+        ClosedStop, ClosedVusLoad, HttpVersion, LoadModel, Rate, parse_duration,
+    };
+
+    use super::testing::run;
+    use super::*;
+    use crate::error::ConfigError;
+
+    const MINIMAL: &str = "\
+schema_version: 1
+name: n
+scenarios:
+  - name: s
+    load: {model: closed_vus, vus: 1, duration: 1s}
+    steps: [{wait: 1s}]
+";
+
+    fn d(text: &str) -> Duration {
+        parse_duration(text).unwrap()
+    }
+
+    fn rate(text: &str) -> Rate {
+        text.parse().unwrap()
+    }
+
+    fn build(yaml: &str) -> (Option<PlanDraft>, Vec<ConfigError>) {
+        run(yaml, compile)
+    }
+
+    fn ok(yaml: &str) -> PlanDraft {
+        let (draft, errors) = build(yaml);
+        assert!(errors.is_empty(), "{yaml}: {errors:?}");
+        draft.expect("no draft")
+    }
+
+    fn fails(yaml: &str, path: &str, fragment: &str) {
+        let (_, errors) = build(yaml);
+        assert_eq!(errors.len(), 1, "{yaml}: {errors:?}");
+        assert_eq!(errors[0].path, path, "{yaml}");
+        assert!(errors[0].message.contains(fragment), "{yaml}: {errors:?}");
+    }
+
+    /// MINIMAL with extra top-level text added after the header.
+    fn with_top(extra: &str) -> String {
+        format!("{extra}\n{MINIMAL}")
+    }
+
+    fn timeouts(steps: &[Step]) -> Vec<Duration> {
+        steps
+            .iter()
+            .map(|s| match s {
+                Step::Request(r) => r.timeout,
+                _ => panic!("not a request"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_minimal_file_takes_every_default() {
+        let want = PlanDraft {
+            name: "n".to_owned(),
+            base_url: None,
+            http: HttpSettings::default(),
+            limits: ResourceLimits::default(),
+            max_request_rate: None,
+            setup: vec![],
+            teardown: vec![],
+            thresholds: vec![],
+            scenarios: vec![Scenario {
+                name: "s".to_owned(),
+                load: LoadModel::ClosedVus(ClosedVusLoad::Fixed {
+                    vus: NonZeroU32::new(1).unwrap(),
+                    stop: ClosedStop::Duration(d("1s")),
+                }),
+                http: HttpSettings::default(),
+                limits: ResourceLimits::default(),
+                max_request_rate: None,
+                state: StatePolicy::Persist,
+                setup: vec![],
+                teardown: vec![],
+                vu_setup: vec![],
+                vu_teardown: vec![],
+                steps: vec![Step::Wait(d("1s"))],
+            }],
+        };
+        assert_eq!(ok(MINIMAL), want);
+        let _ = NonZeroU64::new(1);
+    }
+
+    #[test]
+    fn schema_version_is_checked_first() {
+        for value in ["2", "\"1\"", "1.0"] {
+            fails(
+                &format!("schema_version: {value}\nnmae: x\n"),
+                "schema_version",
+                "schema_version must be 1",
+            );
+        }
+        fails("nmae: x\n", "", "missing required key `schema_version`");
+    }
+
+    #[test]
+    fn the_top_level_must_be_a_map() {
+        fails("[1]", "", "expected a map, found a list");
+    }
+
+    #[test]
+    fn empty_block_is_an_error_not_absent() {
+        for key in ["http", "limits", "setup", "teardown", "thresholds"] {
+            fails(&with_top(&format!("{key}:")), key, "found null");
+        }
+    }
+
+    #[test]
+    fn timeouts_follow_the_http_in_effect() {
+        let req = "{request: {method: GET, url: http://x}}";
+        let yaml = format!(
+            "\
+schema_version: 1
+name: n
+http: {{timeout: 10s}}
+setup: [{req}]
+teardown: [{req}]
+scenarios:
+  - name: s
+    http: {{timeout: 2s}}
+    load: {{model: closed_vus, vus: 1, duration: 1s}}
+    setup: [{req}]
+    teardown: [{req}]
+    vu_setup: [{req}]
+    vu_teardown: [{req}]
+    steps: [{req}]
+  - name: t
+    load: {{model: closed_vus, vus: 1, duration: 1s}}
+    steps: [{req}]
+"
+        );
+        let draft = ok(&yaml);
+        assert_eq!(timeouts(&draft.setup), [d("10s")]);
+        assert_eq!(timeouts(&draft.teardown), [d("10s")]);
+        let s = &draft.scenarios[0];
+        for steps in [&s.setup, &s.teardown, &s.vu_setup, &s.vu_teardown, &s.steps] {
+            assert_eq!(timeouts(steps), [d("2s")]);
+        }
+        assert_eq!(timeouts(&draft.scenarios[1].steps), [d("10s")]);
+    }
+
+    #[test]
+    fn scenario_http_merges_over_the_file_level() {
+        let yaml = "\
+schema_version: 1
+name: n
+http: {version: http2, tls: {ca_file: a.pem}}
+scenarios:
+  - name: s
+    http: {tls: {insecure: true}}
+    load: {model: closed_vus, vus: 1, duration: 1s}
+    steps: [{wait: 1s}]
+";
+        let http = &ok(yaml).scenarios[0].http;
+        assert_eq!(http.version, HttpVersion::Http2);
+        assert_eq!(http.tls.ca_file.as_deref(), Some("a.pem"));
+        assert!(http.tls.insecure);
+    }
+
+    #[test]
+    fn limits_inherit_but_the_rate_budget_does_not() {
+        let yaml = "\
+schema_version: 1
+name: n
+limits: {max_request_rate: 500/s, max_variables: 128}
+scenarios:
+  - name: s
+    limits: {max_cookies: 32}
+    load: {model: closed_vus, vus: 1, duration: 1s}
+    steps: [{wait: 1s}]
+  - name: t
+    limits: {max_request_rate: 100/s}
+    load: {model: closed_vus, vus: 1, duration: 1s}
+    steps: [{wait: 1s}]
+";
+        let draft = ok(yaml);
+        assert_eq!(draft.max_request_rate, Some(rate("500/s")));
+        let s = &draft.scenarios[0];
+        assert_eq!(s.limits.max_variables, 128);
+        assert_eq!(s.limits.max_cookies, 32);
+        assert_eq!(s.max_request_rate, None);
+        assert_eq!(draft.scenarios[1].max_request_rate, Some(rate("100/s")));
+    }
+
+    #[test]
+    fn state_and_base_url_map_through() {
+        let yaml = MINIMAL.replace("    steps", "    state: reset_each_iteration\n    steps");
+        assert_eq!(
+            ok(&yaml).scenarios[0].state,
+            StatePolicy::ResetEachIteration
+        );
+        let bad = MINIMAL.replace("    steps", "    state: x\n    steps");
+        fails(
+            &bad,
+            "scenarios[0].state",
+            "expected one of persist or reset_each_iteration",
+        );
+        let draft = ok(&with_top("base_url: \"${env.B}\""));
+        assert_eq!(
+            draft.base_url,
+            Some("${env.B}".parse::<Template>().unwrap())
+        );
+        fails(
+            &with_top("base_url: \"${\""),
+            "base_url",
+            "expected a closing }",
+        );
+    }
+
+    #[test]
+    fn every_missing_required_key_is_reported() {
+        let (_, errors) = build("schema_version: 1\n");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|e| e.path.is_empty()));
+        assert!(errors.iter().any(|e| e.message.contains("`name`")));
+        assert!(errors.iter().any(|e| e.message.contains("`scenarios`")));
+
+        let yaml = "schema_version: 1\nname: n\nscenarios: [{}]\n";
+        let (_, errors) = build(yaml);
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors.iter().all(|e| e.path == "scenarios[0]"));
+        for key in ["name", "load", "steps"] {
+            let want = format!("missing required key `{key}`");
+            assert!(errors.iter().any(|e| e.message.contains(&want)), "{key}");
+        }
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_at_each_level() {
+        fails(&with_top("x: 1"), "x", "unknown key `x`");
+        let yaml = MINIMAL.replace("    steps", "    x: 1\n    steps");
+        fails(&yaml, "scenarios[0].x", "unknown key `x`");
+    }
+
+    #[test]
+    fn empty_lists_pass_through_compile() {
+        let (draft, errors) = build("schema_version: 1\nname: n\nscenarios: []\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(draft.is_some());
+    }
+
+    #[test]
+    fn locate_follows_the_path_and_falls_back() {
+        let root = super::testing::node("{a: {b: [1]}}");
+        let a_value = match &root.kind {
+            crate::node::NodeKind::Map(entries) => entries[0].value.location,
+            _ => panic!("not a map"),
+        };
+        assert_eq!(
+            locate(&root, "a.b[0]"),
+            Location {
+                line: 1,
+                column: 10
+            }
+        );
+        assert_eq!(locate(&root, "a.x.y"), a_value);
+        assert_eq!(locate(&root, "a.b[5]"), Location { line: 1, column: 9 });
+        assert_eq!(locate(&root, ""), root.location);
     }
 }
