@@ -3,6 +3,7 @@
 mod load;
 mod reader;
 mod settings;
+mod step;
 
 #[cfg(test)]
 pub(crate) mod testing {
