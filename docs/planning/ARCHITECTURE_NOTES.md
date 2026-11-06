@@ -1,6 +1,6 @@
 # Architecture Notes — Vush
 
-> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI), the P1.1 plan types in `vush-core` and the schema reference (`docs/config-schema.md`) exist so far. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
+> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI), the P1.1 plan types in `vush-core`, the P1.2 `vush-config` crate (which reads YAML and JSON test files into the plan) and the schema reference (`docs/config-schema.md`) exist so far. No CLI command reads a test file until `vush validate` in P1.4. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
 >
 > **Project name:** **Vush** (confirmed 2026-11-01). **CLI binary:** `vush` (e.g., `vush run test.yaml`). Repository: `https://github.com/Weilei424/vush`. Cargo packages: `vush`, `vush-core`, `vush-http` (decided in Phase 0), plus `vush-config` (decided in P1.1, created in P1.2). Final command flags remain to be determined during the relevant phase. This document is canonical for architecture decisions; `IMPLEMENTATION_PLAN.md` owns phase scope and `BACKLOG.md` owns execution status.
 
@@ -115,7 +115,7 @@ docs/planning/
   BACKLOG.md
 ```
 
-The workspace manifest, the three crates, the toolchain file and the CI workflow exist as of Phase 0. `vush-config` arrives in P1.2. `vush-metrics`, `examples/` and the benchmark directory are still proposals; confirm against the actual tree before planning a phase. Root agent-instruction files (`CLAUDE.md`, `AGENTS.md`) are local-only and gitignored.
+The workspace manifest, the three Phase 0 crates, the toolchain file and the CI workflow exist as of Phase 0, and `vush-config` exists as of P1.2. `vush-metrics`, `examples/` and the benchmark directory are still proposals; confirm against the actual tree before planning a phase. Root agent-instruction files (`CLAUDE.md`, `AGENTS.md`) are local-only and gitignored.
 
 Potential dependencies to assess per phase: Tokio for async runtime/tasks/time; a mature async HTTP stack (e.g., reqwest atop hyper) with TLS/HTTP2; Serde for JSON report output; clap for CLI; bounded histograms or equivalent for quantiles. Evaluate maintenance, version, licensing, and memory/throughput before committing. Avoid version pins in this baseline.
 
