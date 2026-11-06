@@ -201,3 +201,16 @@ scenarios:
         "{errors:?}"
     );
 }
+
+#[test]
+fn colon_typos_in_unquoted_keys_never_reach_an_error() {
+    for fields in [
+        "method: GET, path: /, headers: {Authorization:Bearer @}",
+        "method: GET, path: /, query: {api_key:@}",
+        "method: GET, path: /, json: {password:@}",
+        "method: GET, path: /, form: {token:@}",
+    ] {
+        let text = document("", "", "", &request(fields));
+        assert_never_quoted(&text, Format::Yaml);
+    }
+}
