@@ -312,7 +312,7 @@ impl<'a> Reader<'a> {
                     if style == ScalarStyle::Plain && text.contains(':') {
                         // Such a key usually swallowed a value, so it is dropped unseen.
                         self.problem(key_at, COLON_KEY_MESSAGE);
-                    } else if style == ScalarStyle::Plain && text == "<<" {
+                    } else if style == ScalarStyle::Plain && tag.is_none() && text == "<<" {
                         match &merge {
                             Some(first) => {
                                 let line = first.key_location.line;
@@ -587,6 +587,16 @@ mod tests {
                 vec![(4, 3, "duplicate key `<<`, first used on line 3")],
             ),
             ("m:\n  <<: !!map {a: 1}\n", "{m:{}}", vec![(2, 7, tags)]),
+            (
+                "m:\n  !!str <<: 5\n  a: 1\n",
+                "{m:{<<:5,a:1}}",
+                vec![(2, 3, tags)],
+            ),
+            (
+                "x: &x {k: 1}\nm: {!!str <<: *x, a: 1}\n",
+                "{x:{k:1},m:{<<:{k:1},a:1}}",
+                vec![(2, 5, tags)],
+            ),
         ] {
             let (node, errors) = read_all(text);
             assert_eq!(node.expect(text).shape(), want, "{text:?}");
