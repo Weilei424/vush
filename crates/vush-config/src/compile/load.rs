@@ -437,6 +437,41 @@ mod tests {
                 "`iterations` can't be used with `stages`",
             ),
             (
+                "{model: closed_vus, vus: 1, stages: []}",
+                "load.vus",
+                "`vus` can't be used with `stages`",
+            ),
+            (
+                "{model: closed_vus, duration: 1s, stages: []}",
+                "load.duration",
+                "`duration` can't be used with `stages`",
+            ),
+            (
+                "{model: closed_vus, iterations: 1, stages: []}",
+                "load.iterations",
+                "`iterations` can't be used with `stages`",
+            ),
+            (
+                "{model: iteration_rate, max_vus: 1, rate: 1/s, stages: []}",
+                "load.rate",
+                "`rate` can't be used with `stages`",
+            ),
+            (
+                "{model: iteration_rate, max_vus: 1, duration: 1s, stages: []}",
+                "load.duration",
+                "`duration` can't be used with `stages`",
+            ),
+            (
+                "{model: request_rate, vus: 1, rate: 1/s, stages: []}",
+                "load.rate",
+                "`rate` can't be used with `stages`",
+            ),
+            (
+                "{model: request_rate, vus: 1, duration: 1s, stages: []}",
+                "load.duration",
+                "`duration` can't be used with `stages`",
+            ),
+            (
                 "{model: closed_vus, start: x, stages: []}",
                 "load.start",
                 U32_0,
