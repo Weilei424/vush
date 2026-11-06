@@ -1,6 +1,6 @@
 # Vush test file reference (schema v1)
 
-> **Status:** this page defines the test file format, but nothing can read a test file yet. `vush validate` arrives in P1.4, the fourth step of Phase 1, and it will accept every key described here, including keys that take no effect until a later phase. The "Runs" columns show which phase makes each area take effect. Phase numbers refer to the roadmap in [`planning/IMPLEMENTATION_PLAN.md`](planning/IMPLEMENTATION_PLAN.md). Until 1.0 the schema may change without notice (see [Versioning](#versioning)).
+> **Status:** this page defines the test file format. The `vush-config` library reads YAML and JSON test files into a plan, but the `vush` command can't read one yet: `vush validate` arrives in P1.4, the fourth step of Phase 1, and it will accept every key described here, including keys that take no effect until a later phase. Some rules stated here, such as `attempts` being 2 or more, are checked from P1.3. The "Runs" columns show which phase makes each area take effect. Phase numbers refer to the roadmap in [`planning/IMPLEMENTATION_PLAN.md`](planning/IMPLEMENTATION_PLAN.md). Until 1.0 the schema may change without notice (see [Versioning](#versioning)).
 
 A Vush test is declared in a YAML or JSON file. The two formats use the same keys and the same structure, and a given test means the same thing in either. This page shows tables and YAML snippets, and ends with a [complete example](#complete-example) in both formats.
 
