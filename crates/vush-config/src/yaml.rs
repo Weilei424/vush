@@ -1,6 +1,7 @@
 //! A YAML reader built on `saphyr-parser` events. It produces the same located
 //! tree as the JSON reader, resolves anchors, aliases and merge keys, and never
-//! copies text from the file into an error message.
+//! copies a value from the file into an error message. Keys may appear in
+//! messages, escaped and cut to 64 characters.
 
 use std::collections::{HashMap, HashSet};
 
@@ -12,6 +13,7 @@ use crate::node::{Budget, EMPTY_FILE, Entry, Node, NodeKind, dedupe_keys, depth_
 use crate::scalar::{AMBIGUOUS_NUMBER, Plain, classify_plain};
 
 const TAG_MESSAGE: &str = "YAML tags aren't supported";
+const COLON_KEY_MESSAGE: &str = "an unquoted key can't contain \":\"; put a space after the \":\" if a value follows, or quote the key";
 const KEY_MESSAGE: &str = "keys must be strings";
 const MERGE_MESSAGE: &str = "`<<` needs a map or a list of maps";
 const SELF_ALIAS_MESSAGE: &str = "an alias can't refer to the value that contains it";
@@ -307,7 +309,10 @@ impl<'a> Reader<'a> {
                     self.register(key_anchor, &key_node, key_at)?;
                     let (value_event, value_at) = self.next()?;
                     let value = self.node(value_event, value_at, level + 1)?;
-                    if style == ScalarStyle::Plain && text == "<<" {
+                    if style == ScalarStyle::Plain && text.contains(':') {
+                        // Such a key usually swallowed a value, so it is dropped unseen.
+                        self.problem(key_at, COLON_KEY_MESSAGE);
+                    } else if style == ScalarStyle::Plain && text == "<<" {
                         match &merge {
                             Some(first) => {
                                 let line = first.key_location.line;
@@ -459,6 +464,10 @@ mod tests {
                 "a: &x {b: 1, c: [2]}\nd: *x\ne: &y 5\nf: *y\n",
                 "{a:{b:1,c:[2]},d:{b:1,c:[2]},e:5,f:5}",
             ),
+            (
+                "\"a:b\": 1\n'c:d': 2\nurl: http://x:1/\n",
+                r#"{a:b:1,c:d:2,url:"http://x:1/"}"#,
+            ),
             ("a: &x 1\nb: &x 2\nc: *x\n", "{a:1,b:2,c:2}"),
             ("&k a: 1\nb: *k\n", r#"{a:1,b:"a"}"#),
             ("---\na: 1\n", "{a:1}"),
@@ -554,6 +563,16 @@ mod tests {
                 "a: &x k\n*x : v\nb: 2\n",
                 r#"{a:"k",b:2}"#,
                 vec![(2, 1, keys)],
+            ),
+            (
+                "headers: {Authorization:Bearer x}\nb: 1\n",
+                "{headers:{},b:1}",
+                vec![(1, 11, "can't contain \":\"")],
+            ),
+            (
+                "a:b: 1\nc: 2\n",
+                "{c:2}",
+                vec![(1, 1, "can't contain \":\"")],
             ),
             ("a: &x [1, *x]\n", "{a:[1,!]}", vec![(1, 11, "contains it")]),
             ("m:\n  <<: 5\n  a: 1\n", "{m:{a:1}}", vec![(2, 7, merge)]),
