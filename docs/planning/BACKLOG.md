@@ -82,11 +82,15 @@
   - Scope rules include `extract` in `teardown`.
   - `${` in a request `name` is an error.
   - A `retry` on any method other than GET, HEAD, PUT, DELETE, OPTIONS and TRACE needs `allow_non_idempotent`.
+  - New `PlanErrorKind` variants must not hold file text, or `vush-config` must map them to fixed text as it does `DuplicateScenarioName`. Add a `secrets.rs` row per new variant.
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
   - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
   - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
   - The README links `docs/config-schema.md` once `vush validate` exists.
+  - Wrong-type messages for text forms name the form, such as `expected a duration such as 500ms, 5s, 5m or 1h30m, found a number`, instead of `expected a string`.
+  - Consider pointing a bad merge value reached through an alias at its `<<` key instead of the anchor.
 - [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. P1.2 already checks the `docs/config-schema.md` example against a hand-built plan, so here it becomes a CLI fixture too. Fixtures also check the documented defaults tables and file limits against the `Default` impls and constants.
+  - Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches.
 
 ## Phase 2 Execution Checklist — HTTP executor
 
