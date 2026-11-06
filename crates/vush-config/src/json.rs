@@ -1,6 +1,7 @@
 //! A strict JSON reader (RFC 8259) that records a line and column for every
-//! value and key. It never panics on any input and never copies text from the
-//! file into an error message.
+//! value and key. It never panics on any input and never copies a value from
+//! the file into an error message. Keys may appear in messages, escaped and cut
+//! to 64 characters.
 
 use crate::MAX_DEPTH;
 use crate::error::{Errors, Location};
