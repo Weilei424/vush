@@ -75,7 +75,7 @@ fn non_zero_u32(
 fn closed_vus(map: &mut MapReader<'_>, path: &str, errors: &mut Errors) -> Option<ClosedVusLoad> {
     if let Some(stages_node) = map.optional("stages") {
         for key in ["vus", "duration", "iterations"] {
-            map.reject(key, &format!("`{key}` can't be used with `stages`"), errors);
+            map.conflict(key, "stages", errors);
         }
         let start = match map.optional("start") {
             Some(n) => integer(n, &child(path, "start"), 0, U32_MAX, errors)
@@ -118,7 +118,7 @@ fn rate_target(node: &Node, path: &str, errors: &mut Errors) -> Option<Rate> {
 fn rate_schedule(map: &mut MapReader<'_>, path: &str, errors: &mut Errors) -> Option<RateSchedule> {
     if let Some(stages_node) = map.optional("stages") {
         for key in ["rate", "duration"] {
-            map.reject(key, &format!("`{key}` can't be used with `stages`"), errors);
+            map.conflict(key, "stages", errors);
         }
         let start = match map.optional("start") {
             Some(n) => rate_target(n, &child(path, "start"), errors),
@@ -424,52 +424,52 @@ mod tests {
             (
                 "{model: closed_vus, stages: [], vus: 1}",
                 "load.vus",
-                "`vus` can't be used with `stages`",
+                "`stages` and `vus` can't be used together",
             ),
             (
                 "{model: closed_vus, stages: [], duration: 1s}",
                 "load.duration",
-                "`duration` can't be used with `stages`",
+                "`stages` and `duration` can't be used together",
             ),
             (
                 "{model: closed_vus, stages: [], iterations: 1}",
                 "load.iterations",
-                "`iterations` can't be used with `stages`",
+                "`stages` and `iterations` can't be used together",
             ),
             (
                 "{model: closed_vus, vus: 1, stages: []}",
-                "load.vus",
-                "`vus` can't be used with `stages`",
+                "load.stages",
+                "`vus` and `stages` can't be used together",
             ),
             (
                 "{model: closed_vus, duration: 1s, stages: []}",
-                "load.duration",
-                "`duration` can't be used with `stages`",
+                "load.stages",
+                "`duration` and `stages` can't be used together",
             ),
             (
                 "{model: closed_vus, iterations: 1, stages: []}",
-                "load.iterations",
-                "`iterations` can't be used with `stages`",
+                "load.stages",
+                "`iterations` and `stages` can't be used together",
             ),
             (
                 "{model: iteration_rate, max_vus: 1, rate: 1/s, stages: []}",
-                "load.rate",
-                "`rate` can't be used with `stages`",
+                "load.stages",
+                "`rate` and `stages` can't be used together",
             ),
             (
                 "{model: iteration_rate, max_vus: 1, duration: 1s, stages: []}",
-                "load.duration",
-                "`duration` can't be used with `stages`",
+                "load.stages",
+                "`duration` and `stages` can't be used together",
             ),
             (
                 "{model: request_rate, vus: 1, rate: 1/s, stages: []}",
-                "load.rate",
-                "`rate` can't be used with `stages`",
+                "load.stages",
+                "`rate` and `stages` can't be used together",
             ),
             (
                 "{model: request_rate, vus: 1, duration: 1s, stages: []}",
-                "load.duration",
-                "`duration` can't be used with `stages`",
+                "load.stages",
+                "`duration` and `stages` can't be used together",
             ),
             (
                 "{model: closed_vus, start: x, stages: []}",
@@ -539,12 +539,12 @@ mod tests {
             (
                 "{model: iteration_rate, max_vus: 1, stages: [], rate: 1/s}",
                 "load.rate",
-                "`rate` can't be used with `stages`",
+                "`stages` and `rate` can't be used together",
             ),
             (
                 "{model: iteration_rate, max_vus: 1, stages: [], duration: 1s}",
                 "load.duration",
-                "`duration` can't be used with `stages`",
+                "`stages` and `duration` can't be used together",
             ),
             (
                 "{model: iteration_rate, max_vus: 1, rate: 1/s, duration: 1s, start: 0/s}",
@@ -594,6 +594,20 @@ mod tests {
         ];
         for (yaml, path, fragment) in rows {
             assert_fails(yaml, path, fragment, |n, e| load(n, "load", e));
+        }
+    }
+
+    #[test]
+    fn several_fixed_keys_before_stages_each_conflict() {
+        let (_, errors) = run(
+            "{model: closed_vus, vus: 1, duration: 1s, stages: []}",
+            |n, e| load(n, "load", e),
+        );
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|e| e.path == "load.stages"));
+        for key in ["vus", "duration"] {
+            let want = format!("`{key}` and `stages` can't be used together");
+            assert!(errors.iter().any(|e| e.message.contains(&want)), "{want}");
         }
     }
 }
