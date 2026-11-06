@@ -249,7 +249,7 @@ load:
 
 A step list holds steps in order. A step is a map with exactly one key, which names its kind: `request`, `wait`, `if` or `repeat`.
 
-`if` and `repeat` can nest, within the [nesting limit](#file-rules).
+`if` and `repeat` can nest, within the [nesting limit](#file-rules) of 128 levels of maps and lists. Each `if` or `repeat` adds three levels.
 
 ### `request`
 
@@ -388,10 +388,10 @@ A test file holds one YAML or JSON document. These rules apply however the file 
 | Encoding | UTF-8. A leading byte-order mark is skipped |
 | File size | At most 10 MiB |
 | Nesting | At most 128 levels of maps and lists |
-| Values | At most 250,000, counting copies made by YAML aliases |
-| Text | At most 64 MiB of keys and strings, counting copies made by YAML aliases |
+| Values | At most 250,000, counting copies made by YAML anchors and aliases |
+| Text | At most 64 MiB of keys and strings, counting copies made by YAML anchors and aliases |
 
-An error gives a key path, a line and a column. It never quotes a value from the file, so a token in a test file can't reach a log through an error message.
+Most errors give a key path, a line and a column. Syntax errors give a line and a column, and errors about the whole file, such as its size, give neither. An error never quotes a value from the file, so a token in a test file can't reach a log through an error message. Key names can appear, escaped and cut to 64 characters, so don't put secrets in key names.
 
 JSON files follow strict JSON: no comments and no trailing commas.
 
@@ -408,6 +408,7 @@ An unquoted value is read like this. Quoted values, `|` blocks and `>` blocks ar
 | Anything else, including `yes`, `no`, `on` and `off` | string |
 
 - Keys are always text, so `1: x` has the key `"1"`, as it would in JSON.
+- An unquoted key can't contain `:`. Quote it, or put a space after the colon if a value follows. This catches `{Authorization:Bearer …}`, which would otherwise make the value part of the key.
 - An empty value is null, which isn't the same as leaving the key out. `http:` with nothing after it is an error.
 - Tags such as `!!str`, more than one document in a file, and keys that are maps, lists or aliases aren't supported.
 
@@ -433,7 +434,7 @@ steps:
         Accept: text/plain       # replaces the merged Accept
 ```
 
-An error inside aliased or merged content gives the path where it's used and the line where it's defined.
+An error inside aliased or merged content points to the line where it's defined. Errors found after reading, such as a wrong type, also give the path where it's used.
 
 ## Versioning
 
