@@ -60,7 +60,7 @@
   - [x] Replace `ARCHITECTURE_NOTES.md` §5 with a pointer to the schema doc; refresh local `CLAUDE.md`/`AGENTS.md` (plan Tasks 6–7).
   - [x] All four check commands pass and `vush-core` still has no dependencies (plan Task 7).
   - [x] CI green on all four runners plus `fmt` after the user pushes (plan Task 7). Run 41595459312 on `176c882`, 2026-11-03.
-- [~] P1.2 Parse equivalent YAML/JSON into the same plan, with `saphyr-parser` as the YAML library and no Serde. Creates `crates/vush-config` (decided 2026-11-02, design approved 2026-11-03).
+- [x] P1.2 Parse equivalent YAML/JSON into the same plan, with `saphyr-parser` as the YAML library and no Serde. Creates `crates/vush-config` (decided 2026-11-02, design approved 2026-11-03, finished 2026-11-05).
   - [x] Crate scaffold, `ConfigError`, the located value tree and the reading budget (plan Task 1).
   - [x] One number rule for both formats, and the rule for unquoted YAML values (plan Task 2). Integers outside the range `i64::MIN` to `u64::MAX` are errors, never stored as `Float`. `010`, `0x10`, `.inf` and similar forms are errors.
   - [x] Strict JSON reader with locations, cross-checked against `serde_json` in tests (plan Task 3).
@@ -75,7 +75,7 @@
   - [x] Fixes from Codex's review (2026-11-05): a tagged `<<` key is an ordinary key, not a merge key.
   - [x] CI green on the first review-fix commits. Run 42156507464 on `c032215`.
   - [x] A fixed load key mixed with `stages` is reported at the later of the two keys, with the usual conflict message (user decision after Codex's second review, 2026-11-05).
-  - [ ] CI green on the load-conflict commits after the user pushes.
+  - [x] CI green on the load-conflict commits after the user pushes. Run 42162887348 on `7fce79e`.
 - [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields.
   - The nesting limit moved to P1.2, because the reader needs it to survive hostile files. It covers steps, `when` conditions and `json` values.
   - Values P1.2 lets through because the plan's types can hold them: `attempts` below 2, and a fixed `rate` of zero.
