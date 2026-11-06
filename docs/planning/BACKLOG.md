@@ -72,8 +72,10 @@
   - [x] Whole-crate tests: the schema example from both formats equals a hand-built plan, plus equivalence, diagnostics, limits, secrets and robustness (plan Task 9).
   - [x] `docs/config-schema.md` file rules, local docs and all four check commands (plan Task 10).
   - [x] CI green on all four runners after the user pushes (plan Task 10). Run 42150486584 on `33259a5`.
-  - [x] Fixes from Codex's review (2026-11-05): a tagged `<<` key is an ordinary key, not a merge key, and a fixed load key mixed with `stages` is pinned at the fixed key whichever comes first.
-  - [ ] CI green on the review-fix commits after the user pushes.
+  - [x] Fixes from Codex's review (2026-11-05): a tagged `<<` key is an ordinary key, not a merge key.
+  - [x] CI green on the first review-fix commits. Run 42156507464 on `c032215`.
+  - [x] A fixed load key mixed with `stages` is reported at the later of the two keys, with the usual conflict message (user decision after Codex's second review, 2026-11-05).
+  - [ ] CI green on the load-conflict commits after the user pushes.
 - [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields.
   - The nesting limit moved to P1.2, because the reader needs it to survive hostile files. It covers steps, `when` conditions and `json` values.
   - Values P1.2 lets through because the plan's types can hold them: `attempts` below 2, and a fixed `rate` of zero.
