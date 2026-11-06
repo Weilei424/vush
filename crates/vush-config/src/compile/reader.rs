@@ -88,6 +88,15 @@ impl<'a> MapReader<'a> {
         self.position(key).is_some()
     }
 
+    /// Marks the keys used, if present, without reading them.
+    pub(super) fn ignore(&mut self, keys: &[&str]) {
+        for (entry, used) in self.entries.iter().zip(self.used.iter_mut()) {
+            if keys.contains(&entry.key.as_str()) {
+                *used = true;
+            }
+        }
+    }
+
     pub(super) fn optional(&mut self, key: &str) -> Option<&'a Node> {
         let at = self.position(key)?;
         self.used[at] = true;
