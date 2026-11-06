@@ -249,7 +249,7 @@ load:
 
 A step list holds steps in order. A step is a map with exactly one key, which names its kind: `request`, `wait`, `if` or `repeat`.
 
-`if` and `repeat` can nest, up to a depth limit that `vush validate` enforces.
+`if` and `repeat` can nest, within the [nesting limit](#file-rules).
 
 ### `request`
 
@@ -377,6 +377,63 @@ thresholds:
     scenario: checkout
     lt: 1%
 ```
+
+## File rules
+
+A test file holds one YAML or JSON document. These rules apply however the file is read.
+
+| Rule | Detail |
+|---|---|
+| Format | Chosen by the extension: `.yaml`, `.yml` or `.json`, in any letter case |
+| Encoding | UTF-8. A leading byte-order mark is skipped |
+| File size | At most 10 MiB |
+| Nesting | At most 128 levels of maps and lists |
+| Values | At most 250,000, counting copies made by YAML aliases |
+| Text | At most 64 MiB of keys and strings, counting copies made by YAML aliases |
+
+An error gives a key path, a line and a column. It never quotes a value from the file, so a token in a test file can't reach a log through an error message.
+
+JSON files follow strict JSON: no comments and no trailing commas.
+
+### YAML
+
+An unquoted value is read like this. Quoted values, `|` blocks and `>` blocks are always strings.
+
+| Unquoted value | Reads as |
+|---|---|
+| Nothing, `~`, `null`, `Null`, `NULL` | null |
+| `true`, `True`, `TRUE`, `false`, `False`, `FALSE` | boolean |
+| A JSON number: `2`, `-3`, `2.5`, `1e3` | number |
+| `010`, `+5`, `.5`, `5.`, `1_000`, `0x10`, `0o7`, `0b1`, `.inf`, `.nan` | an error, because YAML versions read these differently. Quote it to make it a string, or write it as a plain decimal |
+| Anything else, including `yes`, `no`, `on` and `off` | string |
+
+- Keys are always text, so `1: x` has the key `"1"`, as it would in JSON.
+- An empty value is null, which isn't the same as leaving the key out. `http:` with nothing after it is an error.
+- Tags such as `!!str`, more than one document in a file, and keys that are maps, lists or aliases aren't supported.
+
+Anchors and aliases copy a whole value. Merge keys copy a map's entries into another map, where `<<` is written. A key written in the map itself always wins, and in a list of maps an earlier map beats a later one. A quoted `"<<"` is an ordinary key.
+
+```yaml
+steps:
+  - request:
+      method: GET
+      path: /a
+      headers: &auth
+        Authorization: "Bearer ${token}"
+        Accept: application/json
+  - request:
+      method: GET
+      path: /b
+      headers: *auth             # the same two headers
+  - request:
+      method: GET
+      path: /c
+      headers:
+        <<: *auth                # Authorization from above
+        Accept: text/plain       # replaces the merged Accept
+```
+
+An error inside aliased or merged content gives the path where it's used and the line where it's defined.
 
 ## Versioning
 
