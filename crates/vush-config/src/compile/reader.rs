@@ -50,6 +50,10 @@ fn join_keys(keys: &[&str]) -> String {
     }
 }
 
+fn conflict_message(earlier: &str, later: &str) -> String {
+    format!("`{earlier}` and `{later}` can't be used together")
+}
+
 /// Reads the keys of one map and reports the ones nobody asked for.
 pub(super) struct MapReader<'a> {
     node: &'a Node,
@@ -133,7 +137,7 @@ impl<'a> MapReader<'a> {
                 Some((first, _)) => errors.push(
                     &child(self.path, key),
                     Some(entry.key_location),
-                    format!("`{first}` and `{key}` can't be used together"),
+                    conflict_message(first, key),
                 ),
             }
         }
@@ -167,6 +171,25 @@ impl<'a> MapReader<'a> {
                 message,
             );
         }
+    }
+
+    /// If both keys are present, marks `key` used (not `with`) and records a
+    /// conflict at whichever of the two comes later in the map.
+    pub(super) fn conflict(&mut self, key: &'static str, with: &'static str, errors: &mut Errors) {
+        let (Some(a), Some(b)) = (self.position(key), self.position(with)) else {
+            return;
+        };
+        self.used[a] = true;
+        let (first, later, at) = if a < b {
+            (key, with, b)
+        } else {
+            (with, key, a)
+        };
+        errors.push(
+            &child(self.path, later),
+            Some(self.entries[at].key_location),
+            conflict_message(first, later),
+        );
     }
 
     /// Records an unknown-key error for each key nobody used.
@@ -385,6 +408,48 @@ mod tests {
                 .message
                 .contains("`url` and `path` can't be used together")
         );
+    }
+
+    #[test]
+    fn conflict_points_at_the_later_key() {
+        let (_, errors) = run("{vus: 1, stages: []}", |node, errors| {
+            let mut map = MapReader::new(node, "load", errors).unwrap();
+            map.conflict("vus", "stages", errors);
+        });
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path, "load.stages");
+        assert_eq!(
+            errors[0].location,
+            Some(Location {
+                line: 1,
+                column: 10
+            })
+        );
+        assert!(
+            errors[0]
+                .message
+                .contains("`vus` and `stages` can't be used together")
+        );
+
+        let (_, errors) = run("{stages: [], vus: 1}", |node, errors| {
+            let mut map = MapReader::new(node, "load", errors).unwrap();
+            map.conflict("vus", "stages", errors);
+        });
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path, "load.vus");
+        assert!(
+            errors[0]
+                .message
+                .contains("`stages` and `vus` can't be used together")
+        );
+
+        let (_, errors) = run("{vus: 1}", |node, errors| {
+            let mut map = MapReader::new(node, "load", errors).unwrap();
+            map.conflict("vus", "stages", errors);
+            map.optional("vus");
+            map.finish(errors);
+        });
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]
