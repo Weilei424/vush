@@ -49,6 +49,8 @@
 > P1.1 spec: `docs/superpowers/specs/2026-11-02-phase-1-1-config-shape-and-plan-design.md` · Plan: `docs/superpowers/plans/2026-11-02-phase-1-1-config-shape-and-plan.md` (local only; `docs/superpowers/` is gitignored).
 >
 > P1.2 spec: `docs/superpowers/specs/2026-11-03-phase-1-2-yaml-json-reader-design.md` · Plan: `docs/superpowers/plans/2026-11-03-phase-1-2-yaml-json-reader.md` (local only).
+>
+> P1.3 spec: `docs/superpowers/specs/2026-11-06-phase-1-3-plan-validation-design.md` · Plan: `docs/superpowers/plans/2026-11-06-phase-1-3-plan-validation.md` (local only).
 
 - [x] P1.1 Agree versioned YAML/JSON configuration shape and typed immutable workload plan (design approved 2026-11-02, finished 2026-11-03).
   - [x] Value types in `vush_core::plan`: durations, rates, sizes and percentages, parsed from text with exact-value and rejection tables (plan Task 1).
@@ -76,17 +78,20 @@
   - [x] CI green on the first review-fix commits. Run 42156507464 on `c032215`.
   - [x] A fixed load key mixed with `stages` is reported at the later of the two keys, with the usual conflict message (user decision after Codex's second review, 2026-11-05).
   - [x] CI green on the load-conflict commits after the user pushes. Run 42162887348 on `7fce79e`.
-- [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields.
-  - The nesting limit moved to P1.2, because the reader needs it to survive hostile files. It covers steps, `when` conditions and `json` values.
-  - Values P1.2 lets through because the plan's types can hold them: `attempts` below 2, and a fixed `rate` of zero.
-  - A threshold naming an unknown scenario.
-  - Whether an empty `status: []`, or an empty `all` or `any`, is an error.
-  - An upper bound on durations.
-  - `extract` names must match the variable-name pattern and avoid the reserved words (`env`, `global`, `scenario`, `vu`).
-  - Scope rules include `extract` in `teardown`.
-  - `${` in a request `name` is an error.
-  - A `retry` on any method other than GET, HEAD, PUT, DELETE, OPTIONS and TRACE needs `allow_non_idempotent`.
-  - New `PlanErrorKind` variants must not hold file text, or `vush-config` must map them to fixed text as it does `DuplicateScenarioName`. Add a `secrets.rs` row per new variant.
+- [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields. All rules run in `WorkloadPlan::new` (design approved 2026-11-06).
+  - Decided 2026-11-06:
+    - A teardown's `extract` writes the same scope as its setup.
+    - References are checked for scope and name, not order.
+    - One duration ceiling of `720h` (30 days).
+    - `status: []`, `all: []` and `any: []` are errors.
+  - "Unsupported fields" needs nothing new, because P1.2 already rejects unknown keys. The nesting limit moved to P1.2.
+  - [ ] `PlanError.path` becomes a list of segments, errors move to `plan/error.rs`, and checks move to `plan/check/` (plan Task 1).
+  - [ ] Durations, rates and loads: the `720h` ceiling, zero timeouts and deadlines, zero fixed rates and `max_request_rate`, idle and zero-length ramps, and inherited timeouts reported once (plan Task 2).
+  - [ ] Requests, conditions and thresholds: `attempts` of 2 or more, the retry method rule, status codes 100–599, empty `status`, `all` and `any`, `${` in a request `name`, a `path` needing a `base_url`, and thresholds naming a real scenario (plan Task 3).
+  - [ ] Variables: `extract` names, and a scope and name check for every reference, with hints and positions (plan Task 4).
+  - [ ] Whole-crate tests through `parse`: every rule located, unusual keys escaped, and a `secrets.rs` row per new kind (plan Task 5).
+  - [ ] `docs/config-schema.md` rules, local docs and all four check commands (plan Task 6).
+  - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
   - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
   - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
@@ -100,6 +105,7 @@
 
 - [ ] P2.1 Implement protocol-neutral request/observation/error boundary.
 - [ ] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies.
+  - Check header names and URL schemes before any traffic, and decide how `path` joins `base_url`. P1.3 only requires a `base_url` to exist.
 - [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on.
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
 - [ ] P2.5 Implement bounded body capture and safe error diagnostics.
@@ -113,11 +119,13 @@
 - [ ] P3.4 Add think time, structured `if/else` and bounded loops.
 - [ ] P3.5 Implement global/per-scenario declarative setup/teardown and define their failure policies.
 - [ ] P3.6 Enforce body, variable, loop and hook bounds; test auth-flow and failing-flow cases.
+  - Decide how `max_variables` relates to the names a scenario extracts. P1.3 doesn't compare them.
 
 ## Phase 4 Execution Checklist — Stateful VUs and closed scheduling
 
 - [ ] P4.1 Implement VU lifecycle/ownership; one iteration at a time; persistent state by default.
 - [ ] P4.2 Implement fixed and ramping VU schedules; avoid one OS thread per VU.
+  - Decide a ceiling on VU counts from measurements. P1.3 sets none.
 - [ ] P4.3 Add configurable per-iteration state reset and shared/scenario/VU connection scope.
 - [ ] P4.4 Implement per-VU setup/teardown and cleanup on retirement/scale-down.
 - [ ] P4.5 Verify isolation under concurrency, memory bounds and closed-loop semantics.
@@ -127,6 +135,7 @@
 - [ ] P5.1 Approve explicit request-start rate semantics for workflows, global/per-scenario budgets and retry accounting.
 - [ ] P5.2 Implement fixed/ramping scenario-iteration arrival, independent of completion.
 - [ ] P5.3 Implement request-start pacing; report target vs achieved rate and scheduler lateness.
+  - Decide a rate ceiling from measurements. P1.3 sets none, so until then rate arithmetic must not overflow for any `u64` rate. Durations are capped at `720h`.
 - [ ] P5.4 Implement bounded queue/active budget, drop-newest overload, configurable expiry and detailed reason counters.
 - [ ] P5.5 Implement sampled bounded drop-event sink with separate event-loss counter; **no automatic replay**.
 - [ ] P5.6 Stop arrivals on deadline, drain accepted non-expired queue, finish/timeout in-flight work, run teardown.
