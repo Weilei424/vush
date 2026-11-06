@@ -96,7 +96,10 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         PlanErrorKind::DuplicateScenarioName(_) => {
                             "this scenario name is already used by an earlier scenario".to_owned()
                         }
-                        other => other.to_string(),
+                        // A new variant might hold file text; this match is where it gets checked.
+                        kind @ (PlanErrorKind::NoScenarios
+                        | PlanErrorKind::NoSteps
+                        | PlanErrorKind::NoStages) => kind.to_string(),
                     };
                     let at = compile::locate(&root, &error.path);
                     errors.push(&error.path, Some(at), message);
