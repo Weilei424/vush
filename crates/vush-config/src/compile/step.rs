@@ -330,17 +330,19 @@ fn extract(node: &Node, path: &str, errors: &mut Errors) -> Option<Vec<Extractio
 }
 
 /// Reads the one comparison key. The caller has already taken `path` or `var`.
+const COMPARISON_KEYS: [&str; 8] = [
+    "exists",
+    "equals",
+    "not_equals",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "contains",
+];
+
 fn comparison(map: &mut MapReader<'_>, path: &str, errors: &mut Errors) -> Option<Comparison> {
-    const KEYS: [&str; 8] = [
-        "exists",
-        "equals",
-        "not_equals",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "contains",
-    ];
+    const KEYS: [&str; 8] = COMPARISON_KEYS;
     let (key, n) = map.exactly_one(&KEYS, errors)?;
     let p = child(path, key);
     match key {
@@ -393,6 +395,11 @@ fn condition(node: &Node, path: &str, errors: &mut Errors) -> Option<Condition> 
         }
         None => None,
     };
+    // A losing `var` was already reported as a conflict; its comparison keys
+    // are not unknown.
+    if map.has("var") {
+        map.ignore(&COMPARISON_KEYS);
+    }
     map.finish(errors);
     built
 }
@@ -872,6 +879,11 @@ mod tests {
                 "[{if: {when: {all: [], exists: true}, then: []}}]",
                 "steps[0].if.when.exists",
                 "unknown key `exists`",
+            ),
+            (
+                "[{if: {when: {all: [], var: a, exists: true}, then: []}}]",
+                "steps[0].if.when.var",
+                "`all` and `var` can't be used together",
             ),
             (
                 "[{if: {when: {var: \"${x}\", exists: true}, then: []}}]",
