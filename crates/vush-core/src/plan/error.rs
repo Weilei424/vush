@@ -191,9 +191,13 @@ pub enum PlanErrorKind {
     PathNeedsBaseUrl,
     /// A threshold names a scenario the file does not have.
     UnknownScenario,
-    /// An `extract` name isn't `[A-Za-z_][A-Za-z0-9_]*`.
+    /// A number in a `json` body or a comparison is NaN or infinite.
+    NonFiniteNumber,
+    /// An `extract` name, or a name a reference holds, isn't
+    /// `[A-Za-z_][A-Za-z0-9_]*`.
     InvalidVariableName,
-    /// An `extract` name is `env`, `global`, `scenario` or `vu`.
+    /// An `extract` name, or a reference's bare name, is `env`, `global`,
+    /// `scenario` or `vu`.
     ReservedVariableName,
     /// A reference reads a scope that can't be read at its place.
     VariableNotReadable {
@@ -263,6 +267,7 @@ impl fmt::Display for PlanErrorKind {
                 "a `path` needs a `base_url` at the top of the file; use `url` for a full address",
             ),
             Self::UnknownScenario => f.write_str("no scenario has this name"),
+            Self::NonFiniteNumber => f.write_str("a number must be finite, not NaN or infinity"),
             Self::InvalidVariableName => {
                 f.write_str("a variable name must match `[A-Za-z_][A-Za-z0-9_]*`")
             }
@@ -435,6 +440,17 @@ mod tests {
         assert_eq!(
             PlanErrorKind::TooManyErrors.to_string(),
             "too many problems; only the first 100 are reported"
+        );
+    }
+
+    #[test]
+    fn non_finite_numbers_have_fixed_text() {
+        // No file can reach this kind, because the readers reject NaN and
+        // infinity, so `vush-config`'s secrets tests can't cover it. It holds
+        // no data, so its text can't carry a value.
+        assert_eq!(
+            PlanErrorKind::NonFiniteNumber.to_string(),
+            "a number must be finite, not NaN or infinity"
         );
     }
 
