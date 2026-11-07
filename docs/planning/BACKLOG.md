@@ -89,7 +89,7 @@
   - [x] Durations, rates and loads: the `720h` ceiling, zero timeouts and deadlines, zero fixed rates and `max_request_rate`, idle and zero-length ramps, and inherited timeouts reported once (plan Task 2).
   - [x] Requests, conditions and thresholds: `attempts` of 2 or more, the retry method rule, status codes 100–599, empty `status`, `all` and `any`, `${` in a request `name`, a `path` needing a `base_url`, and thresholds naming a real scenario (plan Task 3).
   - [x] Variables: `extract` names, and a scope and name check for every reference, with hints and positions (plan Task 4).
-  - [ ] Whole-crate tests through `parse`: every rule located, unusual keys escaped, and a `secrets.rs` row per new kind (plan Task 5).
+  - [x] Whole-crate tests through `parse`: every rule located, unusual keys escaped, and a `secrets.rs` row per new kind (plan Task 5).
   - [ ] `docs/config-schema.md` rules, local docs and all four check commands (plan Task 6).
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
