@@ -7,7 +7,8 @@ mod step;
 mod threshold;
 
 use vush_core::plan::{
-    HttpSettings, JsonNumber, PlanDraft, ResourceLimits, Scenario, StatePolicy, Step, Template,
+    HttpSettings, JsonNumber, PathSegment, PlanDraft, PlanPath, ResourceLimits, Scenario,
+    StatePolicy, Step, Template,
 };
 
 use self::reader::{MapReader, child, item, list, one_of, parsed, string};
@@ -199,41 +200,41 @@ fn scenario(
 }
 
 /// Finds the value a plan error path points at, or the deepest one reached.
-/// Paths look like `scenarios[1].steps[0].repeat.steps`.
-pub(crate) fn locate(root: &Node, path: &str) -> Location {
+/// With `at_key`, a path that ends at a matching map key gives the key's own
+/// location instead of its value's.
+pub(crate) fn locate(root: &Node, path: &PlanPath, at_key: bool) -> Location {
     let mut at = root;
-    if path.is_empty() {
-        return at.location;
-    }
-    for segment in path.split('.') {
-        let (key, mut indexes) = match segment.find('[') {
-            Some(i) => segment.split_at(i),
-            None => (segment, ""),
-        };
-        if !key.is_empty() {
-            let NodeKind::Map(entries) = &at.kind else {
-                return at.location;
-            };
-            match entries.iter().find(|e| e.key == key) {
-                Some(entry) => at = &entry.value,
-                None => return at.location,
+    let segments = path.segments();
+    for (position, segment) in segments.iter().enumerate() {
+        match (segment, &at.kind) {
+            (PathSegment::Key(key), NodeKind::Map(entries)) => {
+                let Some(entry) = entries.iter().find(|e| e.key == *key) else {
+                    return at.location;
+                };
+                if at_key && position + 1 == segments.len() {
+                    return entry.key_location;
+                }
+                at = &entry.value;
             }
-        }
-        while let Some(rest) = indexes.strip_prefix('[') {
-            let Some((digits, after)) = rest.split_once(']') else {
-                return at.location;
-            };
-            let NodeKind::List(items) = &at.kind else {
-                return at.location;
-            };
-            match digits.parse::<usize>().ok().and_then(|n| items.get(n)) {
+            (PathSegment::Index(index), NodeKind::List(items)) => match items.get(*index) {
                 Some(next) => at = next,
                 None => return at.location,
-            }
-            indexes = after;
+            },
+            _ => return at.location,
         }
     }
     at.location
+}
+
+/// Writes a plan error path the way compile errors write theirs, with each
+/// key escaped.
+pub(crate) fn render_path(path: &PlanPath) -> String {
+    path.segments()
+        .iter()
+        .fold(String::new(), |text, segment| match segment {
+            PathSegment::Key(key) => child(&text, key),
+            PathSegment::Index(index) => item(&text, *index),
+        })
 }
 
 #[cfg(test)]
@@ -535,21 +536,48 @@ scenarios:
     }
 
     #[test]
-    fn locate_follows_the_path_and_falls_back() {
-        let root = super::testing::node("{a: {b: [1]}}");
-        let a_value = match &root.kind {
-            crate::node::NodeKind::Map(entries) => entries[0].value.location,
-            _ => panic!("not a map"),
+    fn locate_follows_segments_exactly() {
+        use vush_core::plan::PathSegment::{Index, Key};
+        let root = super::testing::node("{a.b: {c: [1, 2]}, x: 1}");
+        let NodeKind::Map(entries) = &root.kind else {
+            panic!("not a map");
         };
-        assert_eq!(
-            locate(&root, "a.b[0]"),
-            Location {
-                line: 1,
-                column: 10
-            }
-        );
-        assert_eq!(locate(&root, "a.x.y"), a_value);
-        assert_eq!(locate(&root, "a.b[5]"), Location { line: 1, column: 9 });
-        assert_eq!(locate(&root, ""), root.location);
+        let ab = &entries[0].value;
+        let NodeKind::Map(inner) = &ab.kind else {
+            panic!("not a map");
+        };
+        let NodeKind::List(items) = &inner[0].value.kind else {
+            panic!("not a list");
+        };
+        let path = |segments| PlanPath::new(segments);
+        let full = path(vec![Key("a.b".into()), Key("c".into()), Index(1)]);
+        assert_eq!(locate(&root, &full, false), items[1].location);
+        let missing = path(vec![Key("a.b".into()), Key("nope".into()), Index(1)]);
+        assert_eq!(locate(&root, &missing, false), ab.location);
+        let past_end = path(vec![Key("a.b".into()), Key("c".into()), Index(5)]);
+        assert_eq!(locate(&root, &past_end, false), inner[0].value.location);
+        let on_map = path(vec![Key("a.b".into()), Index(0)]);
+        assert_eq!(locate(&root, &on_map, false), ab.location);
+        assert_eq!(locate(&root, &PlanPath::default(), false), root.location);
+    }
+
+    #[test]
+    fn locate_can_point_at_the_key() {
+        use vush_core::plan::PathSegment::Key;
+        let root = super::testing::node("{a.b: 1}");
+        let NodeKind::Map(entries) = &root.kind else {
+            panic!("not a map");
+        };
+        let path = PlanPath::new(vec![Key("a.b".into())]);
+        assert_eq!(locate(&root, &path, true), entries[0].key_location);
+        assert_eq!(locate(&root, &path, false), entries[0].value.location);
+    }
+
+    #[test]
+    fn render_path_escapes_each_key() {
+        use vush_core::plan::PathSegment::{Index, Key};
+        let long = "k".repeat(65);
+        let path = PlanPath::new(vec![Key("x\ny".into()), Index(0), Key(long)]);
+        assert_eq!(render_path(&path), format!("x\\ny[0].{}…", "k".repeat(64)));
     }
 }
