@@ -227,3 +227,31 @@ scenarios:
     assert!(!found[0].path.contains('\n'));
     assert_eq!(lines(&found), [12]);
 }
+
+#[test]
+fn plan_errors_under_long_keys_that_share_a_prefix_find_their_own_key() {
+    // Two 257-byte header names share their first 256 bytes. Paths keep only
+    // a 256-byte prefix of each, but the error under the second one must
+    // still point at the second one's line.
+    let shared = "X".repeat(256);
+    let text = format!(
+        "\
+schema_version: 1
+name: n
+scenarios:
+  - name: a
+    load: {{ model: closed_vus, vus: 1, duration: 1s }}
+    steps:
+      - request:
+          method: GET
+          url: http://localhost/
+          headers:
+            {shared}A: fine
+            {shared}B: \"${{nope}}\"
+"
+    );
+    let found = errors(&text, Format::Yaml);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].message.contains("sets this variable"), "{found:?}");
+    assert_eq!(lines(&found), [12]);
+}
