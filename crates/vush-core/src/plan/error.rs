@@ -58,6 +58,16 @@ pub enum PlanErrorKind {
     NoSteps,
     /// A ramping load has no stages.
     NoStages,
+    /// A duration is longer than the 30-day ceiling.
+    DurationTooLong,
+    /// A duration that must be positive is zero.
+    ZeroDuration,
+    /// A rate that must be positive is zero.
+    ZeroRate,
+    /// A ramping load never rises above zero.
+    IdleRamp,
+    /// A ramping load's stages last no time in total.
+    ZeroLengthRamp,
 }
 
 impl fmt::Display for PlanError {
@@ -77,6 +87,15 @@ impl fmt::Display for PlanErrorKind {
             }
             Self::NoSteps => f.write_str("at least one step is required"),
             Self::NoStages => f.write_str("a ramping load needs at least one stage"),
+            Self::DurationTooLong => f.write_str("a duration can be at most 720h (30 days)"),
+            Self::ZeroDuration => f.write_str("this duration must be longer than zero"),
+            Self::ZeroRate => f.write_str("this rate must be above zero"),
+            Self::IdleRamp => {
+                f.write_str("a ramping load must be above zero at its start or at some stage")
+            }
+            Self::ZeroLengthRamp => {
+                f.write_str("a ramping load's stages must last longer than zero in total")
+            }
         }
     }
 }
