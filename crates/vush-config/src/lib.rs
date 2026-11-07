@@ -96,7 +96,12 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         kind @ (PlanErrorKind::NoScenarios
                         | PlanErrorKind::DuplicateScenarioName
                         | PlanErrorKind::NoSteps
-                        | PlanErrorKind::NoStages) => kind.to_string(),
+                        | PlanErrorKind::NoStages
+                        | PlanErrorKind::DurationTooLong
+                        | PlanErrorKind::ZeroDuration
+                        | PlanErrorKind::ZeroRate
+                        | PlanErrorKind::IdleRamp
+                        | PlanErrorKind::ZeroLengthRamp) => kind.to_string(),
                     };
                     let at = compile::locate(&root, &error.path, false);
                     let path = compile::render_path(&error.path);
