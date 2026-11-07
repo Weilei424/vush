@@ -1,12 +1,16 @@
 //! The structural checks that run when a draft becomes a plan.
 //!
 //! The walk visits a draft in plan order and passes down a borrowed [`At`]
-//! path, so nothing is allocated until a problem is recorded.
+//! path, so nothing is allocated until a problem is recorded. Every problem
+//! is recorded through [`push`], which keeps at most [`MAX_PLAN_ERRORS`].
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use super::error::{PathSegment, PlanError, PlanErrorKind, PlanPath};
+use super::error::{
+    MAX_PATH_KEY_BYTES, MAX_PLAN_ERRORS, PathSegment, PlanError, PlanErrorKind, PlanPath,
+};
 use super::step::{
     Body, Comparison, Condition, JsonTemplate, RequestStep, RequestTarget, Scalar, Step,
 };
@@ -38,7 +42,9 @@ impl<'a> At<'a> {
         At::Index(self, index)
     }
 
-    /// Builds the owned path. Only called when a problem is recorded.
+    /// Builds the owned path. Only called when a problem is recorded. A key
+    /// longer than [`MAX_PATH_KEY_BYTES`] is cut, so a huge key can't be
+    /// copied into every error under it.
     pub(super) fn path(&self) -> PlanPath {
         let mut segments = Vec::new();
         let mut at = self;
@@ -46,7 +52,7 @@ impl<'a> At<'a> {
             match at {
                 At::Root => break,
                 At::Key(parent, key) => {
-                    segments.push(PathSegment::Key((*key).to_owned()));
+                    segments.push(key_segment(key));
                     at = parent;
                 }
                 At::Index(parent, index) => {
@@ -60,12 +66,36 @@ impl<'a> At<'a> {
     }
 }
 
-/// Records a problem at a place.
+/// The segment for a map key: the key itself, or, when it is longer than
+/// [`MAX_PATH_KEY_BYTES`], its longest prefix that fits and ends on a
+/// character boundary.
+fn key_segment(key: &str) -> PathSegment {
+    if key.len() <= MAX_PATH_KEY_BYTES {
+        return PathSegment::Key(key.to_owned());
+    }
+    let end = key.floor_char_boundary(MAX_PATH_KEY_BYTES);
+    // `end` is a character boundary inside the key, so the split can't fail.
+    let prefix = key.split_at_checked(end).map_or("", |(prefix, _)| prefix);
+    PathSegment::TruncatedKey(prefix.to_owned())
+}
+
+/// Records a problem at a place, keeping at most [`MAX_PLAN_ERRORS`] in the
+/// order they are found. The first problem past that is recorded as one
+/// [`PlanErrorKind::TooManyErrors`] with an empty path, which ends the list.
+/// Later problems are dropped without building their paths.
 pub(super) fn push(errors: &mut Vec<PlanError>, at: &At<'_>, kind: PlanErrorKind) {
-    errors.push(PlanError {
-        path: at.path(),
-        kind,
-    });
+    let error = match errors.len().cmp(&MAX_PLAN_ERRORS) {
+        Ordering::Less => PlanError {
+            path: at.path(),
+            kind,
+        },
+        Ordering::Equal => PlanError {
+            path: PlanPath::default(),
+            kind: PlanErrorKind::TooManyErrors,
+        },
+        Ordering::Greater => return,
+    };
+    errors.push(error);
 }
 
 /// What the walk carries down: the `http.timeout` that requests inherit,
@@ -79,9 +109,10 @@ struct Scope<'w> {
     writers: &'w Writers<'w>,
 }
 
-/// Finds every problem in a draft, in plan order: `base_url`, file-level
+/// Finds the problems in a draft, in plan order: `base_url`, file-level
 /// `http`, `limits`, `setup` and `teardown`, then `thresholds`, then
-/// `scenarios`.
+/// `scenarios`. It keeps the first [`MAX_PLAN_ERRORS`], and ends a list that
+/// was cut with one [`PlanErrorKind::TooManyErrors`].
 pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
     let mut errors = Vec::new();
     let root = At::Root;
@@ -278,7 +309,15 @@ fn check_comparison(op: &Comparison, at: &At<'_>, scope: Scope<'_>, errors: &mut
         Comparison::Equals(Scalar::String(template)) => ("equals", template),
         Comparison::NotEquals(Scalar::String(template)) => ("not_equals", template),
         Comparison::Contains(template) => ("contains", template),
-        _ => return,
+        // Every variant is named, so a new one that holds a template can't
+        // be skipped without a compile error here.
+        Comparison::Equals(Scalar::Null | Scalar::Bool(_) | Scalar::Number(_))
+        | Comparison::NotEquals(Scalar::Null | Scalar::Bool(_) | Scalar::Number(_))
+        | Comparison::Exists(_)
+        | Comparison::Gt(_)
+        | Comparison::Gte(_)
+        | Comparison::Lt(_)
+        | Comparison::Lte(_) => return,
     };
     check_template(template, &at.key(key), scope, errors);
 }
@@ -1120,5 +1159,72 @@ mod tests {
         .map(|k| format!("{REQ}.{k}"))
         .collect();
         assert_eq!(found, want);
+    }
+
+    #[test]
+    fn errors_stop_at_the_cap() {
+        let empty_repeats = |count: usize| {
+            let mut s = scenario("a");
+            s.steps = (0..count).map(|_| repeat(vec![])).collect();
+            draft(vec![s])
+        };
+        let found = check(&empty_repeats(150));
+        assert_eq!(found.len(), MAX_PLAN_ERRORS + 1);
+        for (index, error) in found.iter().take(MAX_PLAN_ERRORS).enumerate() {
+            assert_eq!(
+                error.path.to_string(),
+                format!("scenarios[0].steps[{index}].repeat.steps")
+            );
+            assert_eq!(error.kind, PlanErrorKind::NoSteps);
+        }
+        assert_eq!(
+            found.last(),
+            Some(&PlanError {
+                path: PlanPath::default(),
+                kind: PlanErrorKind::TooManyErrors,
+            })
+        );
+
+        let found = check(&empty_repeats(MAX_PLAN_ERRORS));
+        assert_eq!(found.len(), MAX_PLAN_ERRORS);
+        assert!(found.iter().all(|e| e.kind == PlanErrorKind::NoSteps));
+    }
+
+    #[test]
+    fn long_keys_are_cut_in_paths() {
+        // The last path segment of the one error a JSON-body key over an unset
+        // `${nope}` gives.
+        let last_segment = |key: &str| {
+            let mut r = request("POST", url());
+            r.body = Some(Body::Json(JsonTemplate::Object(vec![(
+                key.to_string(),
+                JsonTemplate::String(tpl("${nope}")),
+            )])));
+            let found = check(&one_request(r));
+            assert_eq!(found.len(), 1, "{found:?}");
+            let path = &found[0].path;
+            (path.segments().last().cloned(), path.to_string())
+        };
+
+        let (segment, text) = last_segment(&"é".repeat(1000));
+        let prefix = "é".repeat(128);
+        assert_eq!(prefix.len(), MAX_PATH_KEY_BYTES);
+        assert_eq!(segment, Some(PathSegment::TruncatedKey(prefix.clone())));
+        assert!(text.ends_with('…'), "{text}");
+        assert_eq!(text, format!("{REQ}.json.{prefix}…"));
+
+        // Byte 256 falls inside an `é`, so the cut ends one byte earlier.
+        let (segment, _) = last_segment(&format!("a{}", "é".repeat(500)));
+        let prefix = format!("a{}", "é".repeat(127));
+        assert_eq!(prefix.len(), MAX_PATH_KEY_BYTES - 1);
+        assert_eq!(segment, Some(PathSegment::TruncatedKey(prefix)));
+
+        let fits = "k".repeat(MAX_PATH_KEY_BYTES);
+        assert_eq!(last_segment(&fits).0, Some(PathSegment::Key(fits)));
+        let (segment, _) = last_segment(&"k".repeat(MAX_PATH_KEY_BYTES + 1));
+        assert_eq!(
+            segment,
+            Some(PathSegment::TruncatedKey("k".repeat(MAX_PATH_KEY_BYTES)))
+        );
     }
 }
