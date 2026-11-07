@@ -116,6 +116,11 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         | PlanErrorKind::VariableNotSet { .. }) => (kind.to_string(), false),
                         kind @ (PlanErrorKind::InvalidVariableName
                         | PlanErrorKind::ReservedVariableName) => (kind.to_string(), true),
+                        // Core dropped the rest, so the list gets the closing note.
+                        PlanErrorKind::TooManyErrors => {
+                            errors.mark_overflowed();
+                            continue;
+                        }
                     };
                     let at = compile::locate(&root, &error.path, at_key);
                     let path = compile::render_path(&error.path);
