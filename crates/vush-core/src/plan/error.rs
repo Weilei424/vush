@@ -1,6 +1,7 @@
 //! The errors a plan check reports, and the paths that locate them.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 
 /// One step of a [`PlanPath`]: a key in a map, or a position in a list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,35 @@ pub struct PlanError {
     pub kind: PlanErrorKind,
 }
 
+/// Which kind of variable a reference reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarScope {
+    /// A user's own variable, such as `token`.
+    User,
+    /// `vu.id` or `vu.iteration`.
+    BuiltIn,
+    /// A `scenario.` variable.
+    Scenario,
+    /// A `global.` variable.
+    Global,
+}
+
+/// A place where some variables can't be read. A user's own lists (`vu_setup`,
+/// `steps` and `vu_teardown`) read every scope, so they aren't listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadPlace {
+    /// `base_url`, which reads only `env.` variables.
+    BaseUrl,
+    /// The file-level `setup`.
+    FileSetup,
+    /// The file-level `teardown`.
+    FileTeardown,
+    /// A scenario's `setup`.
+    ScenarioSetup,
+    /// A scenario's `teardown`.
+    ScenarioTeardown,
+}
+
 /// What is wrong at a [`PlanError`]'s path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanErrorKind {
@@ -84,6 +114,29 @@ pub enum PlanErrorKind {
     PathNeedsBaseUrl,
     /// A threshold names a scenario the file does not have.
     UnknownScenario,
+    /// An `extract` name isn't `[A-Za-z_][A-Za-z0-9_]*`.
+    InvalidVariableName,
+    /// An `extract` name is `env`, `global`, `scenario` or `vu`.
+    ReservedVariableName,
+    /// A reference reads a scope that can't be read at its place.
+    VariableNotReadable {
+        scope: VarScope,
+        place: ReadPlace,
+        /// Another scope that sets the name and can be read here.
+        hint: Option<VarScope>,
+        /// The reference's 1-based position among the value's references,
+        /// when the value holds two or more.
+        position: Option<NonZeroUsize>,
+    },
+    /// A reference reads a name that no `extract` sets for its scope.
+    VariableNotSet {
+        scope: VarScope,
+        /// Another scope that sets the name and can be read here.
+        hint: Option<VarScope>,
+        /// The reference's 1-based position among the value's references,
+        /// when the value holds two or more.
+        position: Option<NonZeroUsize>,
+    },
 }
 
 impl fmt::Display for PlanError {
@@ -130,7 +183,89 @@ impl fmt::Display for PlanErrorKind {
                 "a `path` needs a `base_url` at the top of the file; use `url` for a full address",
             ),
             Self::UnknownScenario => f.write_str("no scenario has this name"),
+            Self::InvalidVariableName => {
+                f.write_str("a variable name must match `[A-Za-z_][A-Za-z0-9_]*`")
+            }
+            Self::ReservedVariableName => f.write_str(
+                "`env`, `global`, `scenario` and `vu` are reserved and can't be variable names",
+            ),
+            Self::VariableNotReadable {
+                scope,
+                place,
+                hint,
+                position,
+            } => {
+                let why = match place {
+                    ReadPlace::BaseUrl => None,
+                    ReadPlace::FileSetup => Some(
+                        "the file-level setup runs once, before any scenario and outside any user",
+                    ),
+                    ReadPlace::FileTeardown => Some(
+                        "the file-level teardown runs once, after every scenario and outside any user",
+                    ),
+                    ReadPlace::ScenarioSetup => {
+                        Some("a scenario's setup runs once, before its users start")
+                    }
+                    ReadPlace::ScenarioTeardown => {
+                        Some("a scenario's teardown runs once, after its users finish")
+                    }
+                };
+                match why {
+                    Some(why) => write!(f, "{} can't be read here, because {why}", what(*scope))?,
+                    None => f.write_str(
+                        "`base_url` can only read `env.` variables, because it's used before any setup runs",
+                    )?,
+                }
+                hint_and_position(f, *hint, *position)
+            }
+            Self::VariableNotSet {
+                scope,
+                hint,
+                position,
+            } => {
+                f.write_str(match scope {
+                    VarScope::User => {
+                        "no `extract` in this scenario's `vu_setup`, `steps` or `vu_teardown` sets this variable"
+                    }
+                    VarScope::Scenario => "no `extract` in this scenario's `setup` sets this variable",
+                    VarScope::Global => "no `extract` in the file-level `setup` sets this variable",
+                    // `vu.id` and `vu.iteration` are never reported as not set.
+                    VarScope::BuiltIn => "no `extract` sets this variable",
+                })?;
+                hint_and_position(f, *hint, *position)
+            }
         }
+    }
+}
+
+/// What a [`PlanErrorKind::VariableNotReadable`] says can't be read.
+fn what(scope: VarScope) -> &'static str {
+    match scope {
+        VarScope::User => "a user's own variables",
+        VarScope::BuiltIn => "`vu.id` and `vu.iteration`",
+        VarScope::Scenario => "`scenario.` variables",
+        VarScope::Global => "`global.` variables",
+    }
+}
+
+/// Writes the hint and the position suffix that end a variable error.
+fn hint_and_position(
+    f: &mut fmt::Formatter<'_>,
+    hint: Option<VarScope>,
+    position: Option<NonZeroUsize>,
+) -> fmt::Result {
+    f.write_str(match hint {
+        Some(VarScope::User) => "; it's set as a user's own variable, so read it without a prefix",
+        Some(VarScope::Scenario) => {
+            "; it's set in this scenario's hooks, so read it with `scenario.`"
+        }
+        Some(VarScope::Global) => "; it's set in the file-level hooks, so read it with `global.`",
+        // `vu.id` and `vu.iteration` are never a hint.
+        Some(VarScope::BuiltIn) | None => "",
+    })?;
+    match position {
+        Some(n) => write!(f, " (reference {n} in this value)"),
+        None => Ok(()),
     }
 }
 
