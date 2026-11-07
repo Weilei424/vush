@@ -214,3 +214,154 @@ fn colon_typos_in_unquoted_keys_never_reach_an_error() {
         assert_never_quoted(&text, Format::Yaml);
     }
 }
+
+#[test]
+fn validation_errors_never_quote_the_file() {
+    const BASE: &str = "base_url: http://localhost\n";
+    let header = r#"headers: {A: "Bearer @"}"#;
+    let plain = |extra: &str| request(&format!("method: GET, path: /, {header}{extra}"));
+    // Each row is (top, scenario, load, step, fragment). `@` is the secret.
+    let owned: Vec<(String, &str, &str, String, &str)> = vec![
+        (
+            BASE.into(),
+            "",
+            "",
+            plain(", timeout: 721h"),
+            "at most 720h",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            plain(", timeout: 0s"),
+            "longer than zero",
+        ),
+        (
+            BASE.into(),
+            "",
+            "{model: iteration_rate, rate: 0/s, duration: 1s, max_vus: 1}",
+            plain(""),
+            "above zero",
+        ),
+        (
+            BASE.into(),
+            "",
+            "{model: closed_vus, start: 0, stages: [{to: 0, over: 1s}]}",
+            plain(""),
+            "at its start",
+        ),
+        (
+            BASE.into(),
+            "",
+            "{model: closed_vus, start: 0, stages: [{to: 5, over: 0s}]}",
+            plain(""),
+            "in total",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            plain(", retry: {attempts: 1}"),
+            "2 or more",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            request(&format!(
+                "method: POST, path: /, {header}, retry: {{attempts: 2}}"
+            )),
+            "allow_non_idempotent",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            plain(", expect: {status: 99}"),
+            "100 to 599",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            plain(", expect: {status: []}"),
+            "at least one code",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            format!(
+                "if: {{when: {{all: []}}, then: [{{request: {{method: GET, path: /, {header}}}}}]}}"
+            ),
+            "at least one condition",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            request(r#"method: GET, path: /, name: "@${""#),
+            "fixed metrics label",
+        ),
+        (
+            String::new(),
+            "",
+            "",
+            request("method: GET, path: /@"),
+            "at the top of the file",
+        ),
+        (
+            format!("{BASE}thresholds: [{{metric: error_rate, scenario: @, lt: 1%}}]"),
+            "",
+            "",
+            String::new(),
+            "no scenario has this name",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            plain(r#", extract: {"a-b": {header: "@"}}"#),
+            "must match",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            plain(r#", extract: {env: {header: "@"}}"#),
+            "are reserved",
+        ),
+        (
+            r#"base_url: "${@}""#.into(),
+            "",
+            "",
+            String::new(),
+            "only read `env.`",
+        ),
+        (
+            format!(
+                "{BASE}teardown:\n  - request: {{method: GET, path: /, headers: {{A: \"${{@}}\"}}}}"
+            ),
+            "",
+            "",
+            String::new(),
+            "can't be read here",
+        ),
+        (
+            BASE.into(),
+            "",
+            "",
+            request(r#"method: GET, path: /, headers: {A: "${@}"}"#),
+            "sets this variable",
+        ),
+    ];
+    for (top, scenario, load, step, fragment) in &owned {
+        let text = document(top, scenario, load, step);
+        let errors = parse(&text, Format::Yaml).expect_err(&text);
+        assert!(
+            errors.iter().any(|e| e.message.contains(fragment)),
+            "{fragment}: {errors:?}\n{text}"
+        );
+        assert_never_quoted(&text, Format::Yaml);
+    }
+}
