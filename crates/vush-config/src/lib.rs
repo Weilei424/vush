@@ -91,7 +91,9 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
             Ok(plan) => return Ok(plan),
             Err(plan_errors) => {
                 for error in plan_errors {
-                    let message = match &error.kind {
+                    // Whether the error is about a key, such as an `extract`
+                    // name, so it points at the key rather than its value.
+                    let (message, at_key) = match &error.kind {
                         // A new variant might hold file text; this match is where it gets checked.
                         kind @ (PlanErrorKind::NoScenarios
                         | PlanErrorKind::DuplicateScenarioName
@@ -109,9 +111,13 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         | PlanErrorKind::NoConditions
                         | PlanErrorKind::TemplateInName
                         | PlanErrorKind::PathNeedsBaseUrl
-                        | PlanErrorKind::UnknownScenario) => kind.to_string(),
+                        | PlanErrorKind::UnknownScenario
+                        | PlanErrorKind::VariableNotReadable { .. }
+                        | PlanErrorKind::VariableNotSet { .. }) => (kind.to_string(), false),
+                        kind @ (PlanErrorKind::InvalidVariableName
+                        | PlanErrorKind::ReservedVariableName) => (kind.to_string(), true),
                     };
-                    let at = compile::locate(&root, &error.path, false);
+                    let at = compile::locate(&root, &error.path, at_key);
                     let path = compile::render_path(&error.path);
                     errors.push(&path, Some(at), message);
                 }
@@ -253,6 +259,37 @@ scenarios:
             Some(Location {
                 line: 3,
                 column: 12
+            })
+        );
+    }
+
+    #[test]
+    fn extract_name_errors_point_at_the_name() {
+        let text = "\
+schema_version: 1
+name: n
+scenarios:
+  - name: a
+    load: {model: closed_vus, vus: 1, duration: 1s}
+    steps:
+      - request:
+          method: GET
+          extract:
+            env: {header: X}
+          url: http://localhost/
+";
+        let errors = parse(text, Format::Yaml).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path, "scenarios[0].steps[0].request.extract.env");
+        assert_eq!(
+            errors[0].message,
+            PlanErrorKind::ReservedVariableName.to_string()
+        );
+        assert_eq!(
+            errors[0].location,
+            Some(Location {
+                line: 10,
+                column: 13
             })
         );
     }
