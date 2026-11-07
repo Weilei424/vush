@@ -77,7 +77,7 @@ Each reference must be readable where it is used, and the table shows which can 
 
 `base_url` can only read `${env.…}`, because it's used before any setup runs.
 
-Validation checks every reference against this table, including the `var` field of a `when` condition. A name is also checked by where it is set: some `extract` in a place that runs earlier or alongside must set it. Where in a list the `extract` is, and whether its step is optional, are checked when the test runs. How a value is encoded when it is substituted into a URL or a JSON body is not specified yet, and this page will state it once it is.
+Validation checks every reference against this table, including the `var` field of a `when` condition. A name is also checked by where it is set: some `extract` that the table above makes visible here must set it. Where in a list the `extract` is, and whether its step is optional, are checked when the test runs. How a value is encoded when it is substituted into a URL or a JSON body is not specified yet, and this page will state it once it is.
 
 ## JSON paths
 
@@ -405,7 +405,7 @@ A test file holds one YAML or JSON document. These rules apply however the file 
 | Values | At most 250,000, counting copies made by YAML anchors and aliases |
 | Text | At most 64 MiB of keys and strings, counting copies made by YAML anchors and aliases |
 
-Most errors give a key path, a line and a column. Syntax errors give a line and a column, and errors about the whole file, such as its size, give neither. An error never quotes a value from the file, so a token in a test file can't reach a log through an error message. Key names can appear, escaped and cut to 64 characters, so don't put secrets in key names.
+Most errors give a key path, a line and a column. Syntax errors give a line and a column, and errors about the whole file, such as its size, give neither. Some rules are checked only after the file has no other errors, so fixing one round of errors can reveal more. An error never quotes a value from the file, so a token in a test file can't reach a log through an error message. Key names can appear, escaped and cut to 64 characters, so don't put secrets in key names.
 
 JSON files follow strict JSON: no comments and no trailing commas.
 
