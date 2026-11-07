@@ -86,7 +86,7 @@
     - `status: []`, `all: []` and `any: []` are errors.
   - "Unsupported fields" needs nothing new, because P1.2 already rejects unknown keys. The nesting limit moved to P1.2.
   - [x] `PlanError.path` becomes a list of segments, errors move to `plan/error.rs`, and checks move to `plan/check/` (plan Task 1).
-  - [ ] Durations, rates and loads: the `720h` ceiling, zero timeouts and deadlines, zero fixed rates and `max_request_rate`, idle and zero-length ramps, and inherited timeouts reported once (plan Task 2).
+  - [x] Durations, rates and loads: the `720h` ceiling, zero timeouts and deadlines, zero fixed rates and `max_request_rate`, idle and zero-length ramps, and inherited timeouts reported once (plan Task 2).
   - [ ] Requests, conditions and thresholds: `attempts` of 2 or more, the retry method rule, status codes 100–599, empty `status`, `all` and `any`, `${` in a request `name`, a `path` needing a `base_url`, and thresholds naming a real scenario (plan Task 3).
   - [ ] Variables: `extract` names, and a scope and name check for every reference, with hints and positions (plan Task 4).
   - [ ] Whole-crate tests through `parse`: every rule located, unusual keys escaped, and a `secrets.rs` row per new kind (plan Task 5).
