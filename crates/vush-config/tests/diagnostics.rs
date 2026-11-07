@@ -187,3 +187,43 @@ scenarios:
         ]
     );
 }
+
+#[test]
+fn plan_errors_under_unusual_keys_are_located_exactly() {
+    let request = |extra: &str| {
+        format!(
+            "\
+schema_version: 1
+name: n
+base_url: http://localhost
+scenarios:
+  - name: a
+    load: {{ model: closed_vus, vus: 1, duration: 1s }}
+    steps:
+      - request:
+          method: GET
+          path: /
+{extra}"
+        )
+    };
+
+    // A JSON key with a dot stays one segment, so the error lands on the
+    // inner string and not on its parent.
+    let text = request("          json:\n            \"a.b\":\n              c: \"${nope}\"\n");
+    let found = errors(&text, Format::Yaml);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].path.ends_with("json.a.b.c"), "{}", found[0].path);
+    assert_eq!(lines(&found), [13]);
+
+    // A newline in a header name is written escaped in the path.
+    let text = request("          headers:\n            \"X\\nY\": \"${nope}\"\n");
+    let found = errors(&text, Format::Yaml);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].path.ends_with("headers.X\\nY"),
+        "{}",
+        found[0].path
+    );
+    assert!(!found[0].path.contains('\n'));
+    assert_eq!(lines(&found), [12]);
+}
