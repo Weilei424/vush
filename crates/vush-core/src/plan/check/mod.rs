@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use super::error::{PathSegment, PlanError, PlanErrorKind, PlanPath};
-use super::step::Step;
+use super::step::{Condition, Step};
 use super::threshold::{BoundOp, Threshold, ThresholdCheck};
 use super::workload::{PlanDraft, Scenario};
 
@@ -66,6 +66,7 @@ pub(super) fn push(errors: &mut Vec<PlanError>, at: &At<'_>, kind: PlanErrorKind
 #[derive(Clone, Copy)]
 struct Scope {
     request_timeout: Duration,
+    has_base_url: bool,
 }
 
 /// Finds every problem in a draft, in plan order: file-level `http`,
@@ -75,7 +76,9 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
     let root = At::Root;
     let scope = Scope {
         request_timeout: draft.http.timeout,
+        has_base_url: draft.base_url.is_some(),
     };
+    let names: HashSet<&str> = draft.scenarios.iter().map(|s| s.name.as_str()).collect();
     values::duration(
         draft.http.timeout,
         true,
@@ -98,7 +101,7 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
     check_steps(&draft.teardown, &root.key("teardown"), scope, &mut errors);
     let thresholds = root.key("thresholds");
     for (index, threshold) in draft.thresholds.iter().enumerate() {
-        check_threshold(threshold, &thresholds.index(index), &mut errors);
+        check_threshold(threshold, &names, &thresholds.index(index), &mut errors);
     }
     let scenarios = root.key("scenarios");
     if draft.scenarios.is_empty() {
@@ -118,7 +121,12 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
 }
 
 /// Checks one threshold, whose own place is `at`.
-fn check_threshold(threshold: &Threshold, at: &At<'_>, errors: &mut Vec<PlanError>) {
+fn check_threshold(
+    threshold: &Threshold,
+    names: &HashSet<&str>,
+    at: &At<'_>,
+    errors: &mut Vec<PlanError>,
+) {
     if let ThresholdCheck::HttpRequestDuration { bound, .. } = &threshold.check {
         let key = match bound.op {
             BoundOp::Lt => "lt",
@@ -128,6 +136,7 @@ fn check_threshold(threshold: &Threshold, at: &At<'_>, errors: &mut Vec<PlanErro
         };
         values::duration(bound.value, false, &at.key(key), errors);
     }
+    values::threshold_scenario(threshold.scenario.as_deref(), names, at, errors);
 }
 
 /// Checks one scenario, whose own place is `at`.
@@ -140,6 +149,7 @@ fn check_scenario<'a>(
 ) {
     let scope = Scope {
         request_timeout: scenario.http.timeout,
+        has_base_url: draft.base_url.is_some(),
     };
     if !seen_names.insert(scenario.name.as_str()) {
         push(
@@ -178,6 +188,23 @@ fn check_scenario<'a>(
     check_steps(&scenario.steps, &steps, scope, errors);
 }
 
+/// Checks a condition, whose own place is `at`.
+fn check_condition(condition: &Condition, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    match condition {
+        Condition::Compare { .. } => {}
+        Condition::All(list) => check_conditions(list, &at.key("all"), errors),
+        Condition::Any(list) => check_conditions(list, &at.key("any"), errors),
+        Condition::Not(inner) => check_condition(inner, &at.key("not"), errors),
+    }
+}
+
+fn check_conditions(list: &[Condition], at: &At<'_>, errors: &mut Vec<PlanError>) {
+    values::condition_list(list, at, errors);
+    for (index, item) in list.iter().enumerate() {
+        check_condition(item, &at.index(index), errors);
+    }
+}
+
 /// Checks every step in a list, and the lists nested inside them.
 ///
 /// `at` is the list's own place, such as `scenarios[0].steps`. This does not
@@ -189,6 +216,8 @@ fn check_steps(steps: &[Step], at: &At<'_>, scope: Scope, errors: &mut Vec<PlanE
         match step {
             Step::Request(request) => {
                 let request_at = step_at.key("request");
+                values::request_name(request.name.as_deref(), &request_at, errors);
+                values::target(&request.target, scope.has_base_url, &request_at, errors);
                 values::inherited(
                     request.timeout,
                     scope.request_timeout,
@@ -196,17 +225,18 @@ fn check_steps(steps: &[Step], at: &At<'_>, scope: Scope, errors: &mut Vec<PlanE
                     errors,
                 );
                 if let Some(retry) = &request.retry {
-                    values::duration(
-                        retry.backoff,
-                        false,
-                        &request_at.key("retry").key("backoff"),
-                        errors,
-                    );
+                    values::retry(retry, &request.method, &request_at.key("retry"), errors);
                 }
+                values::status(
+                    &request.expect.status,
+                    &request_at.key("expect").key("status"),
+                    errors,
+                );
             }
             Step::Wait(value) => values::duration(*value, false, &step_at.key("wait"), errors),
             Step::If(step) => {
                 let if_at = step_at.key("if");
+                check_condition(&step.when, &if_at.key("when"), errors);
                 let then = if_at.key("then");
                 if step.then.is_empty() {
                     push(errors, &then, PlanErrorKind::NoSteps);
@@ -312,7 +342,9 @@ mod tests {
 
     use super::super::load::{ClosedVusLoad, LoadModel, QueuePolicy, RateSchedule};
     use super::super::settings::{HttpSettings, ResourceLimits};
-    use super::super::step::{Comparison, Condition, IfStep, RepeatStep, Step};
+    use super::super::step::{
+        Comparison, Condition, Expect, IfStep, RepeatStep, StatusMatch, Step,
+    };
     use super::super::step::{RequestStep, RequestTarget, RetryPolicy};
     use super::super::template::VarRef;
     use super::super::threshold::{Bound, PercentileStat};
@@ -721,5 +753,224 @@ mod tests {
         let mut s = scenario("a");
         s.steps = vec![Step::Wait(Duration::ZERO), Step::Request(Box::new(r))];
         assert!(check(&draft(vec![s])).is_empty());
+    }
+
+    fn url() -> RequestTarget {
+        RequestTarget::Url(tpl("http://localhost/"))
+    }
+
+    fn one_request(r: RequestStep) -> PlanDraft {
+        let mut s = scenario("a");
+        s.steps = vec![Step::Request(Box::new(r))];
+        draft(vec![s])
+    }
+
+    fn at(path: &str, kind: PlanErrorKind) -> (String, PlanErrorKind) {
+        (path.to_string(), kind)
+    }
+
+    const REQ: &str = "scenarios[0].steps[0].request";
+
+    fn retrying(method: &str, attempts: u32, allow: bool) -> PlanDraft {
+        let mut r = request(method, url());
+        r.retry = Some(RetryPolicy {
+            attempts,
+            backoff: Duration::ZERO,
+            allow_non_idempotent: allow,
+        });
+        one_request(r)
+    }
+
+    #[test]
+    fn attempts_must_be_two_or_more() {
+        assert!(errors(&retrying("GET", 2, false)).is_empty());
+        for attempts in [1, 0] {
+            assert_eq!(
+                errors(&retrying("GET", attempts, false)),
+                [at(
+                    &format!("{REQ}.retry.attempts"),
+                    PlanErrorKind::TooFewAttempts
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn retrying_a_non_idempotent_method_needs_the_opt_in() {
+        for method in ["POST", "PATCH", "CONNECT", "PURGE", "M-SEARCH"] {
+            assert_eq!(
+                errors(&retrying(method, 2, false)),
+                [at(&format!("{REQ}.retry"), PlanErrorKind::RetryNeedsOptIn)],
+                "{method}"
+            );
+            assert!(errors(&retrying(method, 2, true)).is_empty(), "{method}");
+        }
+        for method in values::IDEMPOTENT {
+            assert!(errors(&retrying(method, 2, false)).is_empty(), "{method}");
+        }
+    }
+
+    fn with_status(status: StatusMatch) -> PlanDraft {
+        let mut r = request("GET", url());
+        r.expect = Expect {
+            status,
+            ..Expect::default()
+        };
+        one_request(r)
+    }
+
+    #[test]
+    fn status_codes_must_be_from_100_to_599() {
+        for ok in [
+            StatusMatch::OneOf(vec![100]),
+            StatusMatch::OneOf(vec![599]),
+            StatusMatch::OneOf(vec![200, 304]),
+            StatusMatch::AnySuccess,
+        ] {
+            assert!(errors(&with_status(ok)).is_empty());
+        }
+        let path = format!("{REQ}.expect.status");
+        for bad in [vec![99], vec![600], vec![200, 0, 700]] {
+            assert_eq!(
+                errors(&with_status(StatusMatch::OneOf(bad))),
+                [at(&path, PlanErrorKind::StatusOutOfRange)]
+            );
+        }
+        assert_eq!(
+            errors(&with_status(StatusMatch::OneOf(vec![]))),
+            [at(&path, PlanErrorKind::EmptyStatus)]
+        );
+    }
+
+    fn exists() -> Condition {
+        Condition::Compare {
+            var: VarRef::VuId,
+            op: Comparison::Exists(true),
+        }
+    }
+
+    fn when(condition: Condition) -> PlanDraft {
+        let mut s = scenario("a");
+        s.steps = vec![Step::If(IfStep {
+            when: condition,
+            then: vec![wait()],
+            otherwise: vec![],
+        })];
+        draft(vec![s])
+    }
+
+    #[test]
+    fn all_and_any_need_a_condition() {
+        let base = "scenarios[0].steps[0].if.when";
+        assert_eq!(
+            errors(&when(Condition::All(vec![]))),
+            [at(&format!("{base}.all"), PlanErrorKind::NoConditions)]
+        );
+        assert_eq!(
+            errors(&when(Condition::Not(Box::new(Condition::Any(vec![]))))),
+            [at(&format!("{base}.not.any"), PlanErrorKind::NoConditions)]
+        );
+        assert_eq!(
+            errors(&when(Condition::All(vec![Condition::Any(vec![])]))),
+            [at(
+                &format!("{base}.all[0].any"),
+                PlanErrorKind::NoConditions
+            )]
+        );
+        assert!(errors(&when(Condition::All(vec![exists(), exists()]))).is_empty());
+        assert!(errors(&when(Condition::Any(vec![exists()]))).is_empty());
+    }
+
+    #[test]
+    fn request_names_cannot_hold_template_syntax() {
+        let named = |name: Option<&str>| {
+            let mut r = request("GET", url());
+            r.name = name.map(str::to_string);
+            one_request(r)
+        };
+        for bad in ["a${b}", "$${b}"] {
+            assert_eq!(
+                errors(&named(Some(bad))),
+                [at(&format!("{REQ}.name"), PlanErrorKind::TemplateInName)]
+            );
+        }
+        for ok in [Some("a$b"), Some("a{b}"), Some("price $5"), None] {
+            assert!(errors(&named(ok)).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_path_needs_a_base_url() {
+        let path = || RequestTarget::Path(tpl("/x"));
+        let mut s = scenario("a");
+        s.steps = vec![Step::Request(Box::new(request("GET", path())))];
+        let mut d = draft(vec![s]);
+        d.setup = vec![Step::Request(Box::new(request("GET", path())))];
+        assert_eq!(
+            errors(&d),
+            [
+                at("setup[0].request.path", PlanErrorKind::PathNeedsBaseUrl),
+                at(
+                    "scenarios[0].steps[0].request.path",
+                    PlanErrorKind::PathNeedsBaseUrl
+                ),
+            ]
+        );
+        d.base_url = Some(tpl("http://localhost"));
+        assert!(errors(&d).is_empty());
+        assert!(errors(&one_request(request("GET", url()))).is_empty());
+    }
+
+    #[test]
+    fn thresholds_must_name_a_scenario_in_the_file() {
+        let with = |scenario_name: Option<&str>| {
+            let mut d = draft(vec![scenario("checkout")]);
+            d.thresholds = vec![Threshold {
+                scenario: scenario_name.map(str::to_string),
+                check: ThresholdCheck::HttpRequestDuration {
+                    stat: PercentileStat::P95,
+                    bound: Bound {
+                        op: BoundOp::Lt,
+                        value: Duration::from_secs(1),
+                    },
+                },
+            }];
+            d
+        };
+        assert!(errors(&with(Some("checkout"))).is_empty());
+        assert!(errors(&with(None)).is_empty());
+        for bad in ["Checkout", "missing"] {
+            assert_eq!(
+                errors(&with(Some(bad))),
+                [at("thresholds[0].scenario", PlanErrorKind::UnknownScenario)]
+            );
+        }
+    }
+
+    #[test]
+    fn request_errors_come_in_plan_order() {
+        let mut r = request("POST", RequestTarget::Path(tpl("/x")));
+        r.name = Some("${x}".to_string());
+        r.timeout = Duration::ZERO;
+        r.retry = Some(RetryPolicy {
+            attempts: 1,
+            backoff: MAX_DURATION + MS,
+            allow_non_idempotent: false,
+        });
+        r.expect.status = StatusMatch::OneOf(vec![]);
+        let found: Vec<String> = errors(&one_request(r)).into_iter().map(|e| e.0).collect();
+        let want: Vec<String> = [
+            "name",
+            "path",
+            "timeout",
+            "retry.attempts",
+            "retry.backoff",
+            "retry",
+            "expect.status",
+        ]
+        .iter()
+        .map(|k| format!("{REQ}.{k}"))
+        .collect();
+        assert_eq!(found, want);
     }
 }
