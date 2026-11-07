@@ -290,21 +290,31 @@ fn check_conditions(
 /// Checks the template in a comparison, if it has one, at its op key under
 /// `at`: `equals`, `not_equals` or `contains`.
 fn check_comparison(op: &Comparison, at: &At<'_>, scope: Scope<'_>, errors: &mut Vec<PlanError>) {
-    let (key, template) = match op {
-        Comparison::Equals(Scalar::String(template)) => ("equals", template),
-        Comparison::NotEquals(Scalar::String(template)) => ("not_equals", template),
-        Comparison::Contains(template) => ("contains", template),
-        // Every variant is named, so a new one that holds a template can't
-        // be skipped without a compile error here.
-        Comparison::Equals(Scalar::Null | Scalar::Bool(_) | Scalar::Number(_))
-        | Comparison::NotEquals(Scalar::Null | Scalar::Bool(_) | Scalar::Number(_))
-        | Comparison::Exists(_)
-        | Comparison::Gt(_)
-        | Comparison::Gte(_)
-        | Comparison::Lt(_)
-        | Comparison::Lte(_) => return,
-    };
-    check_template(template, &at.key(key), scope, errors);
+    // Every variant is named, so a new one that holds a template or a number
+    // can't be skipped without a compile error here.
+    match op {
+        Comparison::Equals(scalar) => check_scalar(scalar, &at.key("equals"), scope, errors),
+        Comparison::NotEquals(scalar) => {
+            check_scalar(scalar, &at.key("not_equals"), scope, errors);
+        }
+        Comparison::Contains(template) => {
+            check_template(template, &at.key("contains"), scope, errors);
+        }
+        Comparison::Gt(number) => values::number(*number, &at.key("gt"), errors),
+        Comparison::Gte(number) => values::number(*number, &at.key("gte"), errors),
+        Comparison::Lt(number) => values::number(*number, &at.key("lt"), errors),
+        Comparison::Lte(number) => values::number(*number, &at.key("lte"), errors),
+        Comparison::Exists(_) => {}
+    }
+}
+
+/// Checks the value of an `equals` or `not_equals`, whose own place is `at`.
+fn check_scalar(scalar: &Scalar, at: &At<'_>, scope: Scope<'_>, errors: &mut Vec<PlanError>) {
+    match scalar {
+        Scalar::String(template) => check_template(template, at, scope, errors),
+        Scalar::Number(number) => values::number(*number, at, errors),
+        Scalar::Null | Scalar::Bool(_) => {}
+    }
 }
 
 fn check_template(template: &Template, at: &At<'_>, scope: Scope<'_>, errors: &mut Vec<PlanError>) {
@@ -324,10 +334,11 @@ fn check_pairs(
     }
 }
 
-/// Checks every string in a `json` body, whose own place is `at`.
+/// Checks every string and number in a `json` body, whose own place is `at`.
 fn check_json(json: &JsonTemplate, at: &At<'_>, scope: Scope<'_>, errors: &mut Vec<PlanError>) {
     match json {
         JsonTemplate::String(template) => check_template(template, at, scope, errors),
+        JsonTemplate::Number(number) => values::number(*number, at, errors),
         JsonTemplate::Array(items) => {
             for (index, item) in items.iter().enumerate() {
                 check_json(item, &at.index(index), scope, errors);
@@ -338,7 +349,7 @@ fn check_json(json: &JsonTemplate, at: &At<'_>, scope: Scope<'_>, errors: &mut V
                 check_json(value, &at.key(key), scope, errors);
             }
         }
-        JsonTemplate::Null | JsonTemplate::Bool(_) | JsonTemplate::Number(_) => {}
+        JsonTemplate::Null | JsonTemplate::Bool(_) => {}
     }
 }
 
@@ -1215,6 +1226,64 @@ mod tests {
         assert_eq!(last_segment(&fits).0, Some(PathSegment::Key(fits)));
         let (segment, _) = last_segment(&"k".repeat(MAX_PATH_KEY_BYTES + 1));
         assert_eq!(cut_prefix(segment), "k".repeat(MAX_PATH_KEY_BYTES));
+    }
+
+    #[test]
+    fn numbers_must_be_finite() {
+        use super::super::step::JsonAssertion;
+        use super::super::value::JsonNumber::{Float, Int};
+
+        // Readers never produce NaN or infinity, but an adapter can build them.
+        let nan = Float(f64::NAN);
+        let mut r = request("POST", url());
+        r.body = Some(Body::Json(JsonTemplate::Object(vec![
+            (
+                "a".to_string(),
+                JsonTemplate::Array(vec![JsonTemplate::Number(nan)]),
+            ),
+            ("b".to_string(), JsonTemplate::Number(Float(1.5))),
+            ("c".to_string(), JsonTemplate::Number(Float(-0.0))),
+            ("d".to_string(), JsonTemplate::Number(Int(-3))),
+        ])));
+        let assert_that = |op| JsonAssertion {
+            path: "$.x".parse().unwrap(),
+            op,
+        };
+        r.expect.json = vec![
+            assert_that(Comparison::Equals(Scalar::Number(Float(f64::INFINITY)))),
+            assert_that(Comparison::NotEquals(Scalar::Number(Float(
+                f64::NEG_INFINITY,
+            )))),
+            assert_that(Comparison::Gt(nan)),
+            assert_that(Comparison::Gte(Float(f64::INFINITY))),
+            assert_that(Comparison::Lt(nan)),
+            assert_that(Comparison::Lte(nan)),
+            assert_that(Comparison::Equals(Scalar::Number(Float(2.5)))),
+            assert_that(Comparison::Gt(Int(0))),
+        ];
+        let mut d = one_request(r);
+        d.scenarios[0].steps.push(Step::If(IfStep {
+            when: Condition::Compare {
+                var: VarRef::VuId,
+                op: Comparison::Lte(nan),
+            },
+            then: vec![wait()],
+            otherwise: vec![],
+        }));
+        let bad = PlanErrorKind::NonFiniteNumber;
+        assert_eq!(
+            errors(&d),
+            [
+                at(&format!("{REQ}.json.a[0]"), bad.clone()),
+                at(&format!("{REQ}.expect.json[0].equals"), bad.clone()),
+                at(&format!("{REQ}.expect.json[1].not_equals"), bad.clone()),
+                at(&format!("{REQ}.expect.json[2].gt"), bad.clone()),
+                at(&format!("{REQ}.expect.json[3].gte"), bad.clone()),
+                at(&format!("{REQ}.expect.json[4].lt"), bad.clone()),
+                at(&format!("{REQ}.expect.json[5].lte"), bad.clone()),
+                at("scenarios[0].steps[1].if.when.lte", bad),
+            ]
+        );
     }
 
     /// The nesting `WorkloadPlan::new` documents as tested on a 2 MiB stack.
