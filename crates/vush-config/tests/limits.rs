@@ -50,7 +50,7 @@ fn not_steps(n: usize) -> String {
 
 fn json_steps(n: usize) -> String {
     let body = nested(n, "[", "]", "1");
-    format!(r#"{{"request": {{"method": "GET", "path": "/", "json": {body}}}}}"#)
+    format!(r#"{{"request": {{"method": "GET", "url": "http://localhost/", "json": {body}}}}}"#)
 }
 
 /// A shape's name, its builder, and the deepest `n` that is allowed.
