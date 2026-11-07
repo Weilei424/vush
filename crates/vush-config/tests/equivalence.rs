@@ -11,6 +11,7 @@ fn aliases_and_merge_keys_equal_the_written_out_json() {
     let yaml = r#"
 schema_version: 1
 name: shared
+base_url: "http://localhost"
 scenarios:
   - name: a
     load: { model: closed_vus, vus: 1, duration: 1s }
@@ -39,6 +40,7 @@ scenarios:
     let json = r#"{
   "schema_version": 1,
   "name": "shared",
+  "base_url": "http://localhost",
   "scenarios": [
     {"name": "a",
      "load": {"model": "closed_vus", "vus": 1, "duration": "1s"},
@@ -82,10 +84,10 @@ fn crlf_and_bom_files_parse_to_the_same_plan() {
 fn with_body(body: &str, format: Format) -> WorkloadPlan {
     let text = match format {
         Format::Yaml => format!(
-            "schema_version: 1\nname: n\nscenarios:\n  - name: s\n    load: {{model: closed_vus, vus: 1, duration: 1s}}\n    steps:\n      - request:\n          method: POST\n          path: /\n          json: {body}\n"
+            "schema_version: 1\nname: n\nbase_url: \"http://localhost\"\nscenarios:\n  - name: s\n    load: {{model: closed_vus, vus: 1, duration: 1s}}\n    steps:\n      - request:\n          method: POST\n          path: /\n          json: {body}\n"
         ),
         Format::Json => format!(
-            r#"{{"schema_version": 1, "name": "n", "scenarios": [{{"name": "s", "load": {{"model": "closed_vus", "vus": 1, "duration": "1s"}}, "steps": [{{"request": {{"method": "POST", "path": "/", "json": {body}}}}}]}}]}}"#
+            r#"{{"schema_version": 1, "name": "n", "base_url": "http://localhost", "scenarios": [{{"name": "s", "load": {{"model": "closed_vus", "vus": 1, "duration": "1s"}}, "steps": [{{"request": {{"method": "POST", "path": "/", "json": {body}}}}}]}}]}}"#
         ),
     };
     parse(&text, format).unwrap_or_else(|e| panic!("{text}\n{e:?}"))
@@ -136,8 +138,8 @@ fn plain_yaml_words_stay_strings() {
 
 #[test]
 fn block_scalars_equal_json_strings() {
-    let yaml = "schema_version: 1\nname: n\nscenarios:\n  - name: s\n    load: {model: closed_vus, vus: 1, duration: 1s}\n    steps:\n      - request:\n          method: POST\n          path: /\n          body: |\n            line one\n            line two\n";
-    let json = r#"{"schema_version": 1, "name": "n", "scenarios": [{"name": "s", "load": {"model": "closed_vus", "vus": 1, "duration": "1s"}, "steps": [{"request": {"method": "POST", "path": "/", "body": "line one\nline two\n"}}]}]}"#;
+    let yaml = "schema_version: 1\nname: n\nbase_url: \"http://localhost\"\nscenarios:\n  - name: s\n    load: {model: closed_vus, vus: 1, duration: 1s}\n    steps:\n      - request:\n          method: POST\n          path: /\n          body: |\n            line one\n            line two\n";
+    let json = r#"{"schema_version": 1, "name": "n", "base_url": "http://localhost", "scenarios": [{"name": "s", "load": {"model": "closed_vus", "vus": 1, "duration": "1s"}, "steps": [{"request": {"method": "POST", "path": "/", "body": "line one\nline two\n"}}]}]}"#;
     assert_eq!(
         parse(yaml, Format::Yaml).expect("yaml"),
         parse(json, Format::Json).expect("json")
