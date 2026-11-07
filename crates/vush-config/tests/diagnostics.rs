@@ -62,7 +62,9 @@ scenarios:
 
 #[test]
 fn unquoted_reference_works_in_block_style_and_fails_cleanly_in_flow_style() {
-    let block = request_with_headers("          headers:\n            A: ${token}\n");
+    let block = request_with_headers(
+        "          headers:\n            A: ${token}\n          extract: {token: {header: X}}\n",
+    );
     let plan = parse(&block, Format::Yaml).expect("block style");
     let Step::Request(request) = &plan.scenarios()[0].steps[0] else {
         panic!("a request");
