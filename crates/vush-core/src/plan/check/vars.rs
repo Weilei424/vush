@@ -183,6 +183,12 @@ pub(super) fn reference(
     at: &At<'_>,
     errors: &mut Vec<PlanError>,
 ) {
+    // A parsed reference always holds a valid name, but an adapter can build
+    // a `VarRef` by hand, so its name is checked as an `extract` name is.
+    if let Some(kind) = invalid_name(var) {
+        push(errors, at, kind);
+        return;
+    }
     let (scope, name) = match var {
         VarRef::Env(_) => return,
         VarRef::VuId | VarRef::VuIteration => (VarScope::BuiltIn, None),
@@ -220,19 +226,38 @@ pub(super) fn reference(
     }
 }
 
+/// What is wrong with a variable name, if anything. A `bare` name, one with no
+/// `scenario.`, `global.` or `env.` prefix, also can't be a reserved word.
+fn name_problem(name: &str, bare: bool) -> Option<PlanErrorKind> {
+    if !is_name(name) {
+        Some(PlanErrorKind::InvalidVariableName)
+    } else if bare && RESERVED.contains(&name) {
+        Some(PlanErrorKind::ReservedVariableName)
+    } else {
+        None
+    }
+}
+
+/// What is wrong with the name a reference holds, if anything. `vu.id` and
+/// `vu.iteration` hold none.
+fn invalid_name(var: &VarRef) -> Option<PlanErrorKind> {
+    match var {
+        VarRef::Vu(name) => name_problem(name, true),
+        VarRef::Scenario(name) | VarRef::Global(name) | VarRef::Env(name) => {
+            name_problem(name, false)
+        }
+        VarRef::VuId | VarRef::VuIteration => None,
+    }
+}
+
 /// Checks that each `extract` name is a variable name and not reserved. `at`
 /// is the `extract` map; problems are reported at the name.
 pub(super) fn extract_names(extract: &[Extraction], at: &At<'_>, errors: &mut Vec<PlanError>) {
     for extraction in extract {
         let name = extraction.var.as_str();
-        let kind = if !is_name(name) {
-            PlanErrorKind::InvalidVariableName
-        } else if RESERVED.contains(&name) {
-            PlanErrorKind::ReservedVariableName
-        } else {
-            continue;
-        };
-        push(errors, &at.key(name), kind);
+        if let Some(kind) = name_problem(name, true) {
+            push(errors, &at.key(name), kind);
+        }
     }
 }
 
@@ -646,6 +671,44 @@ mod tests {
     }
 
     #[test]
+    fn var_fields_built_by_hand_must_hold_a_valid_name() {
+        // A parsed `${...}` is always valid, but an adapter can build a `var:`
+        // field from any `VarRef`. Each one is checked as `extract` names are,
+        // and isn't also reported as unreadable or not set.
+        let when = |var: VarRef| {
+            let mut s = scenario("a");
+            s.steps = vec![Step::If(IfStep {
+                when: Condition::Compare {
+                    var,
+                    op: Comparison::Exists(true),
+                },
+                then: vec![wait()],
+                otherwise: vec![],
+            })];
+            errors(&draft(vec![s]))
+        };
+        let var_at = |kind| vec![at("scenarios[0].steps[0].if.when.var", kind)];
+        let invalid = PlanErrorKind::InvalidVariableName;
+        let reserved = PlanErrorKind::ReservedVariableName;
+        for (var, want) in [
+            (VarRef::Env(String::new()), var_at(invalid.clone())),
+            (VarRef::Env("A B".into()), var_at(invalid.clone())),
+            (VarRef::Vu("1x".into()), var_at(invalid.clone())),
+            (VarRef::Vu("my-var".into()), var_at(invalid.clone())),
+            (VarRef::Scenario(String::new()), var_at(invalid.clone())),
+            (VarRef::Global("x.y".into()), var_at(invalid.clone())),
+            (VarRef::Vu("env".into()), var_at(reserved.clone())),
+            (VarRef::Vu("vu".into()), var_at(reserved)),
+            // Valid names behave as before. The reserved words only bar
+            // bare names, so `global.env` is a valid name that nothing sets.
+            (VarRef::Env("HOME".into()), vec![]),
+            (VarRef::Global("env".into()), var_at(not_set(Global, None))),
+        ] {
+            assert_eq!(when(var.clone()), want, "{var:?}");
+        }
+    }
+
+    #[test]
     fn nested_extracts_and_reads_are_found() {
         let mut s = scenario("a");
         s.vu_setup = vec![if_then(vec![repeat(extracting(&["t"]))])];
@@ -670,7 +733,8 @@ mod tests {
         let mut r = get();
         r.extract = names.iter().map(|name| extraction(name)).collect();
         let mut s = scenario("a");
-        // A name that isn't valid isn't set, even when a reference names it.
+        // The valid `x` is set by the extract above. A reference that holds the
+        // invalid `my-var` is reported for its name, like the extract is.
         let compare = |name: &str| Condition::Compare {
             var: VarRef::Vu(name.to_string()),
             op: Comparison::Exists(true),
@@ -691,15 +755,12 @@ mod tests {
             [
                 at(&name("1x"), invalid.clone()),
                 at(&name("my-var"), invalid.clone()),
-                at(&name(""), invalid),
+                at(&name(""), invalid.clone()),
                 at(&name("env"), reserved.clone()),
                 at(&name("global"), reserved.clone()),
                 at(&name("scenario"), reserved.clone()),
                 at(&name("vu"), reserved),
-                at(
-                    "scenarios[0].steps[1].if.when.all[1].var",
-                    not_set(User, None)
-                ),
+                at("scenarios[0].steps[1].if.when.all[1].var", invalid),
             ]
         );
     }
