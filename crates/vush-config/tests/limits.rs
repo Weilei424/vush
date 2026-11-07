@@ -37,14 +37,14 @@ fn repeat_steps(n: usize) -> String {
 fn if_steps(n: usize) -> String {
     nested(
         n,
-        r#"{"if": {"when": {"var": "x", "exists": true}, "then": ["#,
+        r#"{"if": {"when": {"var": "vu.id", "exists": true}, "then": ["#,
         "]}}",
         r#"{"wait": "1s"}"#,
     )
 }
 
 fn not_steps(n: usize) -> String {
-    let when = nested(n, r#"{"not": "#, "}", r#"{"var": "x", "exists": true}"#);
+    let when = nested(n, r#"{"not": "#, "}", r#"{"var": "vu.id", "exists": true}"#);
     format!(r#"{{"if": {{"when": {when}, "then": [{{"wait": "1s"}}]}}}}"#)
 }
 
