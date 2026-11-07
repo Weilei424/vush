@@ -68,6 +68,22 @@ pub enum PlanErrorKind {
     IdleRamp,
     /// A ramping load's stages last no time in total.
     ZeroLengthRamp,
+    /// `retry.attempts` is below 2.
+    TooFewAttempts,
+    /// A non-idempotent method is retried without `allow_non_idempotent`.
+    RetryNeedsOptIn,
+    /// A status code is outside 100 to 599.
+    StatusOutOfRange,
+    /// `status` lists no codes.
+    EmptyStatus,
+    /// An `all` or `any` list holds no condition.
+    NoConditions,
+    /// A request name holds `${`.
+    TemplateInName,
+    /// A `path` target is used with no `base_url`.
+    PathNeedsBaseUrl,
+    /// A threshold names a scenario the file does not have.
+    UnknownScenario,
 }
 
 impl fmt::Display for PlanError {
@@ -96,6 +112,24 @@ impl fmt::Display for PlanErrorKind {
             Self::ZeroLengthRamp => {
                 f.write_str("a ramping load's stages must last longer than zero in total")
             }
+            Self::TooFewAttempts => {
+                f.write_str("`attempts` must be 2 or more, because it counts the first attempt")
+            }
+            Self::RetryNeedsOptIn => f.write_str(
+                "retrying a method other than GET, HEAD, PUT, DELETE, OPTIONS or TRACE needs `allow_non_idempotent: true`",
+            ),
+            Self::StatusOutOfRange => f.write_str("status codes must be from 100 to 599"),
+            Self::EmptyStatus => f.write_str(
+                "`status` needs at least one code; leave it out to accept any 2xx or 3xx",
+            ),
+            Self::NoConditions => f.write_str("at least one condition is required"),
+            Self::TemplateInName => {
+                f.write_str("a request name is a fixed metrics label, so it can't contain `${`")
+            }
+            Self::PathNeedsBaseUrl => f.write_str(
+                "a `path` needs a `base_url` at the top of the file; use `url` for a full address",
+            ),
+            Self::UnknownScenario => f.write_str("no scenario has this name"),
         }
     }
 }
