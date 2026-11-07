@@ -12,13 +12,66 @@ pub const MAX_PLAN_ERRORS: usize = 100;
 pub const MAX_PATH_KEY_BYTES: usize = 256;
 
 /// One step of a [`PlanPath`]: a key in a map, or a position in a list.
+///
+/// Build a key segment with [`PathSegment::for_key`], which cuts long keys,
+/// and test it against a key with [`PathSegment::matches_key`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathSegment {
     Key(String),
-    /// A key longer than [`MAX_PATH_KEY_BYTES`]: its longest prefix of at
-    /// most that many bytes that ends on a character boundary.
-    TruncatedKey(String),
+    /// A key longer than [`MAX_PATH_KEY_BYTES`]. `len` and `fingerprint` tell
+    /// it apart from other long keys that start with the same prefix.
+    TruncatedKey {
+        /// The key's longest prefix of at most [`MAX_PATH_KEY_BYTES`] bytes
+        /// that ends on a character boundary.
+        prefix: String,
+        /// The whole key's length in bytes.
+        len: usize,
+        /// A hash of the whole key.
+        fingerprint: u64,
+    },
     Index(usize),
+}
+
+impl PathSegment {
+    /// A segment for a map key, cut to a [`PathSegment::TruncatedKey`] when
+    /// it is longer than [`MAX_PATH_KEY_BYTES`].
+    pub fn for_key(key: &str) -> Self {
+        if key.len() <= MAX_PATH_KEY_BYTES {
+            return Self::Key(key.to_owned());
+        }
+        let end = key.floor_char_boundary(MAX_PATH_KEY_BYTES);
+        // `end` is a character boundary inside the key, so the split can't fail.
+        let prefix = key.split_at_checked(end).map_or("", |(prefix, _)| prefix);
+        Self::TruncatedKey {
+            prefix: prefix.to_owned(),
+            len: key.len(),
+            fingerprint: fingerprint(key),
+        }
+    }
+
+    /// Whether this segment names `key`. An index names no key.
+    ///
+    /// A cut key matches a key with the same prefix, length and fingerprint,
+    /// so two long keys that share a prefix are told apart.
+    pub fn matches_key(&self, key: &str) -> bool {
+        match self {
+            Self::Key(own) => own == key,
+            Self::TruncatedKey {
+                prefix,
+                len,
+                fingerprint: own,
+            } => key.len() == *len && key.starts_with(prefix.as_str()) && fingerprint(key) == *own,
+            Self::Index(_) => false,
+        }
+    }
+}
+
+/// A 64-bit FNV-1a hash of `key`. It is fixed by this code, not by the
+/// standard library, so every crate built from this source agrees on it.
+fn fingerprint(key: &str) -> u64 {
+    key.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// Where a problem is, as the file's own key names and list positions, such
@@ -49,8 +102,10 @@ impl fmt::Display for PlanPath {
             match segment {
                 PathSegment::Key(key) if position == 0 => f.write_str(key)?,
                 PathSegment::Key(key) => write!(f, ".{key}")?,
-                PathSegment::TruncatedKey(prefix) if position == 0 => write!(f, "{prefix}…")?,
-                PathSegment::TruncatedKey(prefix) => write!(f, ".{prefix}…")?,
+                PathSegment::TruncatedKey { prefix, .. } if position == 0 => {
+                    write!(f, "{prefix}…")?;
+                }
+                PathSegment::TruncatedKey { prefix, .. } => write!(f, ".{prefix}…")?,
                 PathSegment::Index(index) => write!(f, "[{index}]")?,
             }
         }
@@ -319,12 +374,52 @@ mod tests {
         let dotted = PlanPath::new(vec![Key("a.b".into())]);
         assert_eq!(dotted.segments().len(), 1);
         assert_eq!(dotted.to_string(), "a.b");
+        let long = |c: &str| c.repeat(MAX_PATH_KEY_BYTES + 1);
         let cut = PlanPath::new(vec![
-            PathSegment::TruncatedKey("ab".into()),
+            PathSegment::for_key(&long("a")),
             Index(0),
-            PathSegment::TruncatedKey("cd".into()),
+            PathSegment::for_key(&long("c")),
         ]);
-        assert_eq!(cut.to_string(), "ab…[0].cd…");
+        let prefix = |c: &str| c.repeat(MAX_PATH_KEY_BYTES);
+        assert_eq!(
+            cut.to_string(),
+            format!("{}…[0].{}…", prefix("a"), prefix("c"))
+        );
+    }
+
+    #[test]
+    fn short_keys_stay_whole() {
+        let key = "k".repeat(MAX_PATH_KEY_BYTES);
+        assert_eq!(PathSegment::for_key(&key), PathSegment::Key(key.clone()));
+        assert!(PathSegment::for_key(&key).matches_key(&key));
+        assert!(!PathSegment::for_key(&key).matches_key("k"));
+        assert!(!PathSegment::Index(0).matches_key("0"));
+    }
+
+    #[test]
+    fn long_keys_are_cut_on_a_character_boundary() {
+        // 'é' is two bytes, so byte 256 falls inside the 129th one.
+        let key = format!("a{}", "é".repeat(200));
+        let PathSegment::TruncatedKey { prefix, len, .. } = PathSegment::for_key(&key) else {
+            panic!("a long key is cut");
+        };
+        assert_eq!(prefix, format!("a{}", "é".repeat(127)));
+        assert_eq!(prefix.len(), MAX_PATH_KEY_BYTES - 1);
+        assert_eq!(len, key.len());
+    }
+
+    #[test]
+    fn a_cut_key_matches_only_its_own_key() {
+        let shared = "x".repeat(MAX_PATH_KEY_BYTES);
+        let first = format!("{shared}A");
+        let second = format!("{shared}B");
+        let segment = PathSegment::for_key(&second);
+        assert!(segment.matches_key(&second));
+        // Same prefix and length, different tail.
+        assert!(!segment.matches_key(&first));
+        // Same prefix, different length.
+        assert!(!segment.matches_key(&format!("{second}C")));
+        assert!(!segment.matches_key(&shared));
     }
 
     #[test]
