@@ -624,6 +624,28 @@ mod tests {
     }
 
     #[test]
+    fn names_stay_in_their_own_scenario() {
+        let mut first = scenario("a");
+        first.setup = extracting(&["x"]);
+        first.vu_setup = extracting(&["u"]);
+        let mut second = scenario("b");
+        second.steps = vec![reads("${scenario.x}"), reads("${u}")];
+        assert_eq!(
+            errors(&draft(vec![first, second])),
+            [
+                at(
+                    "scenarios[1].steps[0].request.headers.H",
+                    not_set(SCEN, None)
+                ),
+                at(
+                    "scenarios[1].steps[1].request.headers.H",
+                    not_set(User, None)
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn nested_extracts_and_reads_are_found() {
         let mut s = scenario("a");
         s.vu_setup = vec![if_then(vec![repeat(extracting(&["t"]))])];
