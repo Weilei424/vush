@@ -112,6 +112,7 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         | PlanErrorKind::TemplateInName
                         | PlanErrorKind::PathNeedsBaseUrl
                         | PlanErrorKind::UnknownScenario
+                        | PlanErrorKind::NonFiniteNumber
                         | PlanErrorKind::VariableNotReadable { .. }
                         | PlanErrorKind::VariableNotSet { .. }) => (kind.to_string(), false),
                         kind @ (PlanErrorKind::InvalidVariableName
