@@ -9,6 +9,9 @@ const REFERENCE_EXPECTED: &str =
 
 const UNTERMINATED_EXPECTED: &str = "a closing } for every ${ (write $${ for a literal ${)";
 
+/// The reference prefixes, which can't be variable names.
+pub(super) const RESERVED: [&str; 4] = ["env", "global", "scenario", "vu"];
+
 /// How many characters of a reference an error echoes.
 const ECHO_LIMIT: usize = 64;
 
@@ -31,7 +34,7 @@ fn echo_reference(after: &str) -> String {
 }
 
 /// Whether `text` is a variable name: `[A-Za-z_][A-Za-z0-9_]*`.
-fn is_name(text: &str) -> bool {
+pub(super) fn is_name(text: &str) -> bool {
     let mut chars = text.chars();
     chars
         .next()
@@ -65,8 +68,7 @@ impl FromStr for VarRef {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let reference = || {
             let Some((prefix, rest)) = text.split_once('.') else {
-                // `env`, `global`, `scenario` and `vu` are reserved prefixes.
-                let reserved = ["env", "global", "scenario", "vu"].contains(&text);
+                let reserved = RESERVED.contains(&text);
                 return (is_name(text) && !reserved).then(|| VarRef::Vu(text.to_owned()));
             };
             match prefix {
