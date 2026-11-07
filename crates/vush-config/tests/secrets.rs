@@ -354,6 +354,16 @@ fn validation_errors_never_quote_the_file() {
             request(r#"method: GET, path: /, headers: {A: "${@}"}"#),
             "sets this variable",
         ),
+        (
+            BASE.into(),
+            "",
+            "",
+            request(&format!(
+                "method: POST, path: /, {header}, json: [{}]",
+                vec![r#""@ ${nope}""#; 150].join(", ")
+            )),
+            "too many errors",
+        ),
     ];
     for (top, scenario, load, step, fragment) in &owned {
         let text = document(top, scenario, load, step);
