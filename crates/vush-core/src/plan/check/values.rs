@@ -6,7 +6,7 @@ use std::time::Duration;
 use super::super::error::{PlanError, PlanErrorKind};
 use super::super::load::{ClosedStop, ClosedVusLoad, LoadModel, RateSchedule, Stage};
 use super::super::step::{Condition, HttpMethod, RequestTarget, RetryPolicy, StatusMatch};
-use super::super::value::{MAX_DURATION, Rate};
+use super::super::value::{JsonNumber, MAX_DURATION, Rate};
 use super::{At, push};
 
 /// Checks a duration at `at`: it may not be above [`MAX_DURATION`], and when
@@ -183,6 +183,16 @@ pub(super) fn threshold_scenario(
 ) {
     if scenario.is_some_and(|name| !names.contains(name)) {
         push(errors, &at.key("scenario"), PlanErrorKind::UnknownScenario);
+    }
+}
+
+/// Checks that a number in a `json` body or a comparison is finite. `at` is
+/// the number's own place.
+pub(super) fn number(number: JsonNumber, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if let JsonNumber::Float(value) = number
+        && !value.is_finite()
+    {
+        push(errors, at, PlanErrorKind::NonFiniteNumber);
     }
 }
 
