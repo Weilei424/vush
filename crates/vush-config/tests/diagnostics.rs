@@ -55,7 +55,7 @@ scenarios:
     steps:
       - request:
           method: GET
-          path: /
+          url: http://localhost/
 {headers}"
     )
 }
