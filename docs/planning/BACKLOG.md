@@ -95,7 +95,11 @@
     - `WorkloadPlan::new` records at most `MAX_PLAN_ERRORS` (100) errors, then one `TooManyErrors`.
     - Path keys longer than `MAX_PATH_KEY_BYTES` (256) are cut to a `TruncatedKey`.
     - Before these fixes, a 9 KB alias-heavy file reached 831 MB. It now peaks at 69 MB, with the same error output.
-  - [ ] CI green on all four runners after the user pushes (plan Task 6).
+  - [x] CI green on the P1.3 commits through the final-review fixes. Run 42408832373 on `2973bb1`.
+  - [x] Fixes from Codex's review (2026-11-07):
+    - **Nesting bound** (user decision: formalize the bound rather than enforce depth in core). The checks, and dropping a draft, recurse. `WorkloadPlan::new` now documents its tested limit: drafts nested up to 1,000 levels of `if`, `repeat`, `not` or JSON arrays validate on a 2 MiB stack, and a core test pins this. `vush-config` caps files far below that.
+    - **Long keys that share a prefix.** A cut path key also keeps the key's length and an FNV-1a fingerprint, so two long keys with the same 256-byte prefix point at their own lines.
+  - [ ] CI green on all four runners after the user pushes the Codex fixes (plan Task 6).
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
   - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
   - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
