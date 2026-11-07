@@ -113,6 +113,9 @@ fn duration_millis(text: &str) -> Option<u64> {
     }
 }
 
+/// The longest duration a plan accepts: 30 days.
+pub const MAX_DURATION: Duration = Duration::from_secs(2_592_000);
+
 /// The time unit a [`Rate`] is counted per.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RateUnit {
@@ -266,6 +269,12 @@ mod tests {
         assert!(!text.contains('\n'));
         assert!(text.contains('…'));
         assert!(text.chars().count() < 200);
+    }
+
+    #[test]
+    fn max_duration_is_thirty_days() {
+        assert_eq!(MAX_DURATION, Duration::from_secs(2_592_000));
+        assert_eq!(parse_duration("720h").unwrap(), MAX_DURATION);
     }
 
     #[test]
