@@ -107,8 +107,13 @@ impl WorkloadPlan {
     /// A path key longer than [`MAX_PATH_KEY_BYTES`] is cut to a
     /// [`PathSegment::TruncatedKey`].
     ///
-    /// The walk over nested steps is recursive, and a stack overflow can't be
-    /// caught, so callers bound the nesting depth before building a draft.
+    /// The checks walk nested steps, conditions and JSON values recursively,
+    /// and dropping a draft recurses too. A stack overflow can't be caught, so
+    /// callers bound nesting before building a draft. Drafts nested up to
+    /// 1,000 levels of `if`, `repeat`, `not` or JSON arrays are tested on a
+    /// 2 MiB stack. `vush-config` stops files far below that, at 128 levels of
+    /// maps and lists. A much deeper draft can overflow even while it is
+    /// dropped, so no check here could make it safe.
     ///
     /// [`MAX_PLAN_ERRORS`]: crate::plan::MAX_PLAN_ERRORS
     /// [`PlanErrorKind::TooManyErrors`]: crate::plan::PlanErrorKind::TooManyErrors
