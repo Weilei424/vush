@@ -66,6 +66,12 @@ impl Errors {
         });
     }
 
+    /// Notes that errors were dropped before they reached this list, so the
+    /// closing note is added.
+    pub(crate) fn mark_overflowed(&mut self) {
+        self.overflowed = true;
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
@@ -90,14 +96,20 @@ const KEY_DISPLAY_LIMIT: usize = 64;
 /// A key made safe to print: escaped, and cut after 64 characters.
 pub(crate) fn display_key(key: &str) -> String {
     let mut out = String::new();
+    push_display_key(&mut out, key, false);
+    out
+}
+
+/// Appends [`display_key`]'s text for `key` to `out`. `cut` says the key is
+/// already a cut prefix, so the text ends in one `…` even when the prefix fits.
+pub(crate) fn push_display_key(out: &mut String, key: &str, cut: bool) {
     let mut chars = key.chars();
     for c in chars.by_ref().take(KEY_DISPLAY_LIMIT) {
         out.extend(c.escape_debug());
     }
-    if chars.next().is_some() {
+    if cut || chars.next().is_some() {
         out.push('…');
     }
-    out
 }
 
 #[cfg(test)]
