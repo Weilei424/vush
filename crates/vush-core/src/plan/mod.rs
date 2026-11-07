@@ -26,5 +26,7 @@ pub use step::{
 };
 pub use template::{Template, TemplatePart, VarRef};
 pub use threshold::{Bound, BoundOp, PercentileStat, Threshold, ThresholdCheck};
-pub use value::{ByteSize, JsonNumber, Rate, RateUnit, Ratio, ValueError, parse_duration};
+pub use value::{
+    ByteSize, JsonNumber, MAX_DURATION, Rate, RateUnit, Ratio, ValueError, parse_duration,
+};
 pub use workload::{PlanDraft, Scenario, StatePolicy, WorkloadPlan};
