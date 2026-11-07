@@ -78,7 +78,7 @@
   - [x] CI green on the first review-fix commits. Run 42156507464 on `c032215`.
   - [x] A fixed load key mixed with `stages` is reported at the later of the two keys, with the usual conflict message (user decision after Codex's second review, 2026-11-05).
   - [x] CI green on the load-conflict commits after the user pushes. Run 42162887348 on `7fce79e`.
-- [ ] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields. All rules run in `WorkloadPlan::new` (design approved 2026-11-06).
+- [x] P1.3 Validate durations, rates, load modes, loops, bounds, variable scopes and unsupported fields. All rules run in `WorkloadPlan::new` (design approved 2026-11-06, finished 2026-11-07).
   - Decided 2026-11-06:
     - A teardown's `extract` writes the same scope as its setup.
     - References are checked for scope and name, not order.
@@ -104,7 +104,7 @@
     - **Hand-built `var:` fields.** A `var:` field can hold any `VarRef`. Its name is now checked as an `extract` name is (`InvalidVariableName`, `ReservedVariableName`), so `VarRef::Env("")` no longer passes.
     - **Non-finite numbers.** A new `NonFiniteNumber` error rejects NaN and infinity in `json` bodies and in `equals`, `not_equals`, `gt`, `gte`, `lt` and `lte`.
     - **Audit.** A check of every public plan type found no other way past the parsers. `Template`, `JsonPath`, `Ratio` and `HttpMethod` can only come from their parsers.
-  - [ ] CI green on all four runners after the user pushes the second round of Codex fixes (plan Task 6).
+  - [x] CI green on all four runners after the user pushes the second round of Codex fixes (plan Task 6). Run 42413645903 on `150d504`.
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
   - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
   - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
