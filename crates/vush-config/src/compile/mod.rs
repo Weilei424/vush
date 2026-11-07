@@ -203,19 +203,16 @@ fn scenario(
 
 /// Finds the value a plan error path points at, or the deepest one reached.
 /// With `at_key`, a path that ends at a matching map key gives the key's own
-/// location instead of its value's. A cut key matches the first entry whose
-/// key starts with it and is longer.
+/// location instead of its value's. A cut key matches only the entry whose
+/// key has its prefix, length and fingerprint.
 pub(crate) fn locate(root: &Node, path: &PlanPath, at_key: bool) -> Location {
     let mut at = root;
     let segments = path.segments();
     for (position, segment) in segments.iter().enumerate() {
         let found = match (segment, &at.kind) {
-            (PathSegment::Key(key), NodeKind::Map(entries)) => {
-                entries.iter().find(|e| e.key == *key)
+            (PathSegment::Key(_) | PathSegment::TruncatedKey { .. }, NodeKind::Map(entries)) => {
+                entries.iter().find(|e| segment.matches_key(&e.key))
             }
-            (PathSegment::TruncatedKey(prefix), NodeKind::Map(entries)) => entries
-                .iter()
-                .find(|e| e.key.len() > prefix.len() && e.key.starts_with(prefix.as_str())),
             (PathSegment::Index(index), NodeKind::List(items)) => match items.get(*index) {
                 Some(next) => {
                     at = next;
@@ -243,7 +240,7 @@ pub(crate) fn render_path(path: &PlanPath) -> String {
     for segment in path.segments() {
         let (key, cut) = match segment {
             PathSegment::Key(key) => (key, false),
-            PathSegment::TruncatedKey(prefix) => (prefix, true),
+            PathSegment::TruncatedKey { prefix, .. } => (prefix, true),
             PathSegment::Index(index) => {
                 // Writing to a `String` can't fail.
                 let _ = write!(text, "[{index}]");
@@ -596,10 +593,10 @@ scenarios:
 
     #[test]
     fn locate_finds_a_cut_key() {
-        use vush_core::plan::PathSegment::{Key, TruncatedKey};
+        use vush_core::plan::PathSegment::Key;
         let prefix = "k".repeat(256);
-        // The first key is the prefix itself, which isn't longer than it, so
-        // the cut key is the second.
+        // Three keys share the 256-byte prefix: the prefix itself, which isn't
+        // cut, and two longer keys that are.
         let yaml = format!("{{{prefix}: 1, {prefix}kk: {{a: 2}}, {prefix}k: 3}}");
         let root = super::testing::node(&yaml);
         let NodeKind::Map(entries) = &root.kind else {
@@ -608,29 +605,30 @@ scenarios:
         let NodeKind::Map(inner) = &entries[1].value.kind else {
             panic!("not a map");
         };
-        let cut = PlanPath::new(vec![TruncatedKey(prefix.clone())]);
-        assert_eq!(locate(&root, &cut, true), entries[1].key_location);
-        assert_eq!(locate(&root, &cut, false), entries[1].value.location);
-        let below = PlanPath::new(vec![TruncatedKey(prefix.clone()), Key("a".into())]);
+        let cut = |key: &str| PathSegment::for_key(key);
+        let longer = PlanPath::new(vec![cut(&format!("{prefix}kk"))]);
+        assert_eq!(locate(&root, &longer, true), entries[1].key_location);
+        assert_eq!(locate(&root, &longer, false), entries[1].value.location);
+        let below = PlanPath::new(vec![cut(&format!("{prefix}kk")), Key("a".into())]);
         assert_eq!(locate(&root, &below, true), inner[0].key_location);
         assert_eq!(locate(&root, &below, false), inner[0].value.location);
-        let none = PlanPath::new(vec![TruncatedKey("x".repeat(256))]);
+        // The other long key with the same prefix is told apart, not taken
+        // for the first one that starts with it.
+        let shorter = PlanPath::new(vec![cut(&format!("{prefix}k"))]);
+        assert_eq!(locate(&root, &shorter, true), entries[2].key_location);
+        assert_eq!(locate(&root, &shorter, false), entries[2].value.location);
+        let none = PlanPath::new(vec![cut(&"x".repeat(300))]);
         assert_eq!(locate(&root, &none, true), root.location);
     }
 
     #[test]
     fn render_path_shows_a_cut_key_like_the_whole_key() {
-        use vush_core::plan::PathSegment::{Index, Key, TruncatedKey};
-        // The 256-byte prefix of each key: 256 `k`s, 128 `é`s, 64 `😀`s.
-        for (whole, prefix) in [
-            ("k".repeat(300), "k".repeat(256)),
-            ("é".repeat(1000), "é".repeat(128)),
-            ("😀".repeat(100), "😀".repeat(64)),
-        ] {
+        use vush_core::plan::PathSegment::{Index, Key};
+        for whole in ["k".repeat(300), "é".repeat(1000), "😀".repeat(100)] {
             let render =
                 |last| render_path(&PlanPath::new(vec![Key("a\n".into()), Index(2), last]));
-            let want = render(Key(whole));
-            assert_eq!(render(TruncatedKey(prefix)), want);
+            let want = render(Key(whole.clone()));
+            assert_eq!(render(PathSegment::for_key(&whole)), want);
             assert!(want.ends_with('…') && !want.ends_with("……"), "{want}");
         }
     }
