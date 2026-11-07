@@ -7,11 +7,17 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use super::error::{PathSegment, PlanError, PlanErrorKind, PlanPath};
-use super::step::{Condition, Step};
+use super::step::{
+    Body, Comparison, Condition, JsonTemplate, RequestStep, RequestTarget, Scalar, Step,
+};
+use super::template::Template;
 use super::threshold::{BoundOp, Threshold, ThresholdCheck};
 use super::workload::{PlanDraft, Scenario};
 
+use vars::{Place, Writers};
+
 mod values;
+mod vars;
 
 /// A place in a draft, as a chain of borrowed links back to the root.
 #[derive(Clone, Copy)]
@@ -62,22 +68,39 @@ pub(super) fn push(errors: &mut Vec<PlanError>, at: &At<'_>, kind: PlanErrorKind
     });
 }
 
-/// What the walk carries down: the `http.timeout` that requests inherit.
+/// What the walk carries down: the `http.timeout` that requests inherit,
+/// whether there is a `base_url`, where references are read, and the names
+/// each list's `extract`s set.
 #[derive(Clone, Copy)]
-struct Scope {
+struct Scope<'w> {
     request_timeout: Duration,
     has_base_url: bool,
+    place: Place,
+    writers: &'w Writers<'w>,
 }
 
-/// Finds every problem in a draft, in plan order: file-level `http`,
-/// `limits`, `setup` and `teardown`, then `thresholds`, then `scenarios`.
+/// Finds every problem in a draft, in plan order: `base_url`, file-level
+/// `http`, `limits`, `setup` and `teardown`, then `thresholds`, then
+/// `scenarios`.
 pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
     let mut errors = Vec::new();
     let root = At::Root;
+    let writers = Writers::collect(draft);
     let scope = Scope {
         request_timeout: draft.http.timeout,
         has_base_url: draft.base_url.is_some(),
+        place: Place::FileSetup,
+        writers: &writers,
     };
+    if let Some(base_url) = &draft.base_url {
+        vars::template(
+            base_url,
+            Place::BaseUrl,
+            &writers,
+            &root.key("base_url"),
+            &mut errors,
+        );
+    }
     let names: HashSet<&str> = draft.scenarios.iter().map(|s| s.name.as_str()).collect();
     values::duration(
         draft.http.timeout,
@@ -98,7 +121,16 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
         &mut errors,
     );
     check_steps(&draft.setup, &root.key("setup"), scope, &mut errors);
-    check_steps(&draft.teardown, &root.key("teardown"), scope, &mut errors);
+    let teardown = Scope {
+        place: Place::FileTeardown,
+        ..scope
+    };
+    check_steps(
+        &draft.teardown,
+        &root.key("teardown"),
+        teardown,
+        &mut errors,
+    );
     let thresholds = root.key("thresholds");
     for (index, threshold) in draft.thresholds.iter().enumerate() {
         check_threshold(threshold, &names, &thresholds.index(index), &mut errors);
@@ -111,9 +143,11 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
     for (index, scenario) in draft.scenarios.iter().enumerate() {
         check_scenario(
             draft,
+            index,
             scenario,
             &scenarios.index(index),
             &mut seen_names,
+            &writers,
             &mut errors,
         );
     }
@@ -139,17 +173,21 @@ fn check_threshold(
     values::threshold_scenario(threshold.scenario.as_deref(), names, at, errors);
 }
 
-/// Checks one scenario, whose own place is `at`.
+/// Checks scenario number `index`, whose own place is `at`.
 fn check_scenario<'a>(
     draft: &PlanDraft,
+    index: usize,
     scenario: &'a Scenario,
     at: &At<'_>,
     seen_names: &mut HashSet<&'a str>,
+    writers: &Writers<'_>,
     errors: &mut Vec<PlanError>,
 ) {
     let scope = Scope {
         request_timeout: scenario.http.timeout,
         has_base_url: draft.base_url.is_some(),
+        place: Place::User(index),
+        writers,
     };
     if !seen_names.insert(scenario.name.as_str()) {
         push(
@@ -177,8 +215,16 @@ fn check_scenario<'a>(
         &limits.key("max_request_rate"),
         errors,
     );
-    check_steps(&scenario.setup, &at.key("setup"), scope, errors);
-    check_steps(&scenario.teardown, &at.key("teardown"), scope, errors);
+    let setup = Scope {
+        place: Place::ScenarioSetup(index),
+        ..scope
+    };
+    check_steps(&scenario.setup, &at.key("setup"), setup, errors);
+    let teardown = Scope {
+        place: Place::ScenarioTeardown(index),
+        ..scope
+    };
+    check_steps(&scenario.teardown, &at.key("teardown"), teardown, errors);
     check_steps(&scenario.vu_setup, &at.key("vu_setup"), scope, errors);
     check_steps(&scenario.vu_teardown, &at.key("vu_teardown"), scope, errors);
     let steps = at.key("steps");
@@ -189,20 +235,130 @@ fn check_scenario<'a>(
 }
 
 /// Checks a condition, whose own place is `at`.
-fn check_condition(condition: &Condition, at: &At<'_>, errors: &mut Vec<PlanError>) {
+fn check_condition(
+    condition: &Condition,
+    at: &At<'_>,
+    scope: Scope<'_>,
+    errors: &mut Vec<PlanError>,
+) {
     match condition {
-        Condition::Compare { .. } => {}
-        Condition::All(list) => check_conditions(list, &at.key("all"), errors),
-        Condition::Any(list) => check_conditions(list, &at.key("any"), errors),
-        Condition::Not(inner) => check_condition(inner, &at.key("not"), errors),
+        Condition::Compare { var, op } => {
+            vars::reference(
+                var,
+                scope.place,
+                scope.writers,
+                None,
+                &at.key("var"),
+                errors,
+            );
+            check_comparison(op, at, scope, errors);
+        }
+        Condition::All(list) => check_conditions(list, &at.key("all"), scope, errors),
+        Condition::Any(list) => check_conditions(list, &at.key("any"), scope, errors),
+        Condition::Not(inner) => check_condition(inner, &at.key("not"), scope, errors),
     }
 }
 
-fn check_conditions(list: &[Condition], at: &At<'_>, errors: &mut Vec<PlanError>) {
+fn check_conditions(
+    list: &[Condition],
+    at: &At<'_>,
+    scope: Scope<'_>,
+    errors: &mut Vec<PlanError>,
+) {
     values::condition_list(list, at, errors);
     for (index, item) in list.iter().enumerate() {
-        check_condition(item, &at.index(index), errors);
+        check_condition(item, &at.index(index), scope, errors);
     }
+}
+
+/// Checks the template in a comparison, if it has one, at its op key under
+/// `at`: `equals`, `not_equals` or `contains`.
+fn check_comparison(op: &Comparison, at: &At<'_>, scope: Scope<'_>, errors: &mut Vec<PlanError>) {
+    let (key, template) = match op {
+        Comparison::Equals(Scalar::String(template)) => ("equals", template),
+        Comparison::NotEquals(Scalar::String(template)) => ("not_equals", template),
+        Comparison::Contains(template) => ("contains", template),
+        _ => return,
+    };
+    check_template(template, &at.key(key), scope, errors);
+}
+
+fn check_template(template: &Template, at: &At<'_>, scope: Scope<'_>, errors: &mut Vec<PlanError>) {
+    vars::template(template, scope.place, scope.writers, at, errors);
+}
+
+/// Checks the values of a `query`, `headers` or `form` map, whose own place is
+/// `at`.
+fn check_pairs(
+    pairs: &[(String, Template)],
+    at: &At<'_>,
+    scope: Scope<'_>,
+    errors: &mut Vec<PlanError>,
+) {
+    for (name, template) in pairs {
+        check_template(template, &at.key(name), scope, errors);
+    }
+}
+
+/// Checks every string in a `json` body, whose own place is `at`.
+fn check_json(json: &JsonTemplate, at: &At<'_>, scope: Scope<'_>, errors: &mut Vec<PlanError>) {
+    match json {
+        JsonTemplate::String(template) => check_template(template, at, scope, errors),
+        JsonTemplate::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                check_json(item, &at.index(index), scope, errors);
+            }
+        }
+        JsonTemplate::Object(members) => {
+            for (key, value) in members {
+                check_json(value, &at.key(key), scope, errors);
+            }
+        }
+        JsonTemplate::Null | JsonTemplate::Bool(_) | JsonTemplate::Number(_) => {}
+    }
+}
+
+/// Checks one request, whose own place is `at`, in plan order.
+fn check_request(
+    request: &RequestStep,
+    at: &At<'_>,
+    scope: Scope<'_>,
+    errors: &mut Vec<PlanError>,
+) {
+    values::request_name(request.name.as_deref(), at, errors);
+    values::target(&request.target, scope.has_base_url, at, errors);
+    let (key, target) = match &request.target {
+        RequestTarget::Path(template) => ("path", template),
+        RequestTarget::Url(template) => ("url", template),
+    };
+    check_template(target, &at.key(key), scope, errors);
+    check_pairs(&request.query, &at.key("query"), scope, errors);
+    check_pairs(&request.headers, &at.key("headers"), scope, errors);
+    match &request.body {
+        Some(Body::Json(json)) => check_json(json, &at.key("json"), scope, errors),
+        Some(Body::Text(template)) => check_template(template, &at.key("body"), scope, errors),
+        Some(Body::Form(pairs)) => check_pairs(pairs, &at.key("form"), scope, errors),
+        None => {}
+    }
+    values::inherited(
+        request.timeout,
+        scope.request_timeout,
+        &at.key("timeout"),
+        errors,
+    );
+    if let Some(retry) = &request.retry {
+        values::retry(retry, &request.method, &at.key("retry"), errors);
+    }
+    let expect = at.key("expect");
+    values::status(&request.expect.status, &expect.key("status"), errors);
+    if let Some(template) = &request.expect.body_contains {
+        check_template(template, &expect.key("body_contains"), scope, errors);
+    }
+    let json = expect.key("json");
+    for (index, assertion) in request.expect.json.iter().enumerate() {
+        check_comparison(&assertion.op, &json.index(index), scope, errors);
+    }
+    vars::extract_names(&request.extract, &at.key("extract"), errors);
 }
 
 /// Checks every step in a list, and the lists nested inside them.
@@ -210,33 +366,17 @@ fn check_conditions(list: &[Condition], at: &At<'_>, errors: &mut Vec<PlanError>
 /// `at` is the list's own place, such as `scenarios[0].steps`. This does not
 /// check that the list itself is non-empty: the caller knows whether it may be
 /// empty, and reports [`PlanErrorKind::NoSteps`] when it may not.
-fn check_steps(steps: &[Step], at: &At<'_>, scope: Scope, errors: &mut Vec<PlanError>) {
+fn check_steps(steps: &[Step], at: &At<'_>, scope: Scope<'_>, errors: &mut Vec<PlanError>) {
     for (index, step) in steps.iter().enumerate() {
         let step_at = at.index(index);
         match step {
             Step::Request(request) => {
-                let request_at = step_at.key("request");
-                values::request_name(request.name.as_deref(), &request_at, errors);
-                values::target(&request.target, scope.has_base_url, &request_at, errors);
-                values::inherited(
-                    request.timeout,
-                    scope.request_timeout,
-                    &request_at.key("timeout"),
-                    errors,
-                );
-                if let Some(retry) = &request.retry {
-                    values::retry(retry, &request.method, &request_at.key("retry"), errors);
-                }
-                values::status(
-                    &request.expect.status,
-                    &request_at.key("expect").key("status"),
-                    errors,
-                );
+                check_request(request, &step_at.key("request"), scope, errors);
             }
             Step::Wait(value) => values::duration(*value, false, &step_at.key("wait"), errors),
             Step::If(step) => {
                 let if_at = step_at.key("if");
-                check_condition(&step.when, &if_at.key("when"), errors);
+                check_condition(&step.when, &if_at.key("when"), scope, errors);
                 let then = if_at.key("then");
                 if step.then.is_empty() {
                     push(errors, &then, PlanErrorKind::NoSteps);
@@ -442,7 +582,15 @@ mod tests {
         let mut s = scenario("a");
         s.vu_teardown = vec![repeat(vec![])];
         let mut d = draft(vec![s]);
-        d.setup = vec![if_then(vec![], vec![])];
+        // `vu.id` can't be read outside a user, so this `if` reads `env.`.
+        d.setup = vec![Step::If(IfStep {
+            when: Condition::Compare {
+                var: VarRef::Env("X".to_string()),
+                op: Comparison::Exists(true),
+            },
+            then: vec![],
+            otherwise: vec![],
+        })];
         assert_eq!(
             errors(&d),
             [
