@@ -3,17 +3,33 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 
+/// The most errors a plan check records. When there are more, the list ends
+/// with one [`PlanErrorKind::TooManyErrors`] instead.
+pub const MAX_PLAN_ERRORS: usize = 100;
+
+/// The most bytes of a key a [`PlanPath`] keeps. A longer key is stored as a
+/// [`PathSegment::TruncatedKey`].
+pub const MAX_PATH_KEY_BYTES: usize = 256;
+
 /// One step of a [`PlanPath`]: a key in a map, or a position in a list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathSegment {
     Key(String),
+    /// A key longer than [`MAX_PATH_KEY_BYTES`]: its longest prefix of at
+    /// most that many bytes that ends on a character boundary.
+    TruncatedKey(String),
     Index(usize),
 }
 
 /// Where a problem is, as the file's own key names and list positions, such
 /// as `scenarios[1].steps[0].repeat.steps`.
 ///
-/// Keys are kept whole, so a key that holds a dot stays one segment.
+/// Each key stays one segment, even one that holds a dot. A key longer than
+/// [`MAX_PATH_KEY_BYTES`] is kept as a [`PathSegment::TruncatedKey`].
+///
+/// `Display` prints each key as written, apart from that cut, which it shows
+/// as the prefix followed by `…`. Code that shows a path to people must
+/// escape its keys, as `vush-config`'s `render_path` does.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlanPath(Vec<PathSegment>);
 
@@ -33,6 +49,8 @@ impl fmt::Display for PlanPath {
             match segment {
                 PathSegment::Key(key) if position == 0 => f.write_str(key)?,
                 PathSegment::Key(key) => write!(f, ".{key}")?,
+                PathSegment::TruncatedKey(prefix) if position == 0 => write!(f, "{prefix}…")?,
+                PathSegment::TruncatedKey(prefix) => write!(f, ".{prefix}…")?,
                 PathSegment::Index(index) => write!(f, "[{index}]")?,
             }
         }
@@ -41,6 +59,10 @@ impl fmt::Display for PlanPath {
 }
 
 /// One problem found in a draft.
+///
+/// `Display` writes the path as [`PlanPath`] does: keys as written, apart
+/// from the cut at [`MAX_PATH_KEY_BYTES`]. Code that shows an error to people
+/// must escape the path's keys, as `vush-config`'s `render_path` does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanError {
     /// Where the problem is.
@@ -137,6 +159,9 @@ pub enum PlanErrorKind {
         /// when the value holds two or more.
         position: Option<NonZeroUsize>,
     },
+    /// More than [`MAX_PLAN_ERRORS`] problems were found, and the rest were
+    /// dropped. It ends the list, and its path is empty.
+    TooManyErrors,
 }
 
 impl fmt::Display for PlanError {
@@ -234,6 +259,11 @@ impl fmt::Display for PlanErrorKind {
                 })?;
                 hint_and_position(f, *hint, *position)
             }
+            // Formatted from the constant, so the number can't drift from it.
+            Self::TooManyErrors => write!(
+                f,
+                "too many problems; only the first {MAX_PLAN_ERRORS} are reported"
+            ),
         }
     }
 }
@@ -289,6 +319,12 @@ mod tests {
         let dotted = PlanPath::new(vec![Key("a.b".into())]);
         assert_eq!(dotted.segments().len(), 1);
         assert_eq!(dotted.to_string(), "a.b");
+        let cut = PlanPath::new(vec![
+            PathSegment::TruncatedKey("ab".into()),
+            Index(0),
+            PathSegment::TruncatedKey("cd".into()),
+        ]);
+        assert_eq!(cut.to_string(), "ab…[0].cd…");
     }
 
     #[test]
@@ -296,6 +332,14 @@ mod tests {
         assert_eq!(
             PlanErrorKind::DuplicateScenarioName.to_string(),
             "this scenario name is already used by an earlier scenario"
+        );
+    }
+
+    #[test]
+    fn too_many_errors_has_fixed_text() {
+        assert_eq!(
+            PlanErrorKind::TooManyErrors.to_string(),
+            "too many problems; only the first 100 are reported"
         );
     }
 
