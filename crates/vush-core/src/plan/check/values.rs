@@ -1,9 +1,11 @@
 //! Checks on durations, rates and load models.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use super::super::error::{PlanError, PlanErrorKind};
 use super::super::load::{ClosedStop, ClosedVusLoad, LoadModel, RateSchedule, Stage};
+use super::super::step::{Condition, HttpMethod, RequestTarget, RetryPolicy, StatusMatch};
 use super::super::value::{MAX_DURATION, Rate};
 use super::{At, push};
 
@@ -113,6 +115,74 @@ fn ramp<T>(
     }
     if total.is_zero() {
         push(errors, &stages_at, PlanErrorKind::ZeroLengthRamp);
+    }
+}
+
+/// Methods that may be retried without `allow_non_idempotent`.
+pub(super) const IDEMPOTENT: [&str; 6] = ["GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"];
+
+/// Checks a request name. `at` is the request; problems are reported at `name`.
+pub(super) fn request_name(name: Option<&str>, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if name.is_some_and(|name| name.contains("${")) {
+        push(errors, &at.key("name"), PlanErrorKind::TemplateInName);
+    }
+}
+
+/// Checks a request target. `at` is the request; problems are reported at `path`.
+pub(super) fn target(
+    target: &RequestTarget,
+    has_base_url: bool,
+    at: &At<'_>,
+    errors: &mut Vec<PlanError>,
+) {
+    if matches!(target, RequestTarget::Path(_)) && !has_base_url {
+        push(errors, &at.key("path"), PlanErrorKind::PathNeedsBaseUrl);
+    }
+}
+
+/// Checks a retry policy. `at` is the `retry` place.
+pub(super) fn retry(
+    retry: &RetryPolicy,
+    method: &HttpMethod,
+    at: &At<'_>,
+    errors: &mut Vec<PlanError>,
+) {
+    if retry.attempts < 2 {
+        push(errors, &at.key("attempts"), PlanErrorKind::TooFewAttempts);
+    }
+    duration(retry.backoff, false, &at.key("backoff"), errors);
+    if !retry.allow_non_idempotent && !IDEMPOTENT.contains(&method.as_str()) {
+        push(errors, at, PlanErrorKind::RetryNeedsOptIn);
+    }
+}
+
+/// Checks a status match. `at` is the `expect.status` place.
+pub(super) fn status(status: &StatusMatch, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if let StatusMatch::OneOf(codes) = status {
+        if codes.is_empty() {
+            push(errors, at, PlanErrorKind::EmptyStatus);
+        } else if codes.iter().any(|code| !(100..=599).contains(code)) {
+            push(errors, at, PlanErrorKind::StatusOutOfRange);
+        }
+    }
+}
+
+/// Checks the list of an `all` or `any`. `at` is that key.
+pub(super) fn condition_list(conditions: &[Condition], at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if conditions.is_empty() {
+        push(errors, at, PlanErrorKind::NoConditions);
+    }
+}
+
+/// Checks that a threshold's scenario exists. `at` is the threshold.
+pub(super) fn threshold_scenario(
+    scenario: Option<&str>,
+    names: &HashSet<&str>,
+    at: &At<'_>,
+    errors: &mut Vec<PlanError>,
+) {
+    if scenario.is_some_and(|name| !names.contains(name)) {
+        push(errors, &at.key("scenario"), PlanErrorKind::UnknownScenario);
     }
 }
 
