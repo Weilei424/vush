@@ -274,7 +274,7 @@ A step list holds steps in order. A step is a map with exactly one key, which na
 | `path` or `url` | template; exactly one. `path` is joined to `base_url` and needs a `base_url`. `url` is used as written | yes | |
 | `query`, `headers` | map of string to template. Order is kept | no | empty |
 | `json`, `body` or `form` | a JSON value, a template, or a map of string to template; at most one | no | none |
-| `timeout` | duration | no | the step's `http.timeout` |
+| `timeout` | duration, longer than zero | no | the step's `http.timeout` |
 | `required` | boolean | no | `true` |
 | `retry` | [block](#retry) | no | no retries |
 | `expect` | [block](#expect) | no | see below |
@@ -330,7 +330,7 @@ A comparison is exactly one of these keys. It is used in `expect.json` and in `w
 
 ### `wait`
 
-A duration to pause for.
+A duration to pause for. It can be `0s`.
 
 ```yaml
 - wait: 500ms
@@ -369,7 +369,7 @@ A list of pass/fail checks on the results of a run.
 |---|---|---|
 | `metric` | one of the metrics below | Required |
 | `stat` | `p50`, `p90`, `p95` or `p99` | Required for `http_request_duration`, not allowed for any other metric |
-| `lt`, `lte`, `gt`, `gte` | duration, percentage or rate, by metric | Exactly one is required |
+| `lt`, `lte`, `gt`, `gte` | duration, percentage or rate, by metric | Exactly one is required. A duration bound can be `0s` |
 | `scenario` | a scenario name | Optional. Limits the check to that scenario. It must name a scenario in the file, matched exactly |
 
 | Metric | Bound is |
