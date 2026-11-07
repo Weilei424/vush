@@ -90,7 +90,7 @@
   - [x] Requests, conditions and thresholds: `attempts` of 2 or more, the retry method rule, status codes 100–599, empty `status`, `all` and `any`, `${` in a request `name`, a `path` needing a `base_url`, and thresholds naming a real scenario (plan Task 3).
   - [x] Variables: `extract` names, and a scope and name check for every reference, with hints and positions (plan Task 4).
   - [x] Whole-crate tests through `parse`: every rule located, unusual keys escaped, and a `secrets.rs` row per new kind (plan Task 5).
-  - [ ] `docs/config-schema.md` rules, local docs and all four check commands (plan Task 6).
+  - [x] `docs/config-schema.md` rules, local docs and all four check commands (plan Task 6).
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
   - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
