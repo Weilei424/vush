@@ -8,9 +8,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use super::error::{
-    MAX_PATH_KEY_BYTES, MAX_PLAN_ERRORS, PathSegment, PlanError, PlanErrorKind, PlanPath,
-};
+use super::error::{MAX_PLAN_ERRORS, PathSegment, PlanError, PlanErrorKind, PlanPath};
 use super::step::{
     Body, Comparison, Condition, JsonTemplate, RequestStep, RequestTarget, Scalar, Step,
 };
@@ -42,8 +40,8 @@ impl<'a> At<'a> {
         At::Index(self, index)
     }
 
-    /// Builds the owned path. Only called when a problem is recorded. A key
-    /// longer than [`MAX_PATH_KEY_BYTES`] is cut, so a huge key can't be
+    /// Builds the owned path. Only called when a problem is recorded.
+    /// [`PathSegment::for_key`] cuts a long key, so a huge key can't be
     /// copied into every error under it.
     pub(super) fn path(&self) -> PlanPath {
         let mut segments = Vec::new();
@@ -52,7 +50,7 @@ impl<'a> At<'a> {
             match at {
                 At::Root => break,
                 At::Key(parent, key) => {
-                    segments.push(key_segment(key));
+                    segments.push(PathSegment::for_key(key));
                     at = parent;
                 }
                 At::Index(parent, index) => {
@@ -64,19 +62,6 @@ impl<'a> At<'a> {
         segments.reverse();
         PlanPath::new(segments)
     }
-}
-
-/// The segment for a map key: the key itself, or, when it is longer than
-/// [`MAX_PATH_KEY_BYTES`], its longest prefix that fits and ends on a
-/// character boundary.
-fn key_segment(key: &str) -> PathSegment {
-    if key.len() <= MAX_PATH_KEY_BYTES {
-        return PathSegment::Key(key.to_owned());
-    }
-    let end = key.floor_char_boundary(MAX_PATH_KEY_BYTES);
-    // `end` is a character boundary inside the key, so the split can't fail.
-    let prefix = key.split_at_checked(end).map_or("", |(prefix, _)| prefix);
-    PathSegment::TruncatedKey(prefix.to_owned())
 }
 
 /// Records a problem at a place, keeping at most [`MAX_PLAN_ERRORS`] in the
@@ -519,6 +504,7 @@ mod tests {
     use std::num::NonZeroU32;
     use std::time::Duration;
 
+    use super::super::error::MAX_PATH_KEY_BYTES;
     use super::super::load::{ClosedVusLoad, LoadModel, QueuePolicy, RateSchedule};
     use super::super::settings::{HttpSettings, ResourceLimits};
     use super::super::step::{
@@ -1206,25 +1192,98 @@ mod tests {
             (path.segments().last().cloned(), path.to_string())
         };
 
-        let (segment, text) = last_segment(&"é".repeat(1000));
-        let prefix = "é".repeat(128);
+        let cut_prefix = |segment: Option<PathSegment>| match segment {
+            Some(PathSegment::TruncatedKey { prefix, .. }) => prefix,
+            other => panic!("expected a cut key, found {other:?}"),
+        };
+
+        let key = "é".repeat(1000);
+        let (segment, text) = last_segment(&key);
+        assert_eq!(segment, Some(PathSegment::for_key(&key)));
+        let prefix = cut_prefix(segment);
+        assert_eq!(prefix, "é".repeat(128));
         assert_eq!(prefix.len(), MAX_PATH_KEY_BYTES);
-        assert_eq!(segment, Some(PathSegment::TruncatedKey(prefix.clone())));
-        assert!(text.ends_with('…'), "{text}");
         assert_eq!(text, format!("{REQ}.json.{prefix}…"));
 
         // Byte 256 falls inside an `é`, so the cut ends one byte earlier.
         let (segment, _) = last_segment(&format!("a{}", "é".repeat(500)));
-        let prefix = format!("a{}", "é".repeat(127));
+        let prefix = cut_prefix(segment);
+        assert_eq!(prefix, format!("a{}", "é".repeat(127)));
         assert_eq!(prefix.len(), MAX_PATH_KEY_BYTES - 1);
-        assert_eq!(segment, Some(PathSegment::TruncatedKey(prefix)));
 
         let fits = "k".repeat(MAX_PATH_KEY_BYTES);
         assert_eq!(last_segment(&fits).0, Some(PathSegment::Key(fits)));
         let (segment, _) = last_segment(&"k".repeat(MAX_PATH_KEY_BYTES + 1));
-        assert_eq!(
-            segment,
-            Some(PathSegment::TruncatedKey("k".repeat(MAX_PATH_KEY_BYTES)))
-        );
+        assert_eq!(cut_prefix(segment), "k".repeat(MAX_PATH_KEY_BYTES));
+    }
+
+    /// The nesting `WorkloadPlan::new` documents as tested on a 2 MiB stack.
+    const TESTED_NESTING: usize = 1_000;
+
+    /// Builds the draft and checks it on a 2 MiB thread, as small as a
+    /// default spawned thread, so the result and the drop both run there.
+    fn check_on_a_small_stack(build: fn() -> PlanDraft) -> usize {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || check(&build()).len())
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn drafts_nested_to_the_tested_bound_validate_on_a_small_stack() {
+        // Each shape ends in a mistake, so the error path runs at full depth.
+        fn ifs() -> PlanDraft {
+            let mut steps = vec![req_step(Duration::ZERO)];
+            for _ in 0..TESTED_NESTING {
+                steps = vec![if_then(steps, vec![])];
+            }
+            let mut s = scenario("a");
+            s.steps = steps;
+            draft(vec![s])
+        }
+        fn repeats() -> PlanDraft {
+            let mut steps = vec![req_step(Duration::ZERO)];
+            for _ in 0..TESTED_NESTING {
+                steps = vec![repeat(steps)];
+            }
+            let mut s = scenario("a");
+            s.steps = steps;
+            draft(vec![s])
+        }
+        fn nots() -> PlanDraft {
+            let mut when = Condition::Compare {
+                var: VarRef::Vu("nope".to_string()),
+                op: Comparison::Exists(true),
+            };
+            for _ in 0..TESTED_NESTING {
+                when = Condition::Not(Box::new(when));
+            }
+            let mut s = scenario("a");
+            s.steps = vec![Step::If(IfStep {
+                when,
+                then: vec![wait()],
+                otherwise: vec![],
+            })];
+            draft(vec![s])
+        }
+        fn json() -> PlanDraft {
+            let mut value = JsonTemplate::String(tpl("${nope}"));
+            for _ in 0..TESTED_NESTING {
+                value = JsonTemplate::Array(vec![value]);
+            }
+            let mut r = request("POST", url());
+            r.body = Some(Body::Json(value));
+            one_request(r)
+        }
+        for (name, build) in [
+            ("if", ifs as fn() -> PlanDraft),
+            ("repeat", repeats),
+            ("not", nots),
+            ("json", json),
+        ] {
+            assert_eq!(check_on_a_small_stack(build), 1, "{name}");
+        }
     }
 }
