@@ -15,7 +15,10 @@ mod threshold;
 mod value;
 mod workload;
 
-pub use error::{PathSegment, PlanError, PlanErrorKind, PlanPath, ReadPlace, VarScope};
+pub use error::{
+    MAX_PATH_KEY_BYTES, MAX_PLAN_ERRORS, PathSegment, PlanError, PlanErrorKind, PlanPath,
+    ReadPlace, VarScope,
+};
 pub use json_path::{JsonPath, JsonPathSegment};
 pub use load::{ClosedStop, ClosedVusLoad, LoadModel, QueuePolicy, RateSchedule, Stage};
 pub use settings::{HttpSettings, HttpVersion, PoolScope, ResourceLimits, TlsSettings};
