@@ -671,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_may_hold_anything_until_p1_3() {
+    fn compile_keeps_a_request_name_as_written() {
         let r = only_request(&req("name: \"a${b}\""));
         assert_eq!(r.name.as_deref(), Some("a${b}"));
     }
