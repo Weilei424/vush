@@ -1,5 +1,7 @@
 //! Turns the located value tree into a plan draft.
 
+use std::fmt::Write as _;
+
 mod load;
 mod reader;
 mod settings;
@@ -12,7 +14,7 @@ use vush_core::plan::{
 };
 
 use self::reader::{MapReader, child, item, list, one_of, parsed, string};
-use crate::error::{Errors, Location};
+use crate::error::{Errors, Location, push_display_key};
 use crate::node::{Node, NodeKind};
 
 /// Builds the draft. Returns `None` only when something was recorded.
@@ -201,40 +203,59 @@ fn scenario(
 
 /// Finds the value a plan error path points at, or the deepest one reached.
 /// With `at_key`, a path that ends at a matching map key gives the key's own
-/// location instead of its value's.
+/// location instead of its value's. A cut key matches the first entry whose
+/// key starts with it and is longer.
 pub(crate) fn locate(root: &Node, path: &PlanPath, at_key: bool) -> Location {
     let mut at = root;
     let segments = path.segments();
     for (position, segment) in segments.iter().enumerate() {
-        match (segment, &at.kind) {
+        let found = match (segment, &at.kind) {
             (PathSegment::Key(key), NodeKind::Map(entries)) => {
-                let Some(entry) = entries.iter().find(|e| e.key == *key) else {
-                    return at.location;
-                };
-                if at_key && position + 1 == segments.len() {
-                    return entry.key_location;
-                }
-                at = &entry.value;
+                entries.iter().find(|e| e.key == *key)
             }
+            (PathSegment::TruncatedKey(prefix), NodeKind::Map(entries)) => entries
+                .iter()
+                .find(|e| e.key.len() > prefix.len() && e.key.starts_with(prefix.as_str())),
             (PathSegment::Index(index), NodeKind::List(items)) => match items.get(*index) {
-                Some(next) => at = next,
+                Some(next) => {
+                    at = next;
+                    continue;
+                }
                 None => return at.location,
             },
             _ => return at.location,
+        };
+        let Some(entry) = found else {
+            return at.location;
+        };
+        if at_key && position + 1 == segments.len() {
+            return entry.key_location;
         }
+        at = &entry.value;
     }
     at.location
 }
 
 /// Writes a plan error path the way compile errors write theirs, with each
-/// key escaped.
+/// key escaped. A cut key shows as its whole key would: 64 characters and `…`.
 pub(crate) fn render_path(path: &PlanPath) -> String {
-    path.segments()
-        .iter()
-        .fold(String::new(), |text, segment| match segment {
-            PathSegment::Key(key) => child(&text, key),
-            PathSegment::Index(index) => item(&text, *index),
-        })
+    let mut text = String::new();
+    for segment in path.segments() {
+        let (key, cut) = match segment {
+            PathSegment::Key(key) => (key, false),
+            PathSegment::TruncatedKey(prefix) => (prefix, true),
+            PathSegment::Index(index) => {
+                // Writing to a `String` can't fail.
+                let _ = write!(text, "[{index}]");
+                continue;
+            }
+        };
+        if !text.is_empty() {
+            text.push('.');
+        }
+        push_display_key(&mut text, key, cut);
+    }
+    text
 }
 
 #[cfg(test)]
@@ -571,6 +592,47 @@ scenarios:
         let path = PlanPath::new(vec![Key("a.b".into())]);
         assert_eq!(locate(&root, &path, true), entries[0].key_location);
         assert_eq!(locate(&root, &path, false), entries[0].value.location);
+    }
+
+    #[test]
+    fn locate_finds_a_cut_key() {
+        use vush_core::plan::PathSegment::{Key, TruncatedKey};
+        let prefix = "k".repeat(256);
+        // The first key is the prefix itself, which isn't longer than it, so
+        // the cut key is the second.
+        let yaml = format!("{{{prefix}: 1, {prefix}kk: {{a: 2}}, {prefix}k: 3}}");
+        let root = super::testing::node(&yaml);
+        let NodeKind::Map(entries) = &root.kind else {
+            panic!("not a map");
+        };
+        let NodeKind::Map(inner) = &entries[1].value.kind else {
+            panic!("not a map");
+        };
+        let cut = PlanPath::new(vec![TruncatedKey(prefix.clone())]);
+        assert_eq!(locate(&root, &cut, true), entries[1].key_location);
+        assert_eq!(locate(&root, &cut, false), entries[1].value.location);
+        let below = PlanPath::new(vec![TruncatedKey(prefix.clone()), Key("a".into())]);
+        assert_eq!(locate(&root, &below, true), inner[0].key_location);
+        assert_eq!(locate(&root, &below, false), inner[0].value.location);
+        let none = PlanPath::new(vec![TruncatedKey("x".repeat(256))]);
+        assert_eq!(locate(&root, &none, true), root.location);
+    }
+
+    #[test]
+    fn render_path_shows_a_cut_key_like_the_whole_key() {
+        use vush_core::plan::PathSegment::{Index, Key, TruncatedKey};
+        // The 256-byte prefix of each key: 256 `k`s, 128 `é`s, 64 `😀`s.
+        for (whole, prefix) in [
+            ("k".repeat(300), "k".repeat(256)),
+            ("é".repeat(1000), "é".repeat(128)),
+            ("😀".repeat(100), "😀".repeat(64)),
+        ] {
+            let render =
+                |last| render_path(&PlanPath::new(vec![Key("a\n".into()), Index(2), last]));
+            let want = render(Key(whole));
+            assert_eq!(render(TruncatedKey(prefix)), want);
+            assert!(want.ends_with('…') && !want.ends_with("……"), "{want}");
+        }
     }
 
     #[test]
