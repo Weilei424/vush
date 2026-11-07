@@ -22,6 +22,7 @@ scenarios:
           headers: &auth
             Authorization: "Bearer ${token}"
             Accept: application/json
+          extract: { token: { json_path: "$.token" } }
       - request:
           method: GET
           path: /items
@@ -46,17 +47,20 @@ scenarios:
      "load": {"model": "closed_vus", "vus": 1, "duration": "1s"},
      "steps": [
        {"request": {"method": "POST", "path": "/login",
-          "headers": {"Authorization": "Bearer ${token}", "Accept": "application/json"}}},
+          "headers": {"Authorization": "Bearer ${token}", "Accept": "application/json"},
+          "extract": {"token": {"json_path": "$.token"}}}},
        {"request": {"method": "GET", "path": "/items",
           "headers": {"Authorization": "Bearer ${token}", "Accept": "text/plain", "X-Trace": "1"}}},
        {"request": {"method": "POST", "path": "/again",
-          "headers": {"Authorization": "Bearer ${token}", "Accept": "application/json"}}}
+          "headers": {"Authorization": "Bearer ${token}", "Accept": "application/json"},
+          "extract": {"token": {"json_path": "$.token"}}}}
      ]},
     {"name": "b",
      "load": {"model": "closed_vus", "vus": 1, "duration": "1s"},
      "steps": [
        {"request": {"method": "POST", "path": "/login",
-          "headers": {"Authorization": "Bearer ${token}", "Accept": "application/json"}}}
+          "headers": {"Authorization": "Bearer ${token}", "Accept": "application/json"},
+          "extract": {"token": {"json_path": "$.token"}}}}
      ]}
   ]
 }"#;
