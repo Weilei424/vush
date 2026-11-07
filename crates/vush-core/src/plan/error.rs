@@ -1,0 +1,122 @@
+//! The errors a plan check reports, and the paths that locate them.
+
+use std::fmt;
+
+/// One step of a [`PlanPath`]: a key in a map, or a position in a list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathSegment {
+    Key(String),
+    Index(usize),
+}
+
+/// Where a problem is, as the file's own key names and list positions, such
+/// as `scenarios[1].steps[0].repeat.steps`.
+///
+/// Keys are kept whole, so a key that holds a dot stays one segment.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanPath(Vec<PathSegment>);
+
+impl PlanPath {
+    pub fn new(segments: Vec<PathSegment>) -> Self {
+        Self(segments)
+    }
+
+    pub fn segments(&self) -> &[PathSegment] {
+        &self.0
+    }
+}
+
+impl fmt::Display for PlanPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (position, segment) in self.0.iter().enumerate() {
+            match segment {
+                PathSegment::Key(key) if position == 0 => f.write_str(key)?,
+                PathSegment::Key(key) => write!(f, ".{key}")?,
+                PathSegment::Index(index) => write!(f, "[{index}]")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One problem found in a draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanError {
+    /// Where the problem is.
+    pub path: PlanPath,
+    pub kind: PlanErrorKind,
+}
+
+/// What is wrong at a [`PlanError`]'s path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanErrorKind {
+    /// `scenarios` is empty.
+    NoScenarios,
+    /// A later scenario reuses an earlier scenario's name.
+    DuplicateScenarioName,
+    /// A step list that must hold at least one step is empty.
+    NoSteps,
+    /// A ramping load has no stages.
+    NoStages,
+}
+
+impl fmt::Display for PlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.path, self.kind)
+    }
+}
+
+impl std::error::Error for PlanError {}
+
+impl fmt::Display for PlanErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoScenarios => f.write_str("at least one scenario is required"),
+            Self::DuplicateScenarioName => {
+                f.write_str("this scenario name is already used by an earlier scenario")
+            }
+            Self::NoSteps => f.write_str("at least one step is required"),
+            Self::NoStages => f.write_str("a ramping load needs at least one stage"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_path_displays_like_compile_paths() {
+        use PathSegment::{Index, Key};
+        let path = PlanPath::new(vec![
+            Key("scenarios".into()),
+            Index(1),
+            Key("steps".into()),
+            Index(0),
+            Key("repeat".into()),
+            Key("steps".into()),
+        ]);
+        assert_eq!(path.to_string(), "scenarios[1].steps[0].repeat.steps");
+        assert_eq!(PlanPath::default().to_string(), "");
+        let dotted = PlanPath::new(vec![Key("a.b".into())]);
+        assert_eq!(dotted.segments().len(), 1);
+        assert_eq!(dotted.to_string(), "a.b");
+    }
+
+    #[test]
+    fn duplicate_scenario_names_have_fixed_text() {
+        assert_eq!(
+            PlanErrorKind::DuplicateScenarioName.to_string(),
+            "this scenario name is already used by an earlier scenario"
+        );
+    }
+
+    #[test]
+    fn plan_error_display_leads_with_path() {
+        let error = PlanError {
+            path: PlanPath::new(vec![PathSegment::Key("scenarios".to_string())]),
+            kind: PlanErrorKind::NoScenarios,
+        };
+        assert!(error.to_string().starts_with("scenarios: "));
+    }
+}
