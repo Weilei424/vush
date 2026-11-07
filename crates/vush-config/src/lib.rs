@@ -101,7 +101,15 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         | PlanErrorKind::ZeroDuration
                         | PlanErrorKind::ZeroRate
                         | PlanErrorKind::IdleRamp
-                        | PlanErrorKind::ZeroLengthRamp) => kind.to_string(),
+                        | PlanErrorKind::ZeroLengthRamp
+                        | PlanErrorKind::TooFewAttempts
+                        | PlanErrorKind::RetryNeedsOptIn
+                        | PlanErrorKind::StatusOutOfRange
+                        | PlanErrorKind::EmptyStatus
+                        | PlanErrorKind::NoConditions
+                        | PlanErrorKind::TemplateInName
+                        | PlanErrorKind::PathNeedsBaseUrl
+                        | PlanErrorKind::UnknownScenario) => kind.to_string(),
                     };
                     let at = compile::locate(&root, &error.path, false);
                     let path = compile::render_path(&error.path);
