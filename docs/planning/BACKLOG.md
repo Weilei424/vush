@@ -91,6 +91,10 @@
   - [x] Variables: `extract` names, and a scope and name check for every reference, with hints and positions (plan Task 4).
   - [x] Whole-crate tests through `parse`: every rule located, unusual keys escaped, and a `secrets.rs` row per new kind (plan Task 5).
   - [x] `docs/config-schema.md` rules, local docs and all four check commands (plan Task 6).
+  - [x] Fixes from the final review (2026-11-07):
+    - `WorkloadPlan::new` records at most `MAX_PLAN_ERRORS` (100) errors, then one `TooManyErrors`.
+    - Path keys longer than `MAX_PATH_KEY_BYTES` (256) are cut to a `TruncatedKey`.
+    - Before these fixes, a 9 KB alias-heavy file reached 831 MB. It now peaks at 69 MB, with the same error output.
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
   - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
