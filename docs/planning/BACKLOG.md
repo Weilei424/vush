@@ -99,7 +99,12 @@
   - [x] Fixes from Codex's review (2026-11-07):
     - **Nesting bound** (user decision: formalize the bound rather than enforce depth in core). The checks, and dropping a draft, recurse. `WorkloadPlan::new` now documents its tested limit: drafts nested up to 1,000 levels of `if`, `repeat`, `not` or JSON arrays validate on a 2 MiB stack, and a core test pins this. `vush-config` caps files far below that.
     - **Long keys that share a prefix.** A cut path key also keeps the key's length and an FNV-1a fingerprint, so two long keys with the same 256-byte prefix point at their own lines.
-  - [ ] CI green on all four runners after the user pushes the Codex fixes (plan Task 6).
+  - [x] CI green on the first Codex fixes. Run 42411279685 on `3e20947`.
+  - [x] Fixes from Codex's second review (2026-11-07). These are inputs only a direct adapter can build, since the readers already reject them:
+    - **Hand-built `var:` fields.** A `var:` field can hold any `VarRef`. Its name is now checked as an `extract` name is (`InvalidVariableName`, `ReservedVariableName`), so `VarRef::Env("")` no longer passes.
+    - **Non-finite numbers.** A new `NonFiniteNumber` error rejects NaN and infinity in `json` bodies and in `equals`, `not_equals`, `gt`, `gte`, `lt` and `lte`.
+    - **Audit.** A check of every public plan type found no other way past the parsers. `Template`, `JsonPath`, `Ratio` and `HttpMethod` can only come from their parsers.
+  - [ ] CI green on all four runners after the user pushes the second round of Codex fixes (plan Task 6).
 - [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
   - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
   - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
