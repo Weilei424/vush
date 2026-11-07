@@ -25,32 +25,44 @@ fn on_small_stack(test: impl FnOnce() + Send + 'static) {
 
 const BOTH: [Format; 2] = [Format::Yaml, Format::Json];
 
+const WAIT: &str = r#"{"wait": "1s"}"#;
+
+fn repeats(n: usize, leaf: &str) -> String {
+    nested(n, r#"{"repeat": {"count": 1, "steps": ["#, "]}}", leaf)
+}
+
 fn repeat_steps(n: usize) -> String {
-    nested(
-        n,
-        r#"{"repeat": {"count": 1, "steps": ["#,
-        "]}}",
-        r#"{"wait": "1s"}"#,
-    )
+    repeats(n, WAIT)
+}
+
+/// `n` nested `if`s whose `when` reads `var`, around `leaf`.
+fn ifs(n: usize, var: &str, leaf: &str) -> String {
+    let open = format!(r#"{{"if": {{"when": {{"var": "{var}", "exists": true}}, "then": ["#);
+    nested(n, &open, "]}}", leaf)
 }
 
 fn if_steps(n: usize) -> String {
-    nested(
-        n,
-        r#"{"if": {"when": {"var": "vu.id", "exists": true}, "then": ["#,
-        "]}}",
-        r#"{"wait": "1s"}"#,
-    )
+    ifs(n, "vu.id", WAIT)
+}
+
+/// An `if` whose `when` is `n` nested `not`s around `leaf`.
+fn nots(n: usize, leaf: &str) -> String {
+    let when = nested(n, r#"{"not": "#, "}", leaf);
+    format!(r#"{{"if": {{"when": {when}, "then": [{WAIT}]}}}}"#)
 }
 
 fn not_steps(n: usize) -> String {
-    let when = nested(n, r#"{"not": "#, "}", r#"{"var": "vu.id", "exists": true}"#);
-    format!(r#"{{"if": {{"when": {when}, "then": [{{"wait": "1s"}}]}}}}"#)
+    nots(n, r#"{"var": "vu.id", "exists": true}"#)
+}
+
+/// A request whose `json` body is `n` nested lists around `leaf`.
+fn json_body(n: usize, leaf: &str) -> String {
+    let body = nested(n, "[", "]", leaf);
+    format!(r#"{{"request": {{"method": "GET", "url": "http://localhost/", "json": {body}}}}}"#)
 }
 
 fn json_steps(n: usize) -> String {
-    let body = nested(n, "[", "]", "1");
-    format!(r#"{{"request": {{"method": "GET", "url": "http://localhost/", "json": {body}}}}}"#)
+    json_body(n, "1")
 }
 
 /// A shape's name, its builder, and the deepest `n` that is allowed.
@@ -73,6 +85,47 @@ fn deepest_allowed_nesting_builds_on_a_small_stack() {
             let yaml = parse(&text, Format::Yaml).unwrap_or_else(|e| panic!("{name}: {e:?}"));
             let json = parse(&text, Format::Json).unwrap_or_else(|e| panic!("{name}: {e:?}"));
             assert_eq!(yaml, json, "{name}");
+        });
+    }
+}
+
+#[test]
+fn a_failing_leaf_at_the_deepest_nesting_is_reported_on_a_small_stack() {
+    let [repeat, if_, not, json] = shapes().map(|(_, _, deepest)| deepest);
+    let zero_timeout =
+        r#"{"request": {"method": "GET", "url": "http://localhost/", "timeout": "0s"}}"#;
+    // A request takes two map levels where a wait takes one, so the deepest
+    // `repeat` around a request is one less than around a wait.
+    let too_deep = file(&repeats(repeat, zero_timeout));
+    let errors = parse(&too_deep, Format::Json).expect_err("too deep");
+    assert!(errors[0].message.contains("nesting"), "{errors:?}");
+    let unset = "sets this variable";
+    let cases = [
+        (
+            "repeat",
+            repeats(repeat - 1, zero_timeout),
+            "longer than zero",
+        ),
+        // Only the innermost `if` reads the unset name.
+        ("if", ifs(if_ - 1, "vu.id", &ifs(1, "nope", WAIT)), unset),
+        (
+            "not",
+            nots(not, r#"{"var": "nope", "exists": true}"#),
+            unset,
+        ),
+        ("json", json_body(json, r#""${nope}""#), unset),
+    ];
+    for (name, steps, fragment) in cases {
+        let text = file(&steps);
+        on_small_stack(move || {
+            for format in BOTH {
+                let errors = parse(&text, format).expect_err(name);
+                assert_eq!(errors.len(), 1, "{name} {format:?}: {errors:?}");
+                assert!(
+                    errors[0].message.contains(fragment),
+                    "{name} {format:?}: {errors:?}"
+                );
+            }
         });
     }
 }
@@ -222,4 +275,57 @@ fn an_empty_map_at_the_nesting_limit_counts() {
         assert_eq!(deep.len(), 1, "{format:?}: {errors:?}");
         assert_eq!(errors.len(), 1, "{format:?}: {errors:?}");
     }
+}
+
+/// A small YAML file whose aliases copy one list of `refs` unset `"${n}"`
+/// references `copies` times, `depth` lists down in a `json` body.
+fn aliased_references(depth: usize, refs: usize, copies: usize) -> String {
+    let list = format!("[{}]", vec![r#""${n}""#; refs].join(", "));
+    let aliases = vec!["*b"; copies - 1].join(", ");
+    let body = nested(depth, "[", "]", &format!("[&b {list}, {aliases}]"));
+    format!(
+        "schema_version: 1\nname: n\nscenarios:\n  - name: s\n    load: {{model: closed_vus, vus: 1, duration: 1s}}\n    steps:\n      - request: {{method: POST, url: \"http://localhost/\", json: {body}}}\n"
+    )
+}
+
+/// Plan errors are bounded before they are built, not only when they are
+/// shown. Without that bound, the alias file below took seconds and hundreds
+/// of megabytes even in a release build; this test should take well under a
+/// second in a debug build.
+#[test]
+fn plan_errors_stay_bounded() {
+    on_small_stack(|| {
+        let text = aliased_references(118, 1000, 240);
+        assert!(text.len() < 10 * 1024, "{}", text.len());
+        let errors = parse(&text, Format::Yaml).expect_err("aliases");
+        assert_eq!(errors.len(), MAX_ERRORS + 1);
+        assert!(
+            errors
+                .iter()
+                .take(MAX_ERRORS)
+                .all(|e| e.message.contains("sets this variable")),
+            "{errors:?}"
+        );
+        let last = errors.last().map(|e| e.message.as_str());
+        assert_eq!(last, Some("too many errors, only the first 100 are shown"));
+
+        let key = "k".repeat(1024 * 1024);
+        let refs = vec![r#""${n}""#; 400].join(", ");
+        let text = file(&format!(
+            r#"{{"request": {{"method": "POST", "url": "http://localhost/", "json": {{"{key}": [{refs}]}}}}}}"#
+        ));
+        for format in BOTH {
+            let errors = parse(&text, format).expect_err("long key");
+            assert!(
+                errors.len() <= MAX_ERRORS + 1,
+                "{format:?}: {}",
+                errors.len()
+            );
+            assert!(
+                errors.iter().all(|e| e.path.len() < 1000),
+                "{format:?}: {:?}",
+                errors.iter().map(|e| e.path.len()).max()
+            );
+        }
+    });
 }
