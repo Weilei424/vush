@@ -4,11 +4,14 @@
 //! path, so nothing is allocated until a problem is recorded.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use super::error::{PathSegment, PlanError, PlanErrorKind, PlanPath};
-use super::load::{ClosedVusLoad, LoadModel, RateSchedule};
 use super::step::Step;
+use super::threshold::{BoundOp, Threshold, ThresholdCheck};
 use super::workload::{PlanDraft, Scenario};
+
+mod values;
 
 /// A place in a draft, as a chain of borrowed links back to the root.
 #[derive(Clone, Copy)]
@@ -59,13 +62,44 @@ pub(super) fn push(errors: &mut Vec<PlanError>, at: &At<'_>, kind: PlanErrorKind
     });
 }
 
-/// Finds every problem in a draft, in plan order: file-level `setup` and
-/// `teardown`, then `scenarios`.
+/// What the walk carries down: the `http.timeout` that requests inherit.
+#[derive(Clone, Copy)]
+struct Scope {
+    request_timeout: Duration,
+}
+
+/// Finds every problem in a draft, in plan order: file-level `http`,
+/// `limits`, `setup` and `teardown`, then `thresholds`, then `scenarios`.
 pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
     let mut errors = Vec::new();
     let root = At::Root;
-    check_steps(&draft.setup, &root.key("setup"), &mut errors);
-    check_steps(&draft.teardown, &root.key("teardown"), &mut errors);
+    let scope = Scope {
+        request_timeout: draft.http.timeout,
+    };
+    values::duration(
+        draft.http.timeout,
+        true,
+        &root.key("http").key("timeout"),
+        &mut errors,
+    );
+    let limits = root.key("limits");
+    values::duration(
+        draft.limits.hook_timeout,
+        true,
+        &limits.key("hook_timeout"),
+        &mut errors,
+    );
+    values::rate_budget(
+        draft.max_request_rate,
+        &limits.key("max_request_rate"),
+        &mut errors,
+    );
+    check_steps(&draft.setup, &root.key("setup"), scope, &mut errors);
+    check_steps(&draft.teardown, &root.key("teardown"), scope, &mut errors);
+    let thresholds = root.key("thresholds");
+    for (index, threshold) in draft.thresholds.iter().enumerate() {
+        check_threshold(threshold, &thresholds.index(index), &mut errors);
+    }
     let scenarios = root.key("scenarios");
     if draft.scenarios.is_empty() {
         push(&mut errors, &scenarios, PlanErrorKind::NoScenarios);
@@ -73,6 +107,7 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
     let mut seen_names = HashSet::new();
     for (index, scenario) in draft.scenarios.iter().enumerate() {
         check_scenario(
+            draft,
             scenario,
             &scenarios.index(index),
             &mut seen_names,
@@ -82,13 +117,30 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
     errors
 }
 
+/// Checks one threshold, whose own place is `at`.
+fn check_threshold(threshold: &Threshold, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if let ThresholdCheck::HttpRequestDuration { bound, .. } = &threshold.check {
+        let key = match bound.op {
+            BoundOp::Lt => "lt",
+            BoundOp::Lte => "lte",
+            BoundOp::Gt => "gt",
+            BoundOp::Gte => "gte",
+        };
+        values::duration(bound.value, false, &at.key(key), errors);
+    }
+}
+
 /// Checks one scenario, whose own place is `at`.
 fn check_scenario<'a>(
+    draft: &PlanDraft,
     scenario: &'a Scenario,
     at: &At<'_>,
     seen_names: &mut HashSet<&'a str>,
     errors: &mut Vec<PlanError>,
 ) {
+    let scope = Scope {
+        request_timeout: scenario.http.timeout,
+    };
     if !seen_names.insert(scenario.name.as_str()) {
         push(
             errors,
@@ -96,33 +148,34 @@ fn check_scenario<'a>(
             PlanErrorKind::DuplicateScenarioName,
         );
     }
-    check_load(&scenario.load, &at.key("load"), errors);
-    check_steps(&scenario.setup, &at.key("setup"), errors);
-    check_steps(&scenario.teardown, &at.key("teardown"), errors);
-    check_steps(&scenario.vu_setup, &at.key("vu_setup"), errors);
-    check_steps(&scenario.vu_teardown, &at.key("vu_teardown"), errors);
+    values::load(&scenario.load, &at.key("load"), errors);
+    values::inherited(
+        scenario.http.timeout,
+        draft.http.timeout,
+        &at.key("http").key("timeout"),
+        errors,
+    );
+    let limits = at.key("limits");
+    values::inherited(
+        scenario.limits.hook_timeout,
+        draft.limits.hook_timeout,
+        &limits.key("hook_timeout"),
+        errors,
+    );
+    values::rate_budget(
+        scenario.max_request_rate,
+        &limits.key("max_request_rate"),
+        errors,
+    );
+    check_steps(&scenario.setup, &at.key("setup"), scope, errors);
+    check_steps(&scenario.teardown, &at.key("teardown"), scope, errors);
+    check_steps(&scenario.vu_setup, &at.key("vu_setup"), scope, errors);
+    check_steps(&scenario.vu_teardown, &at.key("vu_teardown"), scope, errors);
     let steps = at.key("steps");
     if scenario.steps.is_empty() {
         push(errors, &steps, PlanErrorKind::NoSteps);
     }
-    check_steps(&scenario.steps, &steps, errors);
-}
-
-/// Checks a load model, whose own place is `at`.
-fn check_load(load: &LoadModel, at: &At<'_>, errors: &mut Vec<PlanError>) {
-    let no_stages = match load {
-        LoadModel::ClosedVus(ClosedVusLoad::Fixed { .. }) => false,
-        LoadModel::ClosedVus(ClosedVusLoad::Ramping { stages, .. }) => stages.is_empty(),
-        LoadModel::IterationRate { schedule, .. } | LoadModel::RequestRate { schedule, .. } => {
-            match schedule {
-                RateSchedule::Fixed { .. } => false,
-                RateSchedule::Ramping { stages, .. } => stages.is_empty(),
-            }
-        }
-    };
-    if no_stages {
-        push(errors, &at.key("stages"), PlanErrorKind::NoStages);
-    }
+    check_steps(&scenario.steps, &steps, scope, errors);
 }
 
 /// Checks every step in a list, and the lists nested inside them.
@@ -130,27 +183,45 @@ fn check_load(load: &LoadModel, at: &At<'_>, errors: &mut Vec<PlanError>) {
 /// `at` is the list's own place, such as `scenarios[0].steps`. This does not
 /// check that the list itself is non-empty: the caller knows whether it may be
 /// empty, and reports [`PlanErrorKind::NoSteps`] when it may not.
-fn check_steps(steps: &[Step], at: &At<'_>, errors: &mut Vec<PlanError>) {
+fn check_steps(steps: &[Step], at: &At<'_>, scope: Scope, errors: &mut Vec<PlanError>) {
     for (index, step) in steps.iter().enumerate() {
         let step_at = at.index(index);
         match step {
-            Step::Request(_) | Step::Wait(_) => {}
+            Step::Request(request) => {
+                let request_at = step_at.key("request");
+                values::inherited(
+                    request.timeout,
+                    scope.request_timeout,
+                    &request_at.key("timeout"),
+                    errors,
+                );
+                if let Some(retry) = &request.retry {
+                    values::duration(
+                        retry.backoff,
+                        false,
+                        &request_at.key("retry").key("backoff"),
+                        errors,
+                    );
+                }
+            }
+            Step::Wait(value) => values::duration(*value, false, &step_at.key("wait"), errors),
             Step::If(step) => {
                 let if_at = step_at.key("if");
                 let then = if_at.key("then");
                 if step.then.is_empty() {
                     push(errors, &then, PlanErrorKind::NoSteps);
                 }
-                check_steps(&step.then, &then, errors);
-                check_steps(&step.otherwise, &if_at.key("else"), errors);
+                check_steps(&step.then, &then, scope, errors);
+                check_steps(&step.otherwise, &if_at.key("else"), scope, errors);
             }
             Step::Repeat(step) => {
                 let repeat_at = step_at.key("repeat");
+                values::duration(step.deadline, true, &repeat_at.key("deadline"), errors);
                 let inner = repeat_at.key("steps");
                 if step.steps.is_empty() {
                     push(errors, &inner, PlanErrorKind::NoSteps);
                 }
-                check_steps(&step.steps, &inner, errors);
+                check_steps(&step.steps, &inner, scope, errors);
             }
         }
     }
@@ -163,12 +234,33 @@ pub(super) mod testing {
 
     use super::super::load::{ClosedStop, ClosedVusLoad, LoadModel};
     use super::super::settings::{HttpSettings, ResourceLimits};
-    use super::super::step::Step;
+    use super::super::step::{Expect, RequestStep, RequestTarget, Step};
+    use super::super::template::Template;
     use super::super::workload::{PlanDraft, Scenario, StatePolicy};
     use super::{PlanErrorKind, check};
 
     pub(in super::super) fn wait() -> Step {
         Step::Wait(Duration::from_secs(1))
+    }
+
+    pub(in super::super) fn tpl(text: &str) -> Template {
+        text.parse().unwrap()
+    }
+
+    pub(in super::super) fn request(method: &str, target: RequestTarget) -> RequestStep {
+        RequestStep {
+            name: None,
+            method: method.parse().unwrap(),
+            target,
+            query: vec![],
+            headers: vec![],
+            body: None,
+            timeout: HttpSettings::default().timeout,
+            required: true,
+            retry: None,
+            expect: Expect::default(),
+            extract: vec![],
+        }
     }
 
     pub(in super::super) fn scenario(name: &str) -> Scenario {
@@ -219,9 +311,13 @@ mod tests {
     use std::time::Duration;
 
     use super::super::load::{ClosedVusLoad, LoadModel, QueuePolicy, RateSchedule};
+    use super::super::settings::{HttpSettings, ResourceLimits};
     use super::super::step::{Comparison, Condition, IfStep, RepeatStep, Step};
+    use super::super::step::{RequestStep, RequestTarget, RetryPolicy};
     use super::super::template::VarRef;
-    use super::testing::{draft, errors, scenario, wait};
+    use super::super::threshold::{Bound, PercentileStat};
+    use super::super::value::{MAX_DURATION, Rate};
+    use super::testing::{draft, errors, request, scenario, tpl, wait};
     use super::*;
 
     #[test]
@@ -445,5 +541,185 @@ mod tests {
         s.steps = inner;
         let want = format!("scenarios[0].steps{}", "[0].repeat.steps".repeat(64));
         assert_eq!(errors(&draft(vec![s])), [(want, PlanErrorKind::NoSteps)]);
+    }
+
+    const MS: Duration = Duration::from_millis(1);
+
+    fn req(timeout: Duration) -> RequestStep {
+        let mut r = request("GET", RequestTarget::Url(tpl("http://localhost/")));
+        r.timeout = timeout;
+        r
+    }
+
+    fn req_step(timeout: Duration) -> Step {
+        Step::Request(Box::new(req(timeout)))
+    }
+
+    fn rate(text: &str) -> Rate {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn every_duration_is_checked_at_its_path() {
+        let long = MAX_DURATION + MS;
+        let mut teardown = req(MAX_DURATION + MS * 2);
+        teardown.retry = Some(RetryPolicy {
+            attempts: 2,
+            backoff: long,
+            allow_non_idempotent: false,
+        });
+        let mut s = scenario("a");
+        s.load = LoadModel::IterationRate {
+            schedule: RateSchedule::Ramping {
+                start: rate("0/s"),
+                stages: vec![super::super::load::Stage {
+                    to: rate("1/s"),
+                    over: long,
+                }],
+            },
+            max_vus: NonZeroU32::new(1).unwrap(),
+            queue: QueuePolicy {
+                max_wait: long,
+                ..QueuePolicy::default()
+            },
+        };
+        s.http = HttpSettings {
+            timeout: MAX_DURATION + MS * 3,
+            ..HttpSettings::default()
+        };
+        s.limits = ResourceLimits {
+            hook_timeout: MAX_DURATION + MS * 4,
+            ..ResourceLimits::default()
+        };
+        s.steps = vec![Step::Repeat(RepeatStep {
+            count: NonZeroU32::new(1).unwrap(),
+            deadline: long,
+            steps: vec![Step::Wait(long)],
+        })];
+        let mut d = draft(vec![s]);
+        d.http.timeout = long;
+        d.limits.hook_timeout = long;
+        d.setup = vec![Step::Wait(long)];
+        d.teardown = vec![Step::Request(Box::new(teardown))];
+        d.thresholds = vec![Threshold {
+            scenario: None,
+            check: ThresholdCheck::HttpRequestDuration {
+                stat: PercentileStat::P95,
+                bound: Bound {
+                    op: BoundOp::Lt,
+                    value: long,
+                },
+            },
+        }];
+        let got = errors(&d);
+        let paths: Vec<&str> = got.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "http.timeout",
+                "limits.hook_timeout",
+                "setup[0].wait",
+                "teardown[0].request.timeout",
+                "teardown[0].request.retry.backoff",
+                "thresholds[0].lt",
+                "scenarios[0].load.stages[0].over",
+                "scenarios[0].load.queue.max_wait",
+                "scenarios[0].http.timeout",
+                "scenarios[0].limits.hook_timeout",
+                "scenarios[0].steps[0].repeat.deadline",
+                "scenarios[0].steps[0].repeat.steps[0].wait",
+            ]
+        );
+        assert!(
+            got.iter()
+                .all(|(_, k)| *k == PlanErrorKind::DurationTooLong)
+        );
+    }
+
+    #[test]
+    fn inherited_timeouts_are_reported_once() {
+        let nested = || {
+            let mut s = scenario("x");
+            s.steps = vec![if_then(vec![req_step(Duration::ZERO)], vec![])];
+            s
+        };
+        let mut a = nested();
+        a.name = "a".into();
+        a.http.timeout = Duration::ZERO;
+        a.limits.hook_timeout = Duration::ZERO;
+        let mut b = nested();
+        b.name = "b".into();
+        b.http.timeout = Duration::ZERO;
+        b.limits.hook_timeout = Duration::ZERO;
+        let mut d = draft(vec![a, b]);
+        d.http.timeout = Duration::ZERO;
+        d.limits.hook_timeout = Duration::ZERO;
+        assert_eq!(
+            errors(&d),
+            [
+                ("http.timeout".to_string(), PlanErrorKind::ZeroDuration),
+                (
+                    "limits.hook_timeout".to_string(),
+                    PlanErrorKind::ZeroDuration
+                ),
+            ]
+        );
+
+        let mut s = scenario("a");
+        s.http.timeout = MAX_DURATION + MS;
+        s.limits.hook_timeout = Duration::ZERO;
+        s.steps = vec![req_step(Duration::ZERO)];
+        let d = draft(vec![scenario("z"), s]);
+        assert_eq!(
+            errors(&d),
+            [
+                (
+                    "scenarios[1].http.timeout".to_string(),
+                    PlanErrorKind::DurationTooLong
+                ),
+                (
+                    "scenarios[1].limits.hook_timeout".to_string(),
+                    PlanErrorKind::ZeroDuration
+                ),
+                (
+                    "scenarios[1].steps[0].request.timeout".to_string(),
+                    PlanErrorKind::ZeroDuration
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn max_request_rate_must_be_above_zero() {
+        let mut s = scenario("a");
+        s.max_request_rate = Some(rate("0/s"));
+        let mut d = draft(vec![s]);
+        d.max_request_rate = Some(rate("0/s"));
+        assert_eq!(
+            errors(&d),
+            [
+                (
+                    "limits.max_request_rate".to_string(),
+                    PlanErrorKind::ZeroRate
+                ),
+                (
+                    "scenarios[0].limits.max_request_rate".to_string(),
+                    PlanErrorKind::ZeroRate
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn zero_waits_and_backoffs_are_allowed() {
+        let mut r = req(Duration::from_secs(1));
+        r.retry = Some(RetryPolicy {
+            attempts: 2,
+            backoff: Duration::ZERO,
+            allow_non_idempotent: false,
+        });
+        let mut s = scenario("a");
+        s.steps = vec![Step::Wait(Duration::ZERO), Step::Request(Box::new(r))];
+        assert!(check(&draft(vec![s])).is_empty());
     }
 }
