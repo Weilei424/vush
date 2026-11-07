@@ -95,15 +95,25 @@ const _: () = {
 impl WorkloadPlan {
     /// Checks a draft and, if it is sound, turns it into a plan.
     ///
-    /// Every problem is reported, not just the first. Problems come in plan
-    /// order. At file level that is `base_url`, `http`, `limits`, `setup`,
-    /// `teardown`, `thresholds` and `scenarios`. In each scenario it is `name`,
-    /// `load`, `http`, `limits`, `setup`, `teardown`, `vu_setup`,
+    /// Every problem is reported, not just the first, up to
+    /// [`MAX_PLAN_ERRORS`]. When there are more, the rest are dropped and one
+    /// [`PlanErrorKind::TooManyErrors`] entry ends the list. Problems come in
+    /// plan order. At file level that is `base_url`, `http`, `limits`,
+    /// `setup`, `teardown`, `thresholds` and `scenarios`. In each scenario it
+    /// is `name`, `load`, `http`, `limits`, `setup`, `teardown`, `vu_setup`,
     /// `vu_teardown` and `steps`. Inside an `if`, `when` comes before `then`
     /// and `then` before `else`.
     ///
+    /// A path key longer than [`MAX_PATH_KEY_BYTES`] is cut to a
+    /// [`PathSegment::TruncatedKey`].
+    ///
     /// The walk over nested steps is recursive, and a stack overflow can't be
     /// caught, so callers bound the nesting depth before building a draft.
+    ///
+    /// [`MAX_PLAN_ERRORS`]: crate::plan::MAX_PLAN_ERRORS
+    /// [`PlanErrorKind::TooManyErrors`]: crate::plan::PlanErrorKind::TooManyErrors
+    /// [`MAX_PATH_KEY_BYTES`]: crate::plan::MAX_PATH_KEY_BYTES
+    /// [`PathSegment::TruncatedKey`]: crate::plan::PathSegment::TruncatedKey
     pub fn new(draft: PlanDraft) -> Result<WorkloadPlan, Vec<PlanError>> {
         let errors = check::check(&draft);
         if errors.is_empty() {
