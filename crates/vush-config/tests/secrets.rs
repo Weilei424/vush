@@ -44,6 +44,7 @@ fn a_secret_in_any_value_never_reaches_an_error() {
     // is checked to fail at exactly that key.
     let requests: &[(&str, Option<&str>)] = &[
         ("method: GET, path: /, timeout: @", Some("timeout")),
+        ("method: GET, path: /, timout: @", Some("timout")),
         ("method: @, path: /", Some("method")),
         ("method: GET, path: /, required: @", Some("required")),
         ("method: GET, path: /, name: {a: @}", Some("name")),
