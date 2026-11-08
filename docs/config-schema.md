@@ -450,7 +450,7 @@ steps:
         Accept: text/plain       # replaces the merged Accept
 ```
 
-An error inside aliased or merged content points to the line where it's defined. Errors found after reading, such as a wrong type, also give the path where it's used.
+An error inside aliased or merged content points to the line where it's defined. A `<<` whose value isn't a map or a list of maps is reported at the `<<`, even when the value came through an alias. Errors found after reading, such as a wrong type, also give the path where it's used.
 
 ## Versioning
 
