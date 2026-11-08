@@ -6,6 +6,7 @@ mod load;
 mod reader;
 mod settings;
 mod step;
+mod suggest;
 mod threshold;
 
 use vush_core::plan::{
@@ -110,7 +111,7 @@ pub(crate) fn compile(root: &Node, errors: &mut Errors) -> Option<PlanDraft> {
 /// Reads an optional step list, empty when absent.
 fn hook(
     map: &mut MapReader<'_>,
-    key: &str,
+    key: &'static str,
     timeout: std::time::Duration,
     errors: &mut Errors,
     ok: &mut bool,
