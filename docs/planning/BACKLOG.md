@@ -51,6 +51,8 @@
 > P1.2 spec: `docs/superpowers/specs/2026-11-03-phase-1-2-yaml-json-reader-design.md` · Plan: `docs/superpowers/plans/2026-11-03-phase-1-2-yaml-json-reader.md` (local only).
 >
 > P1.3 spec: `docs/superpowers/specs/2026-11-06-phase-1-3-plan-validation-design.md` · Plan: `docs/superpowers/plans/2026-11-06-phase-1-3-plan-validation.md` (local only).
+>
+> P1.4 spec: `docs/superpowers/specs/2026-11-08-phase-1-4-validate-and-diagnostics-design.md` · Plan: `docs/superpowers/plans/2026-11-08-phase-1-4-validate-and-diagnostics.md` (local only).
 
 - [x] P1.1 Agree versioned YAML/JSON configuration shape and typed immutable workload plan (design approved 2026-11-02, finished 2026-11-03).
   - [x] Value types in `vush_core::plan`: durations, rates, sizes and percentages, parsed from text with exact-value and rejection tables (plan Task 1).
@@ -105,12 +107,17 @@
     - **Non-finite numbers.** A new `NonFiniteNumber` error rejects NaN and infinity in `json` bodies and in `equals`, `not_equals`, `gt`, `gte`, `lt` and `lte`.
     - **Audit.** A check of every public plan type found no other way past the parsers. `Template`, `JsonPath`, `Ratio` and `HttpMethod` can only come from their parsers.
   - [x] CI green on all four runners after the user pushes the second round of Codex fixes (plan Task 6). Run 42413645903 on `150d504`.
-- [ ] P1.4 Implement `vush validate` and meaningful config diagnostics.
+- [ ] P1.4 Implement `vush validate` and meaningful config diagnostics (design approved 2026-11-08).
+  - Decided 2026-11-08:
+    - `vush validate` only. `dry-run` moves to the phase that adds `vush run`, because it also needs run-time checks.
+    - One block per problem, in the style of `rustc`. No source lines, because those would print values from the file.
+    - One or more files per command. Exit status 0 if every file is valid, 2 otherwise.
   - Diagnostics stay bounded and keep P1.2's rule: no value from the file appears, only key paths, with keys escaped and cut to 64 characters. `ValueError`'s `Debug` output still prints all of `input`, so don't surface it through `{:?}`, `unwrap` or `expect` on file input.
-  - `dry-run` never prints the plan's `Debug` output, which holds literal header and body text.
-  - The README links `docs/config-schema.md` once `vush validate` exists.
-  - Wrong-type messages for text forms name the form, such as `expected a duration such as 500ms, 5s, 5m or 1h30m, found a number`, instead of `expected a string`.
-  - Consider pointing a bad merge value reached through an alias at its `<<` key instead of the anchor.
+  - [ ] Clearer messages: text forms and word lists name themselves on a wrong type, and a bad `<<` value reached through an alias points at the `<<` (plan Task 1).
+  - [ ] "Did you mean" hints on unknown keys and step kinds, offering only keys valid at that spot (plan Task 2).
+  - [ ] `vush validate <FILE>...`: problem blocks, status lines and exit codes, tested through the binary (plan Task 3).
+  - [ ] README link to `docs/config-schema.md`, the schema doc, architecture notes, local docs and all four check commands (plan Task 4).
+  - [ ] CI green on all four runners after the user pushes (plan Task 4).
 - [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. P1.2 already checks the `docs/config-schema.md` example against a hand-built plan, so here it becomes a CLI fixture too. Fixtures also check the documented defaults tables and file limits against the `Default` impls and constants.
   - Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches.
 
@@ -196,6 +203,7 @@
 - [ ] Phase 2: where the protocol-neutral executor trait lives (e.g. trait in `vush-core`, implemented by `vush-http`) so crate dependencies stay acyclic. The plan compiler's home is decided: `crates/vush-config` (2026-11-02, P1.1), so `crates/vush` doesn't need a library target for it.
 - [ ] Phase 2: maintained HTTP/TLS dependencies and retry/pooling implementation. The YAML library is decided: `saphyr-parser` (2026-11-03, P1.2).
 - [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership. Also whether `all` and `any` stop at the first decisive condition (the schema example relies on it), whether `vu.id` and `vu.iteration` start at 0 or 1, what exceeding `max_response_size` or `deadline` does, and how `exists` treats JSON `null`.
+- [ ] Whichever phase adds `vush run`: a `--dry-run` that makes every check a run makes before traffic, such as `${env.NAME}` being set and `tls.ca_file` being readable. It never prints the plan's `Debug` output, which holds literal header and body text. Moved from Phase 1 on 2026-11-08.
 - [ ] Phase 5: hard cap vs target request-rate, burst/fairness policy, retry attempt rate, scheduling tick precision, emergency signals.
 - [ ] Phase 6: percentile algorithm, metrics schema and exit-code precedence, default threshold behavior.
 - [ ] Phase 7: realistic measured numerical performance SLOs and benchmark controls.
