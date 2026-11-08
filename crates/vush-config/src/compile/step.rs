@@ -10,8 +10,10 @@ use vush_core::plan::{
     VarRef, parse_duration,
 };
 
-use super::reader::{MapReader, boolean, child, integer, item, list, number, parsed, string};
-use crate::error::{Errors, display_key};
+use super::reader::{
+    MapReader, boolean, child, integer, item, list, number, parsed, string, unknown_key,
+};
+use crate::error::Errors;
 use crate::node::{Node, NodeKind};
 
 const U32_MAX: u64 = u32::MAX as u64;
@@ -61,11 +63,9 @@ fn step(node: &Node, path: &str, default_timeout: Duration, errors: &mut Errors)
         "if" => if_step(value, &key_path, default_timeout, errors).map(Step::If),
         "repeat" => repeat(value, &key_path, default_timeout, errors).map(Step::Repeat),
         _ => {
-            errors.push(
-                &key_path,
-                Some(entry.key_location),
-                format!("unknown key `{}`", display_key(&entry.key)),
-            );
+            errors.push_with(&key_path, Some(entry.key_location), || {
+                unknown_key(&entry.key, ["request", "wait", "if", "repeat"])
+            });
             None
         }
     }
@@ -74,7 +74,7 @@ fn step(node: &Node, path: &str, default_timeout: Duration, errors: &mut Errors)
 /// An optional key: `Some(None)` when absent, `None` when present and bad.
 fn optional<'a, T>(
     map: &mut MapReader<'a>,
-    key: &str,
+    key: &'static str,
     errors: &mut Errors,
     read: impl FnOnce(&'a Node, &mut Errors) -> Option<T>,
 ) -> Option<Option<T>> {
@@ -847,7 +847,11 @@ mod tests {
             ("[5]", "steps[0]", "expected a map"),
             ("[{}]", "steps[0]", "exactly one key"),
             ("[{wait: 1s, if: {}}]", "steps[0]", "exactly one key"),
-            ("[{reqest: {}}]", "steps[0].reqest", "unknown key `reqest`"),
+            (
+                "[{reqest: {}}]",
+                "steps[0].reqest",
+                "unknown key `reqest`, did you mean `request`?",
+            ),
             ("[{wait: 5}]", "steps[0].wait", "expected a duration"),
             ("[{wait: soon}]", "steps[0].wait", "expected a duration"),
             (
