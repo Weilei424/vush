@@ -107,7 +107,7 @@
     - **Non-finite numbers.** A new `NonFiniteNumber` error rejects NaN and infinity in `json` bodies and in `equals`, `not_equals`, `gt`, `gte`, `lt` and `lte`.
     - **Audit.** A check of every public plan type found no other way past the parsers. `Template`, `JsonPath`, `Ratio` and `HttpMethod` can only come from their parsers.
   - [x] CI green on all four runners after the user pushes the second round of Codex fixes (plan Task 6). Run 42413645903 on `150d504`.
-- [ ] P1.4 Implement `vush validate` and meaningful config diagnostics (design approved 2026-11-08).
+- [x] P1.4 Implement `vush validate` and meaningful config diagnostics (design approved 2026-11-08, finished 2026-11-08).
   - Decided 2026-11-08:
     - `vush validate` only. `dry-run` moves to the phase that adds `vush run`, because it also needs run-time checks.
     - One block per problem, in the style of `rustc`. No source lines, because those would print values from the file.
@@ -121,7 +121,7 @@
     - A hint never offers a key that would conflict with one already in the map, such as `url` beside `path`, or `stages` beside a fixed load's keys.
     - The list of keys to offer is built once per map, and only when a hint is needed.
     - `docs/config-schema.md` says a bad `<<` value reached through an alias is reported at the `<<`.
-  - [ ] CI green on all four runners after the user pushes (plan Task 4).
+  - [x] CI green on all four runners after the user pushes (plan Task 4). Run 42503992380 on `8faab92`.
 - [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. P1.2 already checks the `docs/config-schema.md` example against a hand-built plan, so here it becomes a CLI fixture too. Fixtures also check the documented defaults tables and file limits against the `Default` impls and constants.
   - Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches.
 
