@@ -59,7 +59,7 @@ A root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` is required by the user's planni
 
 **Goal:** Convert declarative files into the same validated, immutable typed workload representation.
 
-**Deliverables:** Schema v1 reference (`docs/config-schema.md`), typed plan in `vush-core`, `crates/vush-config` with YAML/JSON input adapters and schema/semantic validation, `validate`/`dry-run` CLI commands, example configs.
+**Deliverables:** Schema v1 reference (`docs/config-schema.md`), typed plan in `vush-core`, `crates/vush-config` with YAML/JSON input adapters and schema/semantic validation, a `validate` CLI command, example configs. `dry-run` moved to the phase that adds `vush run`, because it also needs run-time checks such as `${env.NAME}` being set and `tls.ca_file` being readable (decided 2026-11-08).
 
 **Tasks:**
 1. Design a **single schema** with explicit load modes, scenario steps, hooks, HTTP, limits and thresholds; mark unsupported features clearly.
