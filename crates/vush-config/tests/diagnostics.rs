@@ -255,3 +255,30 @@ scenarios:
     assert!(found[0].message.contains("sets this variable"), "{found:?}");
     assert_eq!(lines(&found), [12]);
 }
+
+#[test]
+fn hints_only_offer_keys_valid_at_that_spot() {
+    let file = |load: &str| {
+        format!(
+            "schema_version: 1\nname: n\nscenarios:\n  - name: a\n    load: {load}\n    steps:\n      - wait: 1s\n"
+        )
+    };
+    for (load, want) in [
+        (
+            "{model: closed_vus, vus: 1, duration: 1s, strat: 0}",
+            "unknown key `strat`",
+        ),
+        (
+            "{model: closed_vus, stages: [{to: 1, over: 1s}], vu: 1}",
+            "unknown key `vu`",
+        ),
+        (
+            "{model: closed_vus, stages: [{to: 1, over: 1s}], strat: 0}",
+            "unknown key `strat`, did you mean `start`?",
+        ),
+    ] {
+        let found = errors(&file(load), Format::Yaml);
+        assert_eq!(found.len(), 1, "{load}: {found:?}");
+        assert_eq!(found[0].message, want, "{load}");
+    }
+}
