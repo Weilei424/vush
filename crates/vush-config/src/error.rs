@@ -55,6 +55,16 @@ impl Errors {
         location: Option<Location>,
         message: impl Into<String>,
     ) {
+        self.push_with(path, location, || message.into());
+    }
+
+    /// Like `push`, but builds the message only when the list has room.
+    pub(crate) fn push_with(
+        &mut self,
+        path: &str,
+        location: Option<Location>,
+        message: impl FnOnce() -> String,
+    ) {
         if self.list.len() >= MAX_ERRORS {
             self.overflowed = true;
             return;
@@ -62,7 +72,7 @@ impl Errors {
         self.list.push(ConfigError {
             path: path.to_owned(),
             location,
-            message: message.into(),
+            message: message(),
         });
     }
 
@@ -163,6 +173,25 @@ mod tests {
         }
         let list = errors.into_sorted();
         assert_eq!(list.len(), MAX_ERRORS + 1);
+        assert!(list[MAX_ERRORS].message.contains("too many errors"));
+    }
+
+    #[test]
+    fn lazy_messages_are_built_only_while_there_is_room() {
+        let mut errors = Errors::new();
+        errors.push_with("a", None, || "built".to_owned());
+        for _ in 1..MAX_ERRORS {
+            errors.push("", None, "x");
+        }
+        let mut called = false;
+        errors.push_with("", None, || {
+            called = true;
+            "y".to_owned()
+        });
+        assert!(!called);
+        let list = errors.into_sorted();
+        assert_eq!(list.len(), MAX_ERRORS + 1);
+        assert_eq!(list[0].message, "built");
         assert!(list[MAX_ERRORS].message.contains("too many errors"));
     }
 
