@@ -248,7 +248,7 @@ mod tests {
                 "http.pool",
                 "expected one of shared, scenario or vu",
             ),
-            ("{timeout: 5}", "http.timeout", "expected a string"),
+            ("{timeout: 5}", "http.timeout", "expected a duration"),
             ("{timeout: soon}", "http.timeout", "expected a duration"),
             (
                 "{redirects: -1}",
@@ -264,7 +264,7 @@ mod tests {
             (
                 "{max_response_size: 1024}",
                 "http.max_response_size",
-                "expected a string",
+                "expected a size",
             ),
             (
                 "{max_response_size: big}",
@@ -302,7 +302,7 @@ mod tests {
             (
                 "{max_request_rate: 5}",
                 "limits.max_request_rate",
-                "expected a string",
+                "expected a rate",
             ),
             (
                 "{max_request_rate: fast}",
