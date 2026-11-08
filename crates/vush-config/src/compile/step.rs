@@ -848,7 +848,7 @@ mod tests {
             ("[{}]", "steps[0]", "exactly one key"),
             ("[{wait: 1s, if: {}}]", "steps[0]", "exactly one key"),
             ("[{reqest: {}}]", "steps[0].reqest", "unknown key `reqest`"),
-            ("[{wait: 5}]", "steps[0].wait", "expected a string"),
+            ("[{wait: 5}]", "steps[0].wait", "expected a duration"),
             ("[{wait: soon}]", "steps[0].wait", "expected a duration"),
             (
                 "[{if: {then: [{wait: 1s}]}}]",
@@ -994,7 +994,7 @@ mod tests {
             ("query: {page: 1}", "query.page", "expected a string"),
             ("json: {a: \"${\"}", "json.a", "expected a closing }"),
             ("json: [\"${\"]", "json[0]", "expected a closing }"),
-            ("timeout: 5", "timeout", "expected a string"),
+            ("timeout: 5", "timeout", "expected a duration"),
             ("required: no", "required", "expected a boolean"),
             (
                 "retry: {backoff: 1s}",
