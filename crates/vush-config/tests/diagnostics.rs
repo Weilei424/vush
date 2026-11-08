@@ -282,3 +282,74 @@ fn hints_only_offer_keys_valid_at_that_spot() {
         assert_eq!(found[0].message, want, "{load}");
     }
 }
+
+fn file_with_load(load: &str) -> String {
+    format!(
+        "schema_version: 1\nname: n\nscenarios:\n  - name: a\n    load: {load}\n    steps:\n      - wait: 1s\n"
+    )
+}
+
+fn file_with_step(step: &str) -> String {
+    format!(
+        "schema_version: 1\nname: n\nscenarios:\n  - name: a\n    load: {{model: closed_vus, vus: 1, iterations: 1}}\n    steps:\n      - {step}\n"
+    )
+}
+
+#[test]
+fn hints_never_offer_a_key_that_would_conflict() {
+    let wait = "\nthresholds: [{metric: error_rate, lt: 1%, gtt: 2%}]\n";
+    let files = [
+        (
+            file_with_load("{model: closed_vus, vus: 1, duration: 1s, stage: [{to: 1, over: 1s}]}"),
+            "unknown key `stage`",
+        ),
+        (
+            file_with_load("{model: closed_vus, vus: 1, duration: 1s, iteratons: 5}"),
+            "unknown key `iteratons`",
+        ),
+        (
+            file_with_load(
+                "{model: iteration_rate, max_vus: 1, rate: 1/s, duration: 1s, stage: []}",
+            ),
+            "unknown key `stage`",
+        ),
+        (
+            file_with_step("request: {method: GET, path: /, ulr: x}"),
+            "unknown key `ulr`",
+        ),
+        (
+            file_with_step("request: {method: GET, url: \"http://a/\", json: {}, bdy: x}"),
+            "unknown key `bdy`",
+        ),
+        (
+            file_with_step("if: {when: {var: x, exists: true, equal: 1}, then: [{wait: 1s}]}"),
+            "unknown key `equal`",
+        ),
+        (
+            format!("{}{wait}", file_with_step("wait: 1s")),
+            "unknown key `gtt`",
+        ),
+    ];
+    for (text, want) in files {
+        let found = errors(&text, Format::Yaml);
+        assert_eq!(found.len(), 1, "{text}: {found:?}");
+        assert_eq!(found[0].message, want, "{text}");
+    }
+}
+
+#[test]
+fn hints_still_offer_a_key_when_nothing_conflicts() {
+    for (text, want) in [
+        (
+            file_with_step("request: {method: GET, ulr: x}"),
+            "unknown key `ulr`, did you mean `url`?",
+        ),
+        (
+            file_with_load("{model: closed_vus, stage: [{to: 1, over: 1s}]}"),
+            "unknown key `stage`, did you mean `stages`?",
+        ),
+    ] {
+        let found = errors(&text, Format::Yaml);
+        assert!(found.iter().any(|e| e.message == want), "{text}: {found:?}");
+    }
+}
