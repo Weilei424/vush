@@ -414,7 +414,7 @@ mod tests {
             (
                 "{model: closed_vus, vus: 1, duration: 5}",
                 "load.duration",
-                "expected a string",
+                "expected a duration",
             ),
             (
                 "{model: closed_vus, vus: 1, duration: 1s, start: 0}",
@@ -529,7 +529,7 @@ mod tests {
             (
                 "{model: iteration_rate, max_vus: 1, rate: 20, duration: 1s}",
                 "load.rate",
-                "expected a string",
+                "expected a rate",
             ),
             (
                 "{model: iteration_rate, max_vus: 1, rate: 0.5/s, duration: 1s}",
@@ -579,7 +579,7 @@ mod tests {
             (
                 "{model: request_rate, vus: 1, stages: [{to: 20, over: 1s}]}",
                 "load.stages[0].to",
-                "expected a string",
+                "expected a rate",
             ),
             (
                 "{model: request_rate, vus: 1, rate: 1/s, duration: 1s, max_vus: 1}",
