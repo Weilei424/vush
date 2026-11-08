@@ -1,3 +1,4 @@
+use std::env;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,7 +26,11 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => exit_with_usage(error),
+    };
+    match cli.command {
         Command::Validate { files } => {
             if validate::run(&files, &mut io::stdout(), &mut io::stderr()) {
                 ExitCode::SUCCESS
@@ -34,4 +39,14 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Prints clap's help or usage error and exits.
+///
+/// clap echoes arguments as they are, so the message comes from a second parse
+/// with control characters escaped. Escaping the finished message wouldn't
+/// work, because a newline in an argument looks like one of clap's own.
+fn exit_with_usage(error: clap::Error) -> ! {
+    let args = env::args_os().map(|arg| validate::printable(&arg.to_string_lossy()));
+    Cli::try_parse_from(args).err().unwrap_or(error).exit()
 }
