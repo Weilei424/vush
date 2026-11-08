@@ -381,7 +381,8 @@ impl<'a> Reader<'a> {
     /// and keys an earlier source already brought.
     fn merged_entries(&mut self, value: Node, key_location: Location, own: &[Entry]) -> Vec<Entry> {
         // Anchors are defined before they're used, so anything located before
-        // the `<<` came through an alias; report those at the `<<` itself.
+        // the `<<` came through an alias; a bad location that falls before the `<<`
+        // is moved to the `<<`.
         let mut sources = Vec::new();
         match value.kind {
             NodeKind::Map(entries) => sources.push(entries),
