@@ -63,7 +63,7 @@ pub(super) fn load(node: &Node, path: &str, errors: &mut Errors) -> Option<LoadM
 /// A required key holding an integer of at least 1 that fits `u32`.
 fn non_zero_u32(
     map: &mut MapReader<'_>,
-    key: &str,
+    key: &'static str,
     path: &str,
     errors: &mut Errors,
 ) -> Option<NonZeroU32> {
