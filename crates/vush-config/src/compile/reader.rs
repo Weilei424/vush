@@ -284,7 +284,17 @@ pub(super) fn parsed<T>(
     parse: impl FnOnce(&str) -> Result<T, ValueError>,
     errors: &mut Errors,
 ) -> Option<T> {
-    let text = string(node, path, errors)?;
+    let text = match &node.kind {
+        NodeKind::String(s) => s,
+        NodeKind::Invalid => return None,
+        _ => {
+            // Empty text is wrong for every text form except a template, so
+            // the parser's complaint names the form that was expected.
+            let what = parse("").err().map_or("a string", |e| e.expected);
+            wrong_type(node, path, what, errors);
+            return None;
+        }
+    };
     match parse(text) {
         Ok(value) => Some(value),
         Err(e) => {
@@ -305,16 +315,23 @@ pub(super) fn one_of<T: Copy>(
     choices: &[(&str, T)],
     errors: &mut Errors,
 ) -> Option<T> {
-    let text = string(node, path, errors)?;
-    if let Some((_, value)) = choices.iter().find(|(name, _)| *name == text) {
-        return Some(*value);
-    }
     let names: Vec<&str> = choices.iter().map(|(name, _)| *name).collect();
     let listed = match names.split_last() {
         Some((last, [])) => (*last).to_owned(),
         Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
         None => String::new(),
     };
+    let text = match &node.kind {
+        NodeKind::String(s) => s,
+        NodeKind::Invalid => return None,
+        _ => {
+            wrong_type(node, path, &format!("one of {listed}"), errors);
+            return None;
+        }
+    };
+    if let Some((_, value)) = choices.iter().find(|(name, _)| *name == text) {
+        return Some(*value);
+    }
     errors.push(
         path,
         Some(node.location),
@@ -325,7 +342,9 @@ pub(super) fn one_of<T: Copy>(
 
 #[cfg(test)]
 mod tests {
-    use vush_core::plan::parse_duration;
+    use vush_core::plan::{
+        ByteSize, HttpMethod, JsonPath, Rate, Ratio, Template, VarRef, parse_duration,
+    };
 
     use super::*;
     use crate::compile::testing::run;
@@ -488,6 +507,9 @@ mod tests {
         assert!(string(&invalid, "p", &mut errors).is_none());
         assert!(integer(&invalid, "p", 0, 9, &mut errors).is_none());
         assert!(MapReader::new(&invalid, "p", &mut errors).is_none());
+        let never = |_: &str| -> Result<(), ValueError> { panic!("the parser must not run") };
+        assert!(parsed(&invalid, "p", never, &mut errors).is_none());
+        assert!(one_of(&invalid, "p", &[("a", 1)], &mut errors).is_none());
         assert!(errors.is_empty());
     }
 
@@ -521,7 +543,81 @@ mod tests {
         let (_, errors) = run("5", |node, errors| {
             parsed(node, "p", parse_duration, errors)
         });
-        assert!(errors[0].message.contains("expected a string"));
+        assert!(
+            errors[0]
+                .message
+                .contains("expected a duration such as 500ms")
+        );
+    }
+
+    fn message<T>(yaml: &str, parse: impl FnOnce(&str) -> Result<T, ValueError>) -> String {
+        let (_, errors) = run(yaml, |node, errors| {
+            parsed(node, "p", parse, errors).is_some()
+        });
+        errors[0].message.clone()
+    }
+
+    #[test]
+    fn wrong_types_name_the_text_form() {
+        for (got, want) in [
+            (
+                message("5", parse_duration),
+                "a duration such as 500ms, 5s, 5m or 1h30m",
+            ),
+            (
+                message("5", str::parse::<Rate>),
+                "a rate such as 20/s, 300/m or 5/h",
+            ),
+            (
+                message("5", str::parse::<ByteSize>),
+                "a size such as 512B, 500KB, 2MB or 1MiB",
+            ),
+            (
+                message("5", str::parse::<Ratio>),
+                "a percentage from 0% to 100% with up to 4 decimals, such as 1% or 0.5%",
+            ),
+            (
+                message("5", str::parse::<HttpMethod>),
+                "an HTTP method such as GET, POST or M-SEARCH (uppercase A-Z, 0-9 and -, starting with a letter)",
+            ),
+            (
+                message("5", str::parse::<JsonPath>),
+                "a JSON path such as $, $.name or $.items[0].id (names use A-Z, a-z, 0-9, _ and -)",
+            ),
+            (
+                message("5", str::parse::<VarRef>),
+                "a variable reference such as token, scenario.x, global.x, env.NAME, vu.id or vu.iteration",
+            ),
+            (message("5", str::parse::<Template>), "a string"),
+        ] {
+            assert_eq!(got, format!("expected {want}, found a number"));
+        }
+    }
+
+    #[test]
+    fn text_forms_say_what_was_found() {
+        for (yaml, found) in [
+            ("~", "null"),
+            ("true", "a boolean"),
+            ("[]", "a list"),
+            ("{}", "a map"),
+        ] {
+            assert_eq!(
+                message(yaml, parse_duration),
+                format!("expected a duration such as 500ms, 5s, 5m or 1h30m, found {found}"),
+                "{yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn word_lists_name_the_choices_on_a_wrong_type() {
+        let choices = [("auto", 1), ("http1", 2), ("http2", 3)];
+        let (_, errors) = run("5", |node, errors| one_of(node, "p", &choices, errors));
+        assert_eq!(
+            errors[0].message,
+            "expected one of auto, http1 or http2, found a number"
+        );
     }
 
     #[test]
