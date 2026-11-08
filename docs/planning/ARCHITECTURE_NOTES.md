@@ -1,6 +1,6 @@
 # Architecture Notes — Vush
 
-> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI), the P1.1 plan types in `vush-core`, the P1.2 `vush-config` crate (which reads YAML and JSON test files into the plan), the P1.3 checks in `WorkloadPlan::new`, which reject everything the schema forbids, and the schema reference (`docs/config-schema.md`) exist so far. No CLI command reads a test file until `vush validate` in P1.4. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
+> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI), the P1.1 plan types in `vush-core`, the P1.2 `vush-config` crate (which reads YAML and JSON test files into the plan), the P1.3 checks in `WorkloadPlan::new`, which reject everything the schema forbids, and the schema reference (`docs/config-schema.md`) exist so far. `vush validate` (P1.4) reads and checks test files. No command sends traffic yet. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
 >
 > **Project name:** **Vush** (confirmed 2026-11-01). **CLI binary:** `vush` (e.g., `vush run test.yaml`). Repository: `https://github.com/Weilei424/vush`. Cargo packages: `vush`, `vush-core`, `vush-http` (decided in Phase 0), plus `vush-config` (decided in P1.1, created in P1.2). Final command flags remain to be determined during the relevant phase. This document is canonical for architecture decisions; `IMPLEMENTATION_PLAN.md` owns phase scope and `BACKLOG.md` owns execution status.
 
@@ -214,7 +214,7 @@ Schema v1, the YAML/JSON test file format, is defined in [`docs/config-schema.md
 |---|---|---|
 | Exact crate count and filenames | **Decided:** `vush` (bin), `vush-core`, `vush-http` under `crates/`, plus `vush-config` from P1.2 | Phase 0, P1.1 ✓ |
 | YAML parser, HTTP library, histogram implementation | YAML parser **decided**: `saphyr-parser`. Evaluate the others by feature/performance/security | P1.2 ✓, Phases 2, 6 |
-| YAML/JSON schema and error location reporting | **Decided:** schema v1 (scenario-owned load, tagged steps); every error has a key path and a line and column in both formats, and never quotes a value from the file. P1.4 renders them | P1.1 ✓, P1.2 ✓ |
+| YAML/JSON schema and error location reporting | **Decided:** schema v1 (scenario-owned load, tagged steps); every error has a key path and a line and column in both formats, and never quotes a value from the file. `vush validate` prints one block per problem (P1.4 ✓) | P1.1 ✓, P1.2 ✓ |
 | HTTP connection pool isolation algorithm | Shared by default, scenario/VU variants selectable | Phase 2/4 |
 | Setup failure policies and hook data lifetime | Abort global / skip failed scenario / retire failed VU | Phase 3/4 |
 | Virtual-user reuse for open arrivals | Persistent bounded reusable VU pool; one iteration per VU | Phase 4/5 |
