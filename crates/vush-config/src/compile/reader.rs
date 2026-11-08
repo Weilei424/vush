@@ -121,6 +121,20 @@ impl<'a> MapReader<'a> {
         Some(&self.entries[at].value)
     }
 
+    /// Like `optional`, but the key is offered as a hint only while none of
+    /// `conflicts` is in the map.
+    pub(super) fn optional_unless(
+        &mut self,
+        key: &'static str,
+        conflicts: &[&str],
+    ) -> Option<&'a Node> {
+        let found = self.optional(key);
+        if conflicts.iter().any(|k| self.has(k)) {
+            self.asked.pop();
+        }
+        found
+    }
+
     pub(super) fn required(&mut self, key: &'static str, errors: &mut Errors) -> Option<&'a Node> {
         let found = self.optional(key);
         if found.is_none() {
@@ -139,7 +153,10 @@ impl<'a> MapReader<'a> {
         keys: &[&'static str],
         errors: &mut Errors,
     ) -> Option<(&'static str, &'a Node)> {
-        self.asked.extend_from_slice(keys);
+        // A group with a member present can't be completed by a typo.
+        if !keys.iter().any(|k| self.has(k)) {
+            self.asked.extend_from_slice(keys);
+        }
         let mut winner: Option<(&'static str, &'a Node)> = None;
         for at in 0..self.entries.len() {
             let entry = &self.entries[at];
@@ -209,18 +226,21 @@ impl<'a> MapReader<'a> {
 
     /// Records an unknown-key error for each key nobody used.
     pub(super) fn finish(self, errors: &mut Errors) {
+        let mut offered: Option<Vec<&'static str>> = None;
         for (entry, used) in self.entries.iter().zip(&self.used) {
             if !used {
                 errors.push_with(
                     &child(self.path, &entry.key),
                     Some(entry.key_location),
                     || {
-                        let offered = self
-                            .asked
-                            .iter()
-                            .copied()
-                            .filter(|k| !self.entries.iter().any(|e| e.key == *k));
-                        unknown_key(&entry.key, offered)
+                        let offered = offered.get_or_insert_with(|| {
+                            self.asked
+                                .iter()
+                                .copied()
+                                .filter(|k| !self.entries.iter().any(|e| e.key == *k))
+                                .collect::<Vec<_>>()
+                        });
+                        unknown_key(&entry.key, offered.iter().copied())
                     },
                 );
             }
