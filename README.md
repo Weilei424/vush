@@ -19,6 +19,16 @@ Vush aims to provide a fast, resource-efficient, and extensible alternative for 
 
 See `docs/planning/` for the architecture notes, implementation roadmap, and backlog.
 
+## Validate a Test File
+
+Tests are declared in YAML or JSON files. The format is described in [`docs/config-schema.md`](docs/config-schema.md).
+
+```sh
+cargo run -p vush -- validate test.yaml
+```
+
+`validate` checks one or more files and sends no traffic. It exits `0` if every file is valid and `2` otherwise. It never quotes a value from the file.
+
 ## Development
 
 Prerequisite: [rustup](https://rustup.rs). The pinned toolchain (Rust 1.99.1 with rustfmt and clippy) installs automatically from `rust-toolchain.toml` the first time you run `cargo` in the repository.
