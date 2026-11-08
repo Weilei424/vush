@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -312,4 +313,54 @@ fn validate_reports_empty_and_non_utf8_files_in_block_form() {
         stderr(&out),
         "error: the file is empty\n  --> empty.yaml\n\nempty.yaml: not valid, 1 problem\nerror: the file isn't valid UTF-8\n  --> binary.yaml:1:14\n\nbinary.yaml: not valid, 1 problem\n"
     );
+}
+
+#[test]
+fn usage_errors_escape_control_characters_in_arguments() {
+    for (args, raw, escaped) in [
+        (vec!["--bo\tgus"], "--bo\tgus", "--bo\\tgus"),
+        (
+            vec!["--a\nerror: forged"],
+            "--a\nerror: forged",
+            "--a\\nerror: forged",
+        ),
+        (vec!["ru\u{1b}[31mn"], "ru\u{1b}[31mn", "ru\\u{1b}[31mn"),
+        (vec!["validate", "--x\ty", "a.yaml"], "--x\ty", "--x\\ty"),
+    ] {
+        let out = vush(&args);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(err.contains(escaped), "{args:?}: {err}");
+        assert!(!err.contains(raw), "{args:?}: {err}");
+        assert!(
+            err.lines().all(|line| !line.chars().any(char::is_control)),
+            "{args:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn usage_and_help_escape_control_characters_in_the_program_name() {
+    for (args, code) in [(vec!["--bogus"], 2), (vec!["validate", "--help"], 0)] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vush"))
+            .arg0("vu\tsh")
+            .args(&args)
+            .env_remove("CLICOLOR_FORCE")
+            .output()
+            .expect("failed to run vush binary");
+        let text = format!("{}{}", stdout(&out), stderr(&out));
+        assert_eq!(out.status.code(), Some(code), "{args:?}");
+        assert!(text.contains("vu\\tsh"), "{args:?}: {text}");
+        assert!(!text.contains('\t'), "{args:?}: {text}");
+    }
+}
+
+#[test]
+fn validate_still_reads_a_file_whose_name_holds_a_control_character() {
+    let d = dir("validate_still_reads_a_file_whose_name_holds_a_control_character");
+    write(&d, "a\tb.yaml", VALID_YAML);
+    let out = validate(&d, &["a\tb.yaml"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout(&out), "a\\tb.yaml: valid\n");
+    assert_eq!(stderr(&out), "");
 }
