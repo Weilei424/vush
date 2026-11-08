@@ -221,14 +221,15 @@ fn validate_rejects_an_oversized_file() {
 fn validate_survives_a_closed_stdout() {
     let d = dir("validate_survives_a_closed_stdout");
     write(&d, "ok.yaml", VALID_YAML);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vush"))
+    let (reader, writer) = std::io::pipe().expect("failed to make a pipe");
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_vush"))
         .args(["validate", "ok.yaml"])
         .current_dir(&d)
-        .stdout(Stdio::piped())
+        .stdout(writer)
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to run vush binary");
-    drop(child.stdout.take());
     let out = child.wait_with_output().expect("failed to wait for vush");
     assert_eq!(out.status.code(), Some(0));
     assert!(!stderr(&out).contains("panicked"));
