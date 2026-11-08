@@ -258,6 +258,7 @@ name = "vush"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "vush-config",
 ]
 
 [[package]]
