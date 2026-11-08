@@ -2,6 +2,7 @@
 
 use vush_core::plan::{JsonNumber, ValueError};
 
+use super::suggest::closest;
 use crate::error::{Errors, display_key};
 use crate::node::{Entry, Node, NodeKind};
 
@@ -54,11 +55,22 @@ fn conflict_message(earlier: &str, later: &str) -> String {
     format!("`{earlier}` and `{later}` can't be used together")
 }
 
+/// `unknown key` for `key`, with the closest of `choices` when one is near.
+pub(super) fn unknown_key(key: &str, choices: impl IntoIterator<Item = &'static str>) -> String {
+    let mut message = format!("unknown key `{}`", display_key(key));
+    if let Some(choice) = closest(key, choices) {
+        message.push_str(&format!(", did you mean `{choice}`?"));
+    }
+    message
+}
+
 /// Reads the keys of one map and reports the ones nobody asked for.
 pub(super) struct MapReader<'a> {
     node: &'a Node,
     entries: &'a [Entry],
     used: Vec<bool>,
+    /// Keys asked for, which are the ones offered as hints.
+    asked: Vec<&'static str>,
     path: &'a str,
 }
 
@@ -69,6 +81,7 @@ impl<'a> MapReader<'a> {
                 node,
                 entries,
                 used: vec![false; entries.len()],
+                asked: Vec::new(),
                 path,
             }),
             NodeKind::Invalid => None,
@@ -101,13 +114,14 @@ impl<'a> MapReader<'a> {
         }
     }
 
-    pub(super) fn optional(&mut self, key: &str) -> Option<&'a Node> {
+    pub(super) fn optional(&mut self, key: &'static str) -> Option<&'a Node> {
+        self.asked.push(key);
         let at = self.position(key)?;
         self.used[at] = true;
         Some(&self.entries[at].value)
     }
 
-    pub(super) fn required(&mut self, key: &str, errors: &mut Errors) -> Option<&'a Node> {
+    pub(super) fn required(&mut self, key: &'static str, errors: &mut Errors) -> Option<&'a Node> {
         let found = self.optional(key);
         if found.is_none() {
             errors.push(
@@ -125,6 +139,7 @@ impl<'a> MapReader<'a> {
         keys: &[&'static str],
         errors: &mut Errors,
     ) -> Option<(&'static str, &'a Node)> {
+        self.asked.extend_from_slice(keys);
         let mut winner: Option<(&'static str, &'a Node)> = None;
         for at in 0..self.entries.len() {
             let entry = &self.entries[at];
@@ -196,10 +211,17 @@ impl<'a> MapReader<'a> {
     pub(super) fn finish(self, errors: &mut Errors) {
         for (entry, used) in self.entries.iter().zip(&self.used) {
             if !used {
-                errors.push(
+                errors.push_with(
                     &child(self.path, &entry.key),
                     Some(entry.key_location),
-                    format!("unknown key `{}`", display_key(&entry.key)),
+                    || {
+                        let offered = self
+                            .asked
+                            .iter()
+                            .copied()
+                            .filter(|k| !self.entries.iter().any(|e| e.key == *k));
+                        unknown_key(&entry.key, offered)
+                    },
                 );
             }
         }
@@ -369,6 +391,84 @@ mod tests {
         assert_eq!(errors[0].path, "http.nmae");
         assert_eq!(errors[0].location, Some(Location { line: 1, column: 8 }));
         assert!(errors[0].message.contains("unknown key `nmae`"));
+    }
+
+    fn unknown_message(yaml: &str, ask: impl FnOnce(&mut MapReader<'_>, &mut Errors)) -> String {
+        let (_, errors) = run(yaml, |node, errors| {
+            let mut map = MapReader::new(node, "p", errors).unwrap();
+            ask(&mut map, errors);
+            map.finish(errors);
+        });
+        errors.last().unwrap().message.clone()
+    }
+
+    #[test]
+    fn every_way_of_asking_records_the_key() {
+        let hint = "unknown key `nmae`, did you mean `name`?";
+        assert_eq!(
+            unknown_message("{nmae: 1}", |m, _| {
+                m.optional("name");
+            }),
+            hint
+        );
+        assert_eq!(
+            unknown_message("{nmae: 1}", |m, e| {
+                m.required("name", e);
+            }),
+            hint
+        );
+        assert_eq!(
+            unknown_message("{nmae: 1}", |m, e| {
+                m.at_most_one(&["name", "url"], e);
+            }),
+            hint
+        );
+        assert_eq!(
+            unknown_message("{nmae: 1}", |m, e| {
+                m.exactly_one(&["name", "url"], e);
+            }),
+            hint
+        );
+    }
+
+    #[test]
+    fn keys_already_in_the_map_are_not_offered() {
+        let got = unknown_message("{name: a, nmae: b}", |m, _| {
+            m.optional("name");
+        });
+        assert_eq!(got, "unknown key `nmae`");
+    }
+
+    #[test]
+    fn keys_only_rejected_or_checked_are_not_offered() {
+        let plain = "unknown key `nmae`";
+        assert_eq!(
+            unknown_message("{nmae: 1}", |m, e| m.reject("name", "no", e)),
+            plain
+        );
+        assert_eq!(
+            unknown_message("{nmae: 1}", |m, e| m.conflict("name", "url", e)),
+            plain
+        );
+        assert_eq!(
+            unknown_message("{nmae: 1}", |m, _| {
+                m.has("name");
+            }),
+            plain
+        );
+        assert_eq!(
+            unknown_message("{nmae: 1}", |m, _| m.ignore(&["name"])),
+            plain
+        );
+    }
+
+    #[test]
+    fn a_cut_key_stays_cut_and_gets_no_hint() {
+        let key = "k".repeat(70);
+        let got = unknown_message(&format!("{{{key}: 1}}"), |m, _| {
+            m.optional("name");
+        });
+        assert_eq!(got, format!("unknown key `{}…`", "k".repeat(64)));
     }
 
     #[test]
