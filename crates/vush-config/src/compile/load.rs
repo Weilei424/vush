@@ -73,7 +73,7 @@ fn non_zero_u32(
 }
 
 fn closed_vus(map: &mut MapReader<'_>, path: &str, errors: &mut Errors) -> Option<ClosedVusLoad> {
-    if let Some(stages_node) = map.optional("stages") {
+    if let Some(stages_node) = map.optional_unless("stages", &["vus", "duration", "iterations"]) {
         for key in ["vus", "duration", "iterations"] {
             map.conflict(key, "stages", errors);
         }
@@ -116,7 +116,7 @@ fn rate_target(node: &Node, path: &str, errors: &mut Errors) -> Option<Rate> {
 
 /// The `rate`/`duration` pair, or `start` and `stages`, of a rate model.
 fn rate_schedule(map: &mut MapReader<'_>, path: &str, errors: &mut Errors) -> Option<RateSchedule> {
-    if let Some(stages_node) = map.optional("stages") {
+    if let Some(stages_node) = map.optional_unless("stages", &["rate", "duration"]) {
         for key in ["rate", "duration"] {
             map.conflict(key, "stages", errors);
         }
