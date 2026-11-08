@@ -116,7 +116,7 @@
   - [x] Clearer messages: text forms and word lists name themselves on a wrong type, and a bad `<<` value reached through an alias points at the `<<` (plan Task 1).
   - [x] "Did you mean" hints on unknown keys and step kinds, offering only keys valid at that spot (plan Task 2).
   - [x] `vush validate <FILE>...`: problem blocks, status lines and exit codes, tested through the binary (plan Task 3).
-  - [ ] README link to `docs/config-schema.md`, the schema doc, architecture notes, local docs and all four check commands (plan Task 4).
+  - [x] README link to `docs/config-schema.md`, the schema doc, architecture notes, local docs and all four check commands (plan Task 4).
   - [ ] CI green on all four runners after the user pushes (plan Task 4).
 - [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. P1.2 already checks the `docs/config-schema.md` example against a hand-built plan, so here it becomes a CLI fixture too. Fixtures also check the documented defaults tables and file limits against the `Default` impls and constants.
   - Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches.
