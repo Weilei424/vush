@@ -59,7 +59,7 @@ fn report(file: &str, errors: &[ConfigError], err: &mut dyn Write) {
 
 /// Escapes control characters so no printed line can move the cursor or
 /// recolor the terminal.
-fn printable(text: &str) -> String {
+pub(crate) fn printable(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
         if c.is_control() {
