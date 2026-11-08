@@ -361,7 +361,7 @@ impl<'a> Reader<'a> {
         });
         let mut entries = dedupe_keys(entries, self.errors);
         if let (Some(merge), Some(position)) = (merge, position) {
-            let merged = self.merged_entries(merge.value, &entries);
+            let merged = self.merged_entries(merge.value, merge.key_location, &entries);
             let tail = entries.split_off(position.min(entries.len()));
             entries.extend(merged);
             entries.extend(tail);
@@ -379,7 +379,9 @@ impl<'a> Reader<'a> {
 
     /// The entries a `<<` value brings in, minus keys the map writes itself
     /// and keys an earlier source already brought.
-    fn merged_entries(&mut self, value: Node, own: &[Entry]) -> Vec<Entry> {
+    fn merged_entries(&mut self, value: Node, key_location: Location, own: &[Entry]) -> Vec<Entry> {
+        // Anchors are defined before they're used, so anything located before
+        // the `<<` came through an alias; report those at the `<<` itself.
         let mut sources = Vec::new();
         match value.kind {
             NodeKind::Map(entries) => sources.push(entries),
@@ -388,12 +390,12 @@ impl<'a> Reader<'a> {
                     match item.kind {
                         NodeKind::Map(entries) => sources.push(entries),
                         NodeKind::Invalid => {}
-                        _ => self.problem(item.location, MERGE_MESSAGE),
+                        _ => self.problem(item.location.max(key_location), MERGE_MESSAGE),
                     }
                 }
             }
             NodeKind::Invalid => {}
-            _ => self.problem(value.location, MERGE_MESSAGE),
+            _ => self.problem(value.location.max(key_location), MERGE_MESSAGE),
         }
         let mut seen: HashSet<String> = own.iter().map(|e| e.key.clone()).collect();
         let mut merged = Vec::new();
@@ -580,6 +582,26 @@ mod tests {
                 "x: &x {k: 1}\nm:\n  <<: [*x, 5]\n",
                 "{x:{k:1},m:{k:1}}",
                 vec![(3, 12, merge)],
+            ),
+            (
+                "x: &x 5\nm:\n  <<: *x\n  a: 1\n",
+                "{x:5,m:{a:1}}",
+                vec![(3, 3, merge)],
+            ),
+            (
+                "x: &x 5\nm:\n  <<: [*x]\n",
+                "{x:5,m:{}}",
+                vec![(3, 3, merge)],
+            ),
+            (
+                "l: &l [5]\nm:\n  <<: *l\n",
+                "{l:[5],m:{}}",
+                vec![(3, 3, merge)],
+            ),
+            (
+                "m:\n  <<: [&x 5, *x]\n",
+                "{m:{}}",
+                vec![(2, 8, merge), (2, 8, merge)],
             ),
             (
                 "x: &x {a: 1}\nm:\n  <<: *x\n  <<: *x\n",
