@@ -1,6 +1,6 @@
 # Vush test file reference (schema v1)
 
-> **Status:** this page defines the test file format. The `vush-config` library reads YAML and JSON test files into a plan and checks every rule on this page, but the `vush` command can't read one yet: `vush validate` arrives in P1.4, the fourth step of Phase 1, and it will accept every key described here, including keys that take no effect until a later phase. The "Runs" columns show which phase makes each area take effect. Phase numbers refer to the roadmap in [`planning/IMPLEMENTATION_PLAN.md`](planning/IMPLEMENTATION_PLAN.md). Until 1.0 the schema may change without notice (see [Versioning](#versioning)).
+> **Status:** this page defines the test file format. The `vush-config` library reads YAML and JSON test files into a plan and checks every rule on this page, and `vush validate` checks a file against every rule on this page without sending any traffic. It accepts every key described here, including keys that take no effect until a later phase. The "Runs" columns show which phase makes each area take effect. Phase numbers refer to the roadmap in [`planning/IMPLEMENTATION_PLAN.md`](planning/IMPLEMENTATION_PLAN.md). Until 1.0 the schema may change without notice (see [Versioning](#versioning)).
 
 A Vush test is declared in a YAML or JSON file. The two formats use the same keys and the same structure, and a given test means the same thing in either. This page shows tables and YAML snippets, and ends with a [complete example](#complete-example) in both formats.
 
@@ -406,6 +406,8 @@ A test file holds one YAML or JSON document. These rules apply however the file 
 | Text | At most 64 MiB of keys and strings, counting copies made by YAML anchors and aliases |
 
 Most errors give a key path, a line and a column. Syntax errors give a line and a column, and errors about the whole file, such as its size, give neither. Some rules are checked only after the file has no other errors, so fixing one round of errors can reveal more. An error never quotes a value from the file, so a token in a test file can't reach a log through an error message. Key names can appear, escaped and cut to 64 characters, so don't put secrets in key names.
+
+`vush validate <FILE>...` checks one or more files. It exits `0` if every file is valid and `2` otherwise.
 
 JSON files follow strict JSON: no comments and no trailing commas.
 
