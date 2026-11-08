@@ -256,7 +256,7 @@ mod tests {
             (
                 "[{metric: error_rate, lt: 1}]",
                 "thresholds[0].lt",
-                "expected a string",
+                "expected a percentage",
             ),
             (
                 "[{metric: request_rate, lt: 1%}]",
