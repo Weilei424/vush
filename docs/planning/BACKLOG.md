@@ -124,8 +124,17 @@
   - [x] CI green on all four runners after the user pushes (plan Task 4). Run 42503992380 on `8faab92`.
   - [x] Fix from Codex's review (2026-11-08): usage errors and help escape control characters in every argument and in the program name, so a newline can't forge an output line. Arguments are escaped rather than rejected, because a real file name can hold a control character.
   - [x] CI green on the Codex fix after the user pushes. Run 42505419884 on `3969d19`.
-- [ ] P1.5 Add positive/negative fixtures, equivalent-plan and CLI exit tests. P1.2 already checks the `docs/config-schema.md` example against a hand-built plan, so here it becomes a CLI fixture too. Fixtures also check the documented defaults tables and file limits against the `Default` impls and constants.
-  - Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches.
+- [ ] P1.5 Add fixtures, examples and checks of the schema doc against the code (design approved 2026-11-09). P1.5 closes Phase 1.
+  - Decided 2026-11-09:
+    - Valid examples go in `examples/`, and test-only broken files go in `crates/vush/tests/invalid/`. The schema doc's complete example is checked straight from the doc, not copied.
+    - Each broken file's exact `vush validate` output is recorded in a golden `.stderr` file and compared byte for byte. `VUSH_BLESS=1 cargo test -p vush --test fixtures` rewrites the goldens, and it never hides a failure.
+    - The schema doc owns the schema. Code that disagrees with it gets fixed. A documented default or limit changes only with the user's approval.
+  - [ ] Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches, and check one invalid file through the binary (plan Task 1).
+  - [ ] `examples/` holds smoke, flow and rate tests in YAML and JSON. Each pair builds the same plan. All six pass `vush validate`, and so does the schema doc's complete example (plan Task 2).
+  - [ ] 21 broken files with byte-for-byte golden output, folder guards and a mixed run (plan Task 3).
+  - [ ] Every default in the schema doc's tables and prose is checked against the plan the compiler builds. The File rules limits and `720h` are checked against the constants (plan Task 4).
+  - [ ] The README points to `examples/` and the bless command, and the roadmap's source tree lists `examples/` (plan Task 5).
+  - [ ] CI green on all four runners after the user pushes. Then Phase 1 is marked complete here, in the README, in `IMPLEMENTATION_PLAN.md` and in `ARCHITECTURE_NOTES.md` (plan Task 5).
 
 ## Phase 2 Execution Checklist — HTTP executor
 
