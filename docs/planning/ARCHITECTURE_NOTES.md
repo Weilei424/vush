@@ -127,7 +127,7 @@ Config reading is decided (P1.2): `vush-config` uses `saphyr-parser` events for 
 
 - **Scenario:** an immutable ordered/structured flow of steps and scenario-level load settings.
 - **Iteration:** one run of a scenario's flow by a VU; may contain 0..N physical HTTP attempts according to branches/retries.
-- **Attempt:** one try of a request step; `retry.attempts` caps them. **Hop:** one request on the wire within an attempt, the first plus one per redirect followed; `http.redirects` caps them. An attempt's timeout covers all of its hops. A rejected redirect, or a chain longer than `http.redirects`, ends the attempt without a hop.
+- **Attempt:** one try of a request step; `retry.attempts` caps them. **Hop:** one request on the wire within an attempt, the first plus one per redirect followed; `http.redirects` caps them. An attempt's timeout covers all of its hops. A rejected redirect, or a chain longer than `http.redirects` when that is 1 or more, ends the attempt without a hop. With `redirects: 0` no redirect is followed, and the `3xx` is the attempt's response.
 - **Request start:** instant a hop begins after any rate admission (Phase 5 decides whether every hop or only each attempt's first hop is admitted); distinguish from a logical request step and from request completion.
 - **Scheduled timestamp:** intended iteration/request time from the workload plan (monotonic clock).
 - **Active load window:** interval in which new work is scheduled (e.g., 60s).
