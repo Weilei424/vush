@@ -9,15 +9,18 @@
 //! longer than `http.redirects`, ends the attempt without a hop.
 //!
 //! The types here are protocol-neutral. The HTTP request and response types
-//! and the executor trait are in `http`.
+//! and the executor trait are in [`http`].
 //!
 //! A failure carries a fixed message, and the `Debug` output of resolved
 //! requests and responses never shows URLs, header values or bodies.
 
 mod failure;
+pub mod http;
+mod json;
 mod record;
 
 pub use failure::{Failure, FailureKind, FailureStage};
+pub use json::JsonValue;
 pub use record::{
     AttemptRecord, BodySizes, ConnectionId, ConnectionSetup, HopRecord, HopTiming, Outcome,
     StepRecord,
