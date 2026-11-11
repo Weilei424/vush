@@ -1,0 +1,8 @@
+# a fixed rate of zero
+schema_version: 1
+name: broken
+scenarios:
+  - name: ping
+    load: { model: iteration_rate, rate: 0/s, duration: 1m, max_vus: 1 }
+    steps:
+      - request: { method: GET, url: "http://localhost:8080/" }
