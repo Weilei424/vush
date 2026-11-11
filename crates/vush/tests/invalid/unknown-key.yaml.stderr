@@ -1,0 +1,5 @@
+error: unknown key `timout`, did you mean `timeout`?
+  --> unknown-key.yaml:5:3
+   = at http.timout
+
+unknown-key.yaml: not valid, 1 problem
