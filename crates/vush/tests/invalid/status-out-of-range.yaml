@@ -1,0 +1,8 @@
+# a status code above 599
+schema_version: 1
+name: broken
+scenarios:
+  - name: ping
+    load: { model: closed_vus, vus: 1, iterations: 1 }
+    steps:
+      - request: { method: GET, url: "http://localhost:8080/", expect: { status: 600 } }
