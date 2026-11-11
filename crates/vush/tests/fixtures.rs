@@ -3,6 +3,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -131,7 +132,8 @@ fn invalid_files_print_their_golden_output() {
         }
         if blessing() {
             fs::write(&golden, &out.stderr).expect("failed to write a golden");
-            eprintln!("wrote {file}.stderr");
+            // Writes straight to stderr so a passing bless run still lists the goldens it wrote (`eprintln!` output is captured).
+            writeln!(std::io::stderr(), "wrote {file}.stderr").expect("failed to write to stderr");
         } else if let Some(want) = want {
             problems.push(format!(
                 "{file}: stderr differs from {file}.stderr\n--- expected\n{}--- actual\n{}",
