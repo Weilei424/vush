@@ -1,14 +1,26 @@
 //! The protocol boundary, used the way an outside crate uses it.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
-use vush_core::protocol::{Failure, FailureKind, FailureStage};
+use vush_core::protocol::{
+    AttemptRecord, BodySizes, ConnectionId, ConnectionSetup, Failure, FailureKind, FailureStage,
+    HopRecord, HopTiming, Outcome, StepRecord,
+};
 
 const _: () = {
     const fn assert_shareable<T: Send + Sync + 'static>() {}
     assert_shareable::<FailureKind>();
     assert_shareable::<FailureStage>();
     assert_shareable::<Failure>();
+    assert_shareable::<HopTiming>();
+    assert_shareable::<ConnectionSetup>();
+    assert_shareable::<ConnectionId>();
+    assert_shareable::<BodySizes>();
+    assert_shareable::<Outcome>();
+    assert_shareable::<HopRecord>();
+    assert_shareable::<AttemptRecord>();
+    assert_shareable::<StepRecord>();
 };
 
 /// Each kind's place in `FailureKind::ALL`. The match has no wildcard, so a
@@ -114,4 +126,100 @@ fn a_failure_displays_as_one_line() {
     assert_eq!(failure.to_string(), "timeout in body: no data in time");
     let error: &dyn std::error::Error = &failure;
     assert!(error.source().is_none());
+}
+
+fn hop_record(outcome: Outcome) -> HopRecord {
+    HopRecord {
+        timing: HopTiming {
+            to_headers: Some(Duration::from_millis(3)),
+            total: Duration::from_millis(5),
+            setup: Some(ConnectionSetup {
+                dns: None,
+                connect: Duration::from_millis(1),
+                tls: None,
+            }),
+        },
+        connection: Some(ConnectionId(1)),
+        sizes: BodySizes::default(),
+        outcome,
+    }
+}
+
+fn answered(status: u16) -> Outcome {
+    Outcome::Response {
+        status,
+        truncated: false,
+    }
+}
+
+#[test]
+fn records_count_hops_attempts_and_steps_separately() {
+    let mut first = AttemptRecord::new(hop_record(answered(302)));
+    first.push(hop_record(answered(503)));
+    let mut second = AttemptRecord::new(hop_record(answered(302)));
+    second.push(hop_record(answered(200)));
+    let mut step = StepRecord::new(first);
+    step.push(second);
+
+    assert_eq!(step.attempts().len(), 2);
+    let hops: usize = step
+        .attempts()
+        .iter()
+        .map(|attempt| attempt.hops().len())
+        .sum();
+    assert_eq!(hops, 4);
+    let outcomes: Vec<Outcome> = step.attempts().iter().map(AttemptRecord::outcome).collect();
+    assert_eq!(outcomes, [answered(503), answered(200)]);
+}
+
+#[test]
+fn new_records_are_never_empty() {
+    let attempt = AttemptRecord::new(hop_record(answered(200)));
+    assert_eq!(attempt.hops().len(), 1);
+    assert_eq!(StepRecord::new(attempt).attempts().len(), 1);
+}
+
+#[test]
+fn an_ending_after_the_last_hop_is_the_attempts_outcome() {
+    for kind in [FailureKind::InvalidRedirect, FailureKind::TooManyRedirects] {
+        let mut attempt = AttemptRecord::new(hop_record(answered(302)));
+        attempt.end_with(kind, FailureStage::Prepare);
+        assert_eq!(attempt.hops().len(), 1);
+        assert_eq!(
+            attempt.outcome(),
+            Outcome::Failed {
+                kind,
+                stage: FailureStage::Prepare
+            }
+        );
+    }
+}
+
+#[test]
+fn without_an_ending_an_attempt_reports_its_last_hop() {
+    let refused = Outcome::Failed {
+        kind: FailureKind::Connect,
+        stage: FailureStage::Connect,
+    };
+    let mut attempt = AttemptRecord::new(hop_record(answered(302)));
+    attempt.push(hop_record(refused));
+    assert_eq!(attempt.outcome(), refused);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic]
+fn pushing_after_an_ending_is_a_bug() {
+    let mut attempt = AttemptRecord::new(hop_record(answered(302)));
+    attempt.end_with(FailureKind::TooManyRedirects, FailureStage::Prepare);
+    attempt.push(hop_record(answered(200)));
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic]
+fn ending_twice_is_a_bug() {
+    let mut attempt = AttemptRecord::new(hop_record(answered(302)));
+    attempt.end_with(FailureKind::InvalidRedirect, FailureStage::Prepare);
+    attempt.end_with(FailureKind::TooManyRedirects, FailureStage::Prepare);
 }
