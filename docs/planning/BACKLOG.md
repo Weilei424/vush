@@ -151,7 +151,7 @@
     - There are ten pinned failure labels and four stage labels. A failure carries fixed text, never library text, URLs or values. `Debug` never shows a value.
     - A rejected redirect ends the attempt with `invalid_redirect`, and a chain longer than `http.redirects` (when that is 1 or more) ends it with `too_many_redirects`. Neither one is a hop. With `redirects: 0` the `3xx` is still the response.
     - A throwaway spike fitted the draft trait to reqwest, and to hyper with hyper-util and its own connector. It recommends hyper for P2.2.
-  - [ ] Failure kinds and stages with pinned labels (plan Task 1).
+  - [x] Failure kinds and stages with pinned labels (plan Task 1).
   - [ ] Hop timing, sizes and outcomes, and hop, attempt and step records (plan Task 2).
   - [ ] `JsonValue` and `HttpRequest` with redacted `Debug`, and an owner for every plan field (plan Task 3).
   - [ ] `HttpResponse` and `HttpHop` with redacted `Debug` and `record()` (plan Task 4).
