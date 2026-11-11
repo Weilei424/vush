@@ -15,5 +15,10 @@
 //! requests and responses never shows URLs, header values or bodies.
 
 mod failure;
+mod record;
 
 pub use failure::{Failure, FailureKind, FailureStage};
+pub use record::{
+    AttemptRecord, BodySizes, ConnectionId, ConnectionSetup, HopRecord, HopTiming, Outcome,
+    StepRecord,
+};
