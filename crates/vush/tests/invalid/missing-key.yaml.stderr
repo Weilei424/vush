@@ -1,0 +1,5 @@
+error: missing required key `steps`
+  --> missing-key.yaml:5:5
+   = at scenarios[0]
+
+missing-key.yaml: not valid, 1 problem
