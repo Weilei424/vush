@@ -1,0 +1,4 @@
+error: unexpected character where a value should start
+  --> json-syntax.json:10:7
+
+json-syntax.json: not valid, 1 problem
