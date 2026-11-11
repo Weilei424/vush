@@ -7,7 +7,9 @@ use vush_core::plan::{
     Expect, HttpMethod, HttpSettings, JsonNumber, RequestStep, RequestTarget, ResourceLimits,
     TlsSettings,
 };
-use vush_core::protocol::http::{HttpBody, HttpRequest, RequestUrl};
+use vush_core::protocol::http::{
+    HttpBody, HttpHop, HttpRequest, HttpResponse, RequestUrl, WireVersion,
+};
 use vush_core::protocol::{
     AttemptRecord, BodySizes, ConnectionId, ConnectionSetup, Failure, FailureKind, FailureStage,
     HopRecord, HopTiming, JsonValue, Outcome, StepRecord,
@@ -30,6 +32,9 @@ const _: () = {
     assert_shareable::<HttpRequest>();
     assert_shareable::<RequestUrl>();
     assert_shareable::<HttpBody>();
+    assert_shareable::<HttpResponse>();
+    assert_shareable::<WireVersion>();
+    assert_shareable::<HttpHop>();
 };
 
 /// Each kind's place in `FailureKind::ALL`. The match has no wildcard, so a
@@ -414,4 +419,139 @@ fn every_plan_field_has_an_owner() {
         max_cookies: _,       // session (P2.4)
         hook_timeout: _,      // runner (Phase 3)
     } = ResourceLimits::default();
+}
+
+fn http_response(status: u16) -> HttpResponse {
+    HttpResponse {
+        status,
+        version: WireVersion::Http11,
+        headers: vec![("content-type".to_string(), b"text/plain".to_vec())],
+        body: b"ok".to_vec(),
+        truncated: false,
+    }
+}
+
+fn hop_ok(status: u16) -> HttpHop {
+    HttpHop {
+        timing: HopTiming {
+            to_headers: Some(Duration::from_millis(4)),
+            total: Duration::from_millis(9),
+            setup: None,
+        },
+        connection: Some(ConnectionId(7)),
+        sizes: BodySizes {
+            sent: 0,
+            received: 2,
+        },
+        outcome: Ok(http_response(status)),
+    }
+}
+
+fn hop_failed(kind: FailureKind, stage: FailureStage, message: &'static str) -> HttpHop {
+    HttpHop {
+        timing: HopTiming {
+            to_headers: None,
+            total: Duration::from_millis(9),
+            setup: None,
+        },
+        connection: None,
+        sizes: BodySizes::default(),
+        outcome: Err(Failure {
+            kind,
+            stage,
+            message,
+        }),
+    }
+}
+
+#[test]
+fn a_5xx_is_a_response_and_a_refused_connection_is_a_failure() {
+    let refused = hop_failed(
+        FailureKind::Connect,
+        FailureStage::Connect,
+        "connection refused",
+    );
+    let cases = [
+        (hop_ok(200), answered(200)),
+        (hop_ok(503), answered(503)),
+        (
+            refused,
+            Outcome::Failed {
+                kind: FailureKind::Connect,
+                stage: FailureStage::Connect,
+            },
+        ),
+    ];
+    for (hop, outcome) in cases {
+        let want = HopRecord {
+            timing: hop.timing,
+            connection: hop.connection,
+            sizes: hop.sizes,
+            outcome,
+        };
+        assert_eq!(hop.record(), want);
+    }
+}
+
+#[test]
+fn a_truncated_body_is_still_a_response() {
+    let mut hop = hop_ok(200);
+    if let Ok(response) = &mut hop.outcome {
+        response.truncated = true;
+    }
+    assert_eq!(
+        hop.record().outcome,
+        Outcome::Response {
+            status: 200,
+            truncated: true
+        }
+    );
+}
+
+#[test]
+fn response_and_hop_debug_hide_every_value() {
+    let body = format!("{{\"token\": \"{SECRET}\", \"n\": 271828}}").into_bytes();
+    let length = body.len().to_string();
+    let response = HttpResponse {
+        status: 207,
+        version: WireVersion::Http2,
+        headers: vec![(
+            "set-cookie".to_string(),
+            format!("sid={SECRET}").into_bytes(),
+        )],
+        body,
+        truncated: false,
+    };
+    let debug = format!("{response:?}");
+    assert_hidden(&debug);
+    for shown in ["207", "set-cookie", length.as_str()] {
+        assert!(debug.contains(shown), "{debug}");
+    }
+    let hop = HttpHop {
+        outcome: Ok(response),
+        ..hop_ok(207)
+    };
+    assert_hidden(&format!("{hop:?}"));
+    let failed = hop_failed(
+        FailureKind::Tls,
+        FailureStage::Connect,
+        "certificate not trusted",
+    );
+    assert_hidden(&format!("{failed:?}"));
+    if let Err(failure) = &failed.outcome {
+        assert_hidden(&failure.to_string());
+    }
+}
+
+#[test]
+fn response_debug_handles_raw_header_bytes_and_empty_bodies() {
+    let response = HttpResponse {
+        status: 204,
+        version: WireVersion::Http10,
+        headers: vec![("x-bin".to_string(), vec![0xff, 0xfe])],
+        body: Vec::new(),
+        truncated: false,
+    };
+    let debug = format!("{response:?}");
+    assert!(debug.contains("x-bin") && debug.contains("204"), "{debug}");
 }
