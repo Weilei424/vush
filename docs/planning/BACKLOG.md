@@ -156,7 +156,7 @@
   - [x] `JsonValue` and `HttpRequest` with redacted `Debug`, and an owner for every plan field (plan Task 3).
   - [x] `HttpResponse` and `HttpHop` with redacted `Debug` and `record()` (plan Task 4).
   - [x] The `HttpExecutor` trait and its contract, a fake executor driven through generics, and `Send` futures (plan Task 5).
-  - [ ] Architecture notes, local docs and all four check commands, with `vush-core` still free of dependencies (plan Task 6).
+  - [x] Architecture notes, local docs and all four check commands, with `vush-core` still free of dependencies (plan Task 6).
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies.
   - Check header names and URL schemes before any traffic, and decide how `path` joins `base_url`. P1.3 only requires a `base_url` to exist.
