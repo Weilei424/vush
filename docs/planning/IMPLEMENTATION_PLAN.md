@@ -16,7 +16,7 @@ Deliver **Vush**, an efficient Rust HTTP smoke/load-testing CLI (`vush`) for Lin
 - **Measured performance.** Track scheduler lag, generator capacity and memory. Do not conflate server overload with load-generator saturation.
 - **Planning-only handoff.** `plan on phase N` creates/updates phase-specific specs and plans and stops before code, exactly as the provided skill requires.
 
-### Source tree (crate layout decided in Phase 0 and P1.1; other paths still proposed)
+### Source tree (crate layout decided in Phase 0 and P1.1, examples/ in P1.5; other paths still proposed)
 
 ```text
 Cargo.toml                 # virtual workspace manifest
@@ -27,7 +27,7 @@ crates/vush-config/src/... # YAML/JSON reading, defaults, file:line errors, buil
 crates/vush-core/src/...   # workload plan, scheduler, scenario runner
 crates/vush-http/src/...   # HTTP ProtocolExecutor
 crates/*/tests/...         # integration tests live with their crate (e.g. crates/vush/tests/cli.rs)
-examples/{smoke,flow,rate}.*
+examples/{smoke,flow,rate}.{yaml,json}  # sample tests in both formats (from P1.5)
 benches/ or benchmarks/...
 docs/config-schema.md      # schema v1 reference: the YAML/JSON test file format
 docs/planning/{BACKLOG,IMPLEMENTATION_PLAN,ARCHITECTURE_NOTES}.md
