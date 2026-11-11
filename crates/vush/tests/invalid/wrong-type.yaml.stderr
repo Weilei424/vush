@@ -1,0 +1,5 @@
+error: expected an integer from 0 to 4294967295, found a string
+  --> wrong-type.yaml:5:14
+   = at http.redirects
+
+wrong-type.yaml: not valid, 1 problem
