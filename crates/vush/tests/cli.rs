@@ -219,6 +219,23 @@ fn validate_rejects_an_oversized_file() {
 }
 
 #[test]
+fn validate_locates_invalid_utf8_after_a_bom_and_crlf() {
+    let d = dir("validate_locates_invalid_utf8_after_a_bom_and_crlf");
+    write(
+        &d,
+        "bad.yaml",
+        b"\xef\xbb\xbfschema_version: 1\r\nname: x\r\n\xff",
+    );
+    let out = validate(&d, &["bad.yaml"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(
+        stderr(&out),
+        "error: the file isn't valid UTF-8\n  --> bad.yaml:3:1\n\nbad.yaml: not valid, 1 problem\n"
+    );
+}
+
+#[test]
 fn validate_survives_a_closed_stdout() {
     let d = dir("validate_survives_a_closed_stdout");
     write(&d, "ok.yaml", VALID_YAML);
