@@ -15,10 +15,9 @@ pub struct HopTiming {
     pub to_headers: Option<Duration>,
     /// From the start of `send` until the body was read or the hop failed.
     pub total: Duration,
-    /// Present only when this hop opened a new connection and the executor
-    /// measured it. With a shared pool, a new connection's setup is reported
-    /// on the first hop that used it, which may not be the hop that triggered
-    /// it.
+    /// Present only on the first hop that used a new connection, and only if
+    /// the executor measured the setup. With a shared pool, that hop may not
+    /// be the one that triggered the connection.
     pub setup: Option<ConnectionSetup>,
 }
 
@@ -35,6 +34,10 @@ pub struct ConnectionSetup {
 }
 
 /// Tells connections apart within a run. The executor assigns it.
+///
+/// IDs are unique within one run, across all of the run's executors.
+/// `vush-http` keeps them unique, for example with one counter that its
+/// executors share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionId(pub u64);
 
@@ -68,7 +71,11 @@ pub enum Outcome {
     },
 }
 
-/// One request sent and what came back.
+/// One hop: one `send` call and how it ended.
+///
+/// A hop sends one request on the wire, unless it failed in `prepare`: then
+/// it sent nothing. Its stage and `sizes.sent == 0` tell it apart, so Phases 5
+/// and 6 can leave such hops out of wire counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HopRecord {
     /// How long the hop took.
