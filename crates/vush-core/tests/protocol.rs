@@ -1,6 +1,9 @@
 //! The protocol boundary, used the way an outside crate uses it.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::pin::pin;
+use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use vush_core::plan::{
@@ -8,7 +11,7 @@ use vush_core::plan::{
     TlsSettings,
 };
 use vush_core::protocol::http::{
-    HttpBody, HttpHop, HttpRequest, HttpResponse, RequestUrl, WireVersion,
+    HttpBody, HttpExecutor, HttpHop, HttpRequest, HttpResponse, RequestUrl, WireVersion,
 };
 use vush_core::protocol::{
     AttemptRecord, BodySizes, ConnectionId, ConnectionSetup, Failure, FailureKind, FailureStage,
@@ -560,4 +563,230 @@ fn response_debug_handles_raw_header_bytes_and_empty_bodies() {
     let debug = format!("{response:?}");
     assert!(debug.contains("x-bin") && debug.contains("204"), "{debug}");
     assert!(!debug.contains("255, 254"), "{debug}");
+}
+
+/// Polls a future to completion on this thread. The fake's futures finish
+/// on their first poll, so a waker that does nothing is enough.
+fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        std::thread::yield_now();
+    }
+}
+
+/// What reached a session: one count per `send`.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct FakeSession {
+    sends: u32,
+}
+
+/// Answers each `send` with the next scripted hop. `send` is an `async fn`,
+/// so its work happens when the future is polled, and a future that is
+/// never polled changes nothing. An `async fn` in the impl satisfies the
+/// trait's `impl Future + Send` signature, and clippy's `manual_async_fn`
+/// rejects the `fn … { async move { … } }` form.
+struct ScriptedExecutor {
+    script: Mutex<VecDeque<HttpHop>>,
+}
+
+impl ScriptedExecutor {
+    fn new(hops: Vec<HttpHop>) -> Self {
+        Self {
+            script: Mutex::new(hops.into()),
+        }
+    }
+}
+
+impl HttpExecutor for ScriptedExecutor {
+    type Session = FakeSession;
+
+    fn new_session(&self) -> FakeSession {
+        FakeSession::default()
+    }
+
+    async fn send(
+        &self,
+        session: &mut FakeSession,
+        _request: &HttpRequest,
+        _timeout: Duration,
+    ) -> HttpHop {
+        session.sends += 1;
+        let mut script = self.script.lock().expect("the script lock is not poisoned");
+        script.pop_front().expect("a scripted hop for every send")
+    }
+
+    /// A 3xx whose `location` is `/next` goes to `http://fake.test/next`. A
+    /// 3xx with any other `location` can't be followed. Anything else isn't
+    /// a redirect.
+    fn follow(
+        &self,
+        request: &HttpRequest,
+        response: &HttpResponse,
+    ) -> Result<Option<HttpRequest>, Failure> {
+        if !(300..400).contains(&response.status) {
+            return Ok(None);
+        }
+        let location = response.headers.iter().find(|(name, _)| name == "location");
+        match location {
+            None => Ok(None),
+            Some((_, value)) if value.as_slice() == b"/next" => Ok(Some(HttpRequest {
+                method: get(),
+                url: RequestUrl::Absolute("http://fake.test/next".to_string()),
+                query: Vec::new(),
+                headers: request.headers.clone(),
+                body: None,
+            })),
+            Some(_) => Err(Failure {
+                kind: FailureKind::InvalidRedirect,
+                stage: FailureStage::Prepare,
+                message: "location is not a URL",
+            }),
+        }
+    }
+}
+
+/// Sends one request through any executor, using only the trait.
+fn send_once<E: HttpExecutor>(
+    executor: &E,
+    session: &mut E::Session,
+    request: &HttpRequest,
+) -> HttpHop {
+    block_on(executor.send(session, request, Duration::from_secs(1)))
+}
+
+fn plain_request() -> HttpRequest {
+    HttpRequest {
+        method: get(),
+        url: RequestUrl::Absolute("http://fake.test/".to_string()),
+        query: Vec::new(),
+        headers: Vec::new(),
+        body: None,
+    }
+}
+
+fn redirect_to(location: &[u8]) -> HttpResponse {
+    HttpResponse {
+        headers: vec![("location".to_string(), location.to_vec())],
+        ..http_response(302)
+    }
+}
+
+#[test]
+fn three_outcomes_come_back_through_the_trait() {
+    let executor = ScriptedExecutor::new(vec![
+        hop_ok(200),
+        hop_ok(503),
+        hop_failed(
+            FailureKind::Connect,
+            FailureStage::Connect,
+            "connection refused",
+        ),
+    ]);
+    let mut session = executor.new_session();
+    let hops: Vec<HttpHop> = (0..3)
+        .map(|_| send_once(&executor, &mut session, &plain_request()))
+        .collect();
+    assert!(matches!(&hops[1].outcome, Ok(response) if response.status == 503));
+    let outcomes: Vec<Outcome> = hops.iter().map(|hop| hop.record().outcome).collect();
+    assert_eq!(
+        outcomes,
+        [
+            answered(200),
+            answered(503),
+            Outcome::Failed {
+                kind: FailureKind::Connect,
+                stage: FailureStage::Connect,
+            },
+        ]
+    );
+    assert_eq!(session, FakeSession { sends: 3 });
+}
+
+#[test]
+fn follow_gives_the_next_request_nothing_or_a_failure() {
+    let executor = ScriptedExecutor::new(Vec::new());
+    let request = plain_request();
+    let next = executor
+        .follow(&request, &redirect_to(b"/next"))
+        .expect("the redirect can be followed")
+        .expect("a 302 is a redirect");
+    assert_eq!(
+        next.url,
+        RequestUrl::Absolute("http://fake.test/next".to_string())
+    );
+    assert!(next.query.is_empty());
+    assert_eq!(executor.follow(&request, &http_response(200)), Ok(None));
+    let failure = executor
+        .follow(&request, &redirect_to(b"\xff"))
+        .expect_err("a bad location can't be followed");
+    assert_eq!(
+        (failure.kind, failure.stage),
+        (FailureKind::InvalidRedirect, FailureStage::Prepare)
+    );
+}
+
+#[test]
+fn a_rejected_redirect_ends_the_attempt_after_one_hop() {
+    let executor = ScriptedExecutor::new(vec![HttpHop {
+        outcome: Ok(redirect_to(b"\xff")),
+        ..hop_ok(302)
+    }]);
+    let mut session = executor.new_session();
+    let request = plain_request();
+    let hop = send_once(&executor, &mut session, &request);
+    let mut attempt = AttemptRecord::new(hop.record());
+    let response = hop.outcome.as_ref().expect("the hop has a response");
+    let failure = executor
+        .follow(&request, response)
+        .expect_err("the redirect is rejected");
+    attempt.end_with(failure.kind, failure.stage);
+    assert_eq!(attempt.hops().len(), 1);
+    assert_eq!(
+        attempt.outcome(),
+        Outcome::Failed {
+            kind: FailureKind::InvalidRedirect,
+            stage: FailureStage::Prepare,
+        }
+    );
+}
+
+/// Copies a session the way core will for `reset_each_iteration`, relying
+/// only on the trait's `Clone` bound.
+fn snapshot<E: HttpExecutor>(session: &E::Session) -> E::Session {
+    session.clone()
+}
+
+#[test]
+fn a_session_copy_keeps_its_own_state() {
+    let executor = ScriptedExecutor::new(vec![hop_ok(200)]);
+    let mut session = executor.new_session();
+    let copy = snapshot::<ScriptedExecutor>(&session);
+    send_once(&executor, &mut session, &plain_request());
+    assert_eq!(copy, FakeSession { sends: 0 });
+    assert_eq!(session, FakeSession { sends: 1 });
+}
+
+fn assert_send<T: Send>(_: &T) {}
+
+/// Compiles only if every executor's `send` future is `Send`.
+fn send_future_is_send<E: HttpExecutor>(
+    executor: &E,
+    session: &mut E::Session,
+    request: &HttpRequest,
+) {
+    let future = executor.send(session, request, Duration::ZERO);
+    assert_send(&future);
+}
+
+#[test]
+fn send_futures_are_send() {
+    let executor = ScriptedExecutor::new(Vec::new());
+    let mut session = executor.new_session();
+    send_future_is_send(&executor, &mut session, &plain_request());
+    // The future was dropped without being polled, so nothing was sent.
+    assert_eq!(session, FakeSession { sends: 0 });
 }
