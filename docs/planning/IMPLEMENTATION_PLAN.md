@@ -1,6 +1,6 @@
 # Implementation Plan — Vush
 
-> **Status:** Baseline roadmap (2026-11-01). Phase 0 is complete (designed, approved, implemented; CI green 2026-11-01); Phase 1 is in progress; Phases 2–8 are not yet planned in detail and remain baseline scope. Planning is intentionally broken into explicit phases so the coding agent can invoke `plan on phase N`, read repo context, design that phase, create a phase-specific spec/plan, obtain approval, and then request separate implementation confirmation.
+> **Status:** Baseline roadmap (2026-11-01). Phase 0 is complete (designed, approved, implemented; CI green 2026-11-01); Phase 1 is complete (designed, approved, implemented; CI green 2026-11-11); Phases 2–8 are not yet planned in detail and remain baseline scope. Planning is intentionally broken into explicit phases so the coding agent can invoke `plan on phase N`, read repo context, design that phase, create a phase-specific spec/plan, obtain approval, and then request separate implementation confirmation.
 >
 > Architecture source: `ARCHITECTURE_NOTES.md`. Execution checklist: `BACKLOG.md`. Suggested canonical location: `docs/planning/`. If a real repo already has these docs at root or another discovered canonical location, use the existing paths; do not create duplicates.
 
