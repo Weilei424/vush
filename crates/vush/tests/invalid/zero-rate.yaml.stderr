@@ -1,0 +1,5 @@
+error: this rate must be above zero
+  --> zero-rate.yaml:6:42
+   = at scenarios[0].load.rate
+
+zero-rate.yaml: not valid, 1 problem
