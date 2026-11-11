@@ -1,0 +1,5 @@
+error: a `path` needs a `base_url` at the top of the file; use `url` for a full address
+  --> path-without-base-url.yaml:8:39
+   = at scenarios[0].steps[0].request.path
+
+path-without-base-url.yaml: not valid, 1 problem
