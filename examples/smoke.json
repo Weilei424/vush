@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "name": "smoke",
+  "base_url": "http://localhost:8080",
+  "scenarios": [
+    {
+      "name": "health",
+      "load": {
+        "model": "closed_vus",
+        "vus": 1,
+        "iterations": 1
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "path": "/health",
+            "expect": {
+              "status": 200
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
