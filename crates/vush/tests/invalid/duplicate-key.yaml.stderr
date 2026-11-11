@@ -1,0 +1,4 @@
+error: duplicate key `name`, first used on line 3
+  --> duplicate-key.yaml:4:1
+
+duplicate-key.yaml: not valid, 1 problem
