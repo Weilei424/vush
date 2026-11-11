@@ -129,7 +129,7 @@
     - Valid examples go in `examples/`, and test-only broken files go in `crates/vush/tests/invalid/`. The schema doc's complete example is checked straight from the doc, not copied.
     - Each broken file's exact `vush validate` output is recorded in a golden `.stderr` file and compared byte for byte. `VUSH_BLESS=1 cargo test -p vush --test fixtures` rewrites the goldens, and it never hides a failure.
     - The schema doc owns the schema. Code that disagrees with it gets fixed. A documented default or limit changes only with the user's approval.
-  - [ ] Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches, and check one invalid file through the binary (plan Task 1).
+  - [x] Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches, and check one invalid file through the binary (plan Task 1).
   - [ ] `examples/` holds smoke, flow and rate tests in YAML and JSON. Each pair builds the same plan. All six pass `vush validate`, and so does the schema doc's complete example (plan Task 2).
   - [ ] 21 broken files with byte-for-byte golden output, folder guards and a mixed run (plan Task 3).
   - [ ] Every default in the schema doc's tables and prose is checked against the plan the compiler builds. The File rules limits and `720h` are checked against the constants (plan Task 4).
