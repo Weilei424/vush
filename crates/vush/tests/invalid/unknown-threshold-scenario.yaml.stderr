@@ -1,0 +1,5 @@
+error: no scenario has this name
+  --> unknown-threshold-scenario.yaml:11:15
+   = at thresholds[0].scenario
+
+unknown-threshold-scenario.yaml: not valid, 1 problem
