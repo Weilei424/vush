@@ -6,7 +6,9 @@
 //!
 //! An executor's `send` makes exactly one hop. Core's driver owns both loops,
 //! so it sees every hop before it starts. A rejected redirect, or a chain
-//! longer than `http.redirects`, ends the attempt without a hop.
+//! longer than `http.redirects` when that is 1 or more, ends the attempt
+//! without a hop. With `redirects: 0` no redirect is followed, and a `3xx` is
+//! the attempt's response.
 //!
 //! The types here are protocol-neutral. The HTTP request and response types
 //! and the executor trait are in [`http`].
