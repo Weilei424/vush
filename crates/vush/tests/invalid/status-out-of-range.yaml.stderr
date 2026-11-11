@@ -1,0 +1,5 @@
+error: status codes must be from 100 to 599
+  --> status-out-of-range.yaml:8:82
+   = at scenarios[0].steps[0].request.expect.status
+
+status-out-of-range.yaml: not valid, 1 problem
