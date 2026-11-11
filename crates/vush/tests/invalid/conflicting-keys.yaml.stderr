@@ -1,0 +1,5 @@
+error: `path` and `url` can't be used together
+  --> conflicting-keys.yaml:9:42
+   = at scenarios[0].steps[0].request.url
+
+conflicting-keys.yaml: not valid, 1 problem
