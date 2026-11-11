@@ -244,10 +244,15 @@ fn get() -> HttpMethod {
     "GET".parse().expect("GET is a method")
 }
 
-/// No planted secret or planted number shows in `debug`.
+/// No planted secret or planted number shows in `debug`, as text or as the
+/// decimal byte list that a derived `Debug` prints for a `Vec<u8>`.
 fn assert_hidden(debug: &str) {
-    assert!(!debug.contains(SECRET), "{debug}");
-    assert!(!debug.contains("271828"), "{debug}");
+    for planted in [SECRET, "271828"] {
+        assert!(!debug.contains(planted), "{debug}");
+        let bytes = format!("{:?}", planted.as_bytes());
+        let list = bytes.trim_matches(['[', ']']);
+        assert!(!debug.contains(list), "{debug}");
+    }
 }
 
 fn secret_json() -> JsonValue {
@@ -554,4 +559,5 @@ fn response_debug_handles_raw_header_bytes_and_empty_bodies() {
     };
     let debug = format!("{response:?}");
     assert!(debug.contains("x-bin") && debug.contains("204"), "{debug}");
+    assert!(!debug.contains("255, 254"), "{debug}");
 }
