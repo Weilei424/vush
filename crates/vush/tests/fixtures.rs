@@ -1,5 +1,7 @@
-//! `vush validate` on the committed examples and on the schema doc's complete
-//! example.
+//! Runs `vush validate` on the committed examples and on the schema doc's complete
+//! example. It also compares each broken file in `tests/invalid/` with the
+//! `<file>.stderr` golden beside it. `VUSH_BLESS=1 cargo test -p vush --test fixtures`
+//! re-records the goldens.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -132,7 +134,8 @@ fn invalid_files_print_their_golden_output() {
         }
         if blessing() {
             fs::write(&golden, &out.stderr).expect("failed to write a golden");
-            // Writes straight to stderr so a passing bless run still lists the goldens it wrote (`eprintln!` output is captured).
+            // Writes straight to stderr so a passing bless run still lists the goldens it wrote
+            // (`eprintln!` output is captured).
             writeln!(std::io::stderr(), "wrote {file}.stderr").expect("failed to write to stderr");
         } else if let Some(want) = want {
             problems.push(format!(
