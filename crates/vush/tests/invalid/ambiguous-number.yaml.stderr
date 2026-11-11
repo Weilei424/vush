@@ -1,0 +1,4 @@
+error: unquoted value looks like a number, but YAML versions read it differently. Quote it, or write it as a plain decimal
+  --> ambiguous-number.yaml:6:52
+
+ambiguous-number.yaml: not valid, 1 problem
