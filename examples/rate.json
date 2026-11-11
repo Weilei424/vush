@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "name": "rate",
+  "base_url": "http://localhost:8080",
+  "thresholds": [
+    {
+      "metric": "http_request_duration",
+      "stat": "p95",
+      "lt": "500ms"
+    },
+    {
+      "metric": "dropped_work_ratio",
+      "lt": "1%"
+    },
+    {
+      "metric": "request_rate",
+      "scenario": "poll",
+      "gte": "8/s"
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "checkout",
+      "load": {
+        "model": "iteration_rate",
+        "max_vus": 50,
+        "start": "0/s",
+        "stages": [
+          { "to": "20/s", "over": "1m" },
+          { "to": "20/s", "over": "3m" },
+          { "to": "0/s", "over": "30s" }
+        ],
+        "queue": {
+          "capacity": 200,
+          "max_wait": "2s"
+        }
+      },
+      "steps": [
+        {
+          "request": {
+            "name": "add_to_cart",
+            "method": "POST",
+            "path": "/cart",
+            "json": {
+              "sku": "ABC-1"
+            },
+            "expect": {
+              "status": 201
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "poll",
+      "load": {
+        "model": "request_rate",
+        "vus": 10,
+        "rate": "10/s",
+        "duration": "4m"
+      },
+      "steps": [
+        {
+          "request": {
+            "name": "status",
+            "method": "GET",
+            "path": "/status"
+          }
+        }
+      ]
+    }
+  ]
+}
