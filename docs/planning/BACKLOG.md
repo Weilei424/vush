@@ -132,7 +132,7 @@
   - [x] Pin the UTF-8 error locator's CR, CRLF, byte-order-mark and multibyte branches, and check one invalid file through the binary (plan Task 1).
   - [x] `examples/` holds smoke, flow and rate tests in YAML and JSON. Each pair builds the same plan. All six pass `vush validate`, and so does the schema doc's complete example (plan Task 2).
   - [x] 21 broken files with byte-for-byte golden output, folder guards and a mixed run (plan Task 3).
-  - [ ] Every default in the schema doc's tables and prose is checked against the plan the compiler builds. The File rules limits and `720h` are checked against the constants (plan Task 4).
+  - [x] Every default in the schema doc's tables and prose is checked against the plan the compiler builds. The File rules limits and `720h` are checked against the constants (plan Task 4).
   - [ ] The README points to `examples/` and the bless command, and the roadmap's source tree lists `examples/` (plan Task 5).
   - [ ] CI green on all four runners after the user pushes. Then Phase 1 is marked complete here, in the README, in `IMPLEMENTATION_PLAN.md` and in `ARCHITECTURE_NOTES.md` (plan Task 5).
 
