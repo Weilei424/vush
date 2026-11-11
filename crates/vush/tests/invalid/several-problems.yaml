@@ -1,0 +1,16 @@
+# three plan problems on different lines
+schema_version: 1
+name: broken
+scenarios:
+  - name: ping
+    load: { model: iteration_rate, rate: 0/s, duration: 1m, max_vus: 1 }
+    steps:
+      - request: { method: GET, url: "http://localhost:8080/", retry: { attempts: 1 } }
+      - request: { method: GET, url: "http://localhost:8080/", expect: { status: 600 } }
+      - request:
+          method: GET
+          url: "http://localhost:8080/${tokne}"
+thresholds:
+  - metric: error_rate
+    scenario: pong
+    lt: 1%
