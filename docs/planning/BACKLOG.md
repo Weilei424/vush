@@ -163,12 +163,13 @@
   - From P2.1:
     - Implement `send` and `follow` in `vush-http`. This adds the `vush-http → vush-core` dependency.
     - The spike recommends hyper and hyper-util with Vush's own connector. That connector must reject unsupported schemes itself.
-    - Core's hop loop counts redirects against `http.redirects` and gives each hop the attempt's remaining time. It ends a longer chain with `too_many_redirects`.
+    - Core's hop loop counts redirects against `http.redirects` and gives each hop the attempt's remaining time. It ends a longer chain with `too_many_redirects` when `redirects` is 1 or more. With `redirects: 0` the `3xx` is the response.
     - Define how the query, form and JSON bodies are encoded, and the default `Content-Type`.
     - Document the redirect limit and the attempt timeout in `docs/config-schema.md`.
 - [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on.
   - From P2.1:
     - Build executors per settings profile, and keep the `pool: vu` pool in the session.
+    - Decide whether to enforce that a session is only used with the executor that made it, for example with an executor ID in the session that fails fast. Under `pool: vu` a session holds connections built with its executor's settings.
     - Core's attempt loop decides which failure kinds and statuses are retried, and where the backoff sleeps. Core needs a timer for that.
     - Decide whether `retry.attempts` and `redirects` need upper bounds, because records grow with them.
     - Choose the rustls crypto provider.
