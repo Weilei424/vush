@@ -1,6 +1,6 @@
 # Architecture Notes — Vush
 
-> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI), the P1.1 plan types in `vush-core`, the P1.2 `vush-config` crate (which reads YAML and JSON test files into the plan), the P1.3 checks in `WorkloadPlan::new`, which reject everything the schema forbids, and the schema reference (`docs/config-schema.md`) exist so far. `vush validate` (P1.4) reads and checks test files, and `examples/` (P1.5) holds sample tests in both formats. Phase 1 is complete. No command sends traffic yet. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
+> **Status:** Proposed MVP architecture (v0.1, 2026-11-01), updated after Phase 0. This is a baseline for phase-by-phase agent planning, **not** an as-built description of the engine: only the Phase 0 foundation (workspace, crate layout, toolchain pin, CI), the P1.1 plan types in `vush-core`, the P1.2 `vush-config` crate (which reads YAML and JSON test files into the plan), the P1.3 checks in `WorkloadPlan::new`, which reject everything the schema forbids, and the schema reference (`docs/config-schema.md`) exist so far. `vush validate` (P1.4) reads and checks test files, and `examples/` (P1.5) holds sample tests in both formats. Phase 1 is complete. P2.1 adds the protocol boundary in `vush_core::protocol`: HTTP request and response types, pinned failure kinds, hop, attempt and step records, and the `HttpExecutor` trait that `vush-http` will implement. No command sends traffic yet. Names, configuration examples, and implementation libraries are illustrative unless explicitly marked as requirements or decided.
 >
 > **Project name:** **Vush** (confirmed 2026-11-01). **CLI binary:** `vush` (e.g., `vush run test.yaml`). Repository: `https://github.com/Weilei424/vush`. Cargo packages: `vush`, `vush-core`, `vush-http` (decided in Phase 0), plus `vush-config` (decided in P1.1, created in P1.2). Final command flags remain to be determined during the relevant phase. This document is canonical for architecture decisions; `IMPLEMENTATION_PLAN.md` owns phase scope and `BACKLOG.md` owns execution status.
 
@@ -59,7 +59,7 @@ Global Setup -> Scenario Setup -> VU Setup              v
                                   |   |       |        |
                             VU state  flow logic  assertions  extraction
                                           |
-                              ProtocolExecutor trait/interface
+                              Protocol boundary: HttpExecutor (one hop per call)
                                           |
                                  HTTP adapter/client pools
                                           |
@@ -82,9 +82,9 @@ Global Setup -> Scenario Setup -> VU Setup              v
 | Workload Coordinator | Global lifecycle, scenario activation, stop/drain sequencing, fairness and capacity budgets | HTTP protocol details |
 | Scheduler / Rate Controller | Closed/open load models, intended timestamps, ramp stages, per-scenario/global request-start budgets, admission/expiry accounting | Parsing and response validation |
 | VU Manager | VU identity, persistent/resettable state, reuse, resource limits, per-VU lifecycle | Global queue policy |
-| ScenarioRunner | Ordered steps, bounded if/loop semantics, interpolation, fail-fast iteration behavior, think time, hooks | Owning HTTP socket pools or aggregate reporting |
-| ProtocolExecutor interface | Protocol-neutral execute request/operation and return typed observations | Scheduling VUs |
-| HTTP Adapter | HTTP 1.1/2, TLS, redirects, pooling, timeout/retry, streaming/response bounds | Scheduling or global counters |
+| ScenarioRunner | Ordered steps, bounded if/loop semantics, interpolation, fail-fast iteration behavior, think time, hooks; its request driver owns the attempt loop (retries, backoff) and the hop loop (redirect limit, attempt deadline) | Owning HTTP socket pools, per-user transport state or aggregate reporting |
+| Protocol boundary (`vush_core::protocol`) | One executor trait per protocol (`HttpExecutor` for HTTP): one wire request per `send`, a pure `follow` for redirects, a per-user session type; protocol-neutral failure kinds, hop timing and hop/attempt/step records | Scheduling VUs, following redirects, retrying, library error text |
+| HTTP Adapter (`vush-http`) | HTTP 1.1/2, TLS, pooling, per-hop timeouts, the redirect rules (`follow`), the per-user session (cookies, `pool: vu`), streaming/response bounds | Scheduling, retry or redirect loops, per-user state outside the session, global counters |
 | Metrics Collector | Low-contention counters/histograms/gauges; merge, snapshots, labeling | Full response retention by default |
 | DropEventSink | Best-effort bounded sampled records of rejected/expired work | Truth source for drop counts; replay |
 | Reporter | Human summary, versioned JSON, thresholds and CI exit-code mapping | Modifying ongoing load |
@@ -102,8 +102,8 @@ crates/
   vush/            # binary: CLI, reports and command handling
     tests/         # CLI integration tests
   vush-config/     # YAML/JSON reading, defaults, file:line errors, builds the plan (from P1.2)
-  vush-core/       # typed workload plan, scenario interpreter, VU state, coordinator
-  vush-http/       # HTTP ProtocolExecutor implementation
+  vush-core/       # typed workload plan, protocol boundary, scenario interpreter, VU state, coordinator
+  vush-http/       # HttpExecutor implementation (from P2.2)
   vush-metrics/    # optional later extraction from core when justified by dependencies
 examples/          # later phases
 benchmarks/        # or benches/ per actual harness (Phase 7)
@@ -127,7 +127,8 @@ Config reading is decided (P1.2): `vush-config` uses `saphyr-parser` events for 
 
 - **Scenario:** an immutable ordered/structured flow of steps and scenario-level load settings.
 - **Iteration:** one run of a scenario's flow by a VU; may contain 0..N physical HTTP attempts according to branches/retries.
-- **Request start:** instant a physical HTTP attempt begins after rate admission; distinguish from a logical request step and from request completion.
+- **Attempt:** one try of a request step; `retry.attempts` caps them. **Hop:** one request on the wire within an attempt, the first plus one per redirect followed; `http.redirects` caps them. An attempt's timeout covers all of its hops. A rejected redirect, or a chain longer than `http.redirects`, ends the attempt without a hop.
+- **Request start:** instant a hop begins after any rate admission (Phase 5 decides whether every hop or only each attempt's first hop is admitted); distinguish from a logical request step and from request completion.
 - **Scheduled timestamp:** intended iteration/request time from the workload plan (monotonic clock).
 - **Active load window:** interval in which new work is scheduled (e.g., 60s).
 - **Drain window:** afterward, queue drains and in-flight operations finish/timeout; no new scheduled arrivals.
@@ -148,6 +149,7 @@ Initial default for request rate: rate is a **non-guaranteed target with bounded
 - VU state is isolated per user: variable namespaces, captured data, cookies, credentials/tokens, loop-local values; defaults persist across iterations. Config can reset per iteration or by other explicit scope.
 - A `WorkloadPlan` is immutable/shared; mutable VU state is exclusively owned by one active VU task at a time.
 - Shared HTTP client/pool is the default, with configurable per-scenario/per-VU pooling. Sharing transport does **not** share cookies/credentials; avoid a global shared cookie jar. HTTP/2 multiplexing may share sockets where permitted.
+- Per-user protocol state (cookies, and the user's own pool under `pool: vu`) lives in a session that the executor defines and core owns: one per VU and one per hook run. The executor holds none, so a shared executor can't carry one user's cookies to another.
 - Treat variable interpolation as typed or explicitly encoded, never automatically print secrets; label scopes for global setup data (read-only snapshot), scenario setup, and per-VU mutable data.
 - Limit size/count of variables, cookies, response buffers, and allowed extraction results. Defaults/limits must be documented and tested.
 
@@ -171,7 +173,7 @@ Loops must have static/configured maximum iterations and execution deadline; con
 ### 4.6 HTTP and retry semantics
 
 - Support HTTP/1.1, HTTP/2, TLS/HTTPS; redirect policies; timeouts; connection reuse; request bodies/headers/auth/cookies.
-- One logical HTTP step may produce multiple physical attempts only if retry policy is explicitly enabled. Report logical-step success/failure **and** physical attempt counts and timings separately. Retry can alter achieved traffic; rate policies must specify whether they apply to physical attempts (recommended) and account accordingly.
+- One logical HTTP step may produce multiple physical attempts only if retry policy is explicitly enabled. Report logical-step success/failure **and** physical attempt counts and timings separately. Retry can alter achieved traffic; rate policies must specify whether they apply to physical attempts (recommended) and account accordingly. Each attempt makes one or more hops (redirects). The executor makes one hop per call and never retries or follows a redirect itself; core's driver does both, so it sees every hop before it starts.
 - Stream or limit response bodies. Extract/validate necessary data before dropping buffers; only retain full responses on explicit opt-in and within limits.
 - Avoid leaking auth headers, session cookies, passwords, tokens, or sensitive bodies into metrics, failure diagnostics, and JSON output.
 
@@ -213,7 +215,8 @@ Schema v1, the YAML/JSON test file format, is defined in [`docs/config-schema.md
 | Decision still open | Default working assumption | Resolve by |
 |---|---|---|
 | Exact crate count and filenames | **Decided:** `vush` (bin), `vush-core`, `vush-http` under `crates/`, plus `vush-config` from P1.2 | Phase 0, P1.1 ✓ |
-| YAML parser, HTTP library, histogram implementation | YAML parser **decided**: `saphyr-parser`. Evaluate the others by feature/performance/security | P1.2 ✓, Phases 2, 6 |
+| Where the protocol executor interface lives | **Decided:** `HttpExecutor` in `vush_core::protocol::http`, implemented by `vush-http`; core has no dependencies | P2.1 ✓ |
+| YAML parser, HTTP library, histogram implementation | YAML parser **decided**: `saphyr-parser`. HTTP library: the P2.1 spike recommends hyper + hyper-util with Vush's own connector, decided in P2.2. Evaluate the histogram by feature/performance/security | P1.2 ✓, P2.2, Phase 6 |
 | YAML/JSON schema and error location reporting | **Decided:** schema v1 (scenario-owned load, tagged steps); every error has a key path and a line and column in both formats, and never quotes a value from the file. `vush validate` prints one block per problem (P1.4 ✓) | P1.1 ✓, P1.2 ✓ |
 | HTTP connection pool isolation algorithm | Shared by default, scenario/VU variants selectable | Phase 2/4 |
 | Setup failure policies and hook data lifetime | Abort global / skip failed scenario / retire failed VU | Phase 3/4 |
