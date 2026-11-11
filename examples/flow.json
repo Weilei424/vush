@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "name": "flow",
+  "base_url": "http://localhost:8080",
+  "scenarios": [
+    {
+      "name": "browse",
+      "load": {
+        "model": "closed_vus",
+        "vus": 5,
+        "duration": "2m"
+      },
+      "vu_setup": [
+        {
+          "request": {
+            "name": "log_in",
+            "method": "POST",
+            "path": "/login",
+            "json": {
+              "username": "demo",
+              "password": "${env.VUSH_PASSWORD}"
+            },
+            "expect": {
+              "status": 200
+            },
+            "extract": {
+              "token": {
+                "json_path": "$.token"
+              }
+            }
+          }
+        }
+      ],
+      "steps": [
+        {
+          "request": {
+            "name": "list_items",
+            "method": "GET",
+            "path": "/items",
+            "headers": {
+              "Authorization": "Bearer ${token}"
+            },
+            "expect": {
+              "status": 200,
+              "json": [
+                {
+                  "path": "$.items",
+                  "exists": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "when": {
+              "var": "token",
+              "exists": true
+            },
+            "then": [
+              {
+                "repeat": {
+                  "count": 3,
+                  "steps": [
+                    {
+                      "request": {
+                        "name": "view_item",
+                        "method": "GET",
+                        "path": "/items/1",
+                        "headers": {
+                          "Authorization": "Bearer ${token}"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "else": [
+              {
+                "wait": "1s"
+              }
+            ]
+          }
+        },
+        {
+          "wait": "500ms"
+        }
+      ]
+    }
+  ]
+}
