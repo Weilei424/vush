@@ -1,0 +1,4 @@
+error: while parsing a flow mapping, did not find expected ',' or '}'
+  --> yaml-syntax.yaml:7:10
+
+yaml-syntax.yaml: not valid, 1 problem
