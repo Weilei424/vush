@@ -1,0 +1,10 @@
+# a word where a number belongs
+schema_version: 1
+name: broken
+http:
+  redirects: five
+scenarios:
+  - name: ping
+    load: { model: closed_vus, vus: 1, iterations: 1 }
+    steps:
+      - request: { method: GET, url: "http://localhost:8080/" }
