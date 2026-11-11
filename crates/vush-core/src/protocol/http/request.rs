@@ -1,8 +1,11 @@
 //! The HTTP request that core resolves and hands to an executor.
 //!
-//! Everything in it is resolved and nothing is encoded: no template is left,
-//! and no value is percent-encoded or serialized. The executor checks the URL,
-//! the scheme and the headers before anything is sent.
+//! Everything in it is resolved: no template is left. Query pairs, form pairs
+//! and a JSON body are not encoded yet, and the executor encodes them. A URL,
+//! whether `Absolute` or `Joined`'s base and path, is used as given. Phase 3
+//! decides how substituted values are encoded inside a `path` or `url`. The
+//! executor checks the URL, the scheme and the headers before anything is
+//! sent.
 //!
 //! `Debug` never shows a URL or any part of one, a header, query or form
 //! value, a JSON string or number, or body bytes. It shows the method, names
