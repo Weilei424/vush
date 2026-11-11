@@ -62,7 +62,7 @@ cargo test -p vush --test cli help_flag_prints_usage_and_exits_zero
 
 Expected output of broken files:
 
-`cargo test` compares the output of `vush validate` for the files in `crates/vush/tests/invalid/` with the `.stderr` file beside each one. After an intended change to messages, re-record them and review the diff:
+`cargo test` compares the output of `vush validate` for the files in `crates/vush/tests/invalid/` with the `.stderr` file beside each one. After an intended change to messages, re-record the `.stderr` files and review the diff:
 
 ```sh
 VUSH_BLESS=1 cargo test -p vush --test fixtures
