@@ -327,8 +327,19 @@ fn debug_escapes_control_characters_in_names() {
         headers: vec![(name.clone(), String::new())],
         body: Some(HttpBody::Form(vec![(name.clone(), String::new())])),
     };
+    let response = HttpResponse {
+        status: 200,
+        version: WireVersion::Http11,
+        headers: vec![(name.clone(), Vec::new())],
+        body: Vec::new(),
+        truncated: false,
+    };
     let json = JsonValue::Object(vec![(name, JsonValue::Null)]);
-    for debug in [format!("{request:?}"), format!("{json:?}")] {
+    for debug in [
+        format!("{request:?}"),
+        format!("{response:?}"),
+        format!("{json:?}"),
+    ] {
         assert!(!debug.chars().any(char::is_control), "{debug}");
         assert!(debug.contains(r"\r\n"), "{debug}");
     }
@@ -353,6 +364,7 @@ fn debug_counts_multibyte_text_without_slicing() {
     );
     // "héllo" is 6 bytes. The URL's parts are 18 and 3 bytes.
     assert!(debug.contains('6'), "{debug}");
+    assert!(debug.contains("18"), "{debug}");
 }
 
 /// The nesting `WorkloadPlan::new` documents as tested on a 2 MiB stack.
@@ -499,6 +511,35 @@ fn a_5xx_is_a_response_and_a_refused_connection_is_a_failure() {
         };
         assert_eq!(hop.record(), want);
     }
+}
+
+#[test]
+fn a_failed_hop_keeps_its_timing_connection_and_sizes() {
+    let failed = hop_failed(FailureKind::Timeout, FailureStage::Body, "no data in time");
+    let hop = HttpHop {
+        timing: HopTiming {
+            to_headers: Some(Duration::from_millis(4)),
+            ..failed.timing
+        },
+        connection: Some(ConnectionId(3)),
+        sizes: BodySizes {
+            sent: 5,
+            received: 3,
+        },
+        ..failed
+    };
+    assert_eq!(
+        hop.record(),
+        HopRecord {
+            timing: hop.timing,
+            connection: hop.connection,
+            sizes: hop.sizes,
+            outcome: Outcome::Failed {
+                kind: FailureKind::Timeout,
+                stage: FailureStage::Body,
+            },
+        }
+    );
 }
 
 #[test]
