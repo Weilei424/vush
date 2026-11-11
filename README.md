@@ -29,6 +29,12 @@ cargo run -p vush -- validate test.yaml
 
 `validate` checks one or more files and sends no traffic. It exits `0` if every file is valid and `2` otherwise. It never quotes a value from the file.
 
+Sample tests in both formats are in [`examples/`](examples/). `smoke` sends one request, `flow` logs in and reuses the token, and `rate` uses the two rate-based load models with thresholds.
+
+```sh
+cargo run -p vush -- validate examples/smoke.yaml
+```
+
 ## Development
 
 Prerequisite: [rustup](https://rustup.rs). The pinned toolchain (Rust 1.99.1 with rustfmt and clippy) installs automatically from `rust-toolchain.toml` the first time you run `cargo` in the repository.
@@ -52,6 +58,14 @@ Run a single test:
 
 ```sh
 cargo test -p vush --test cli help_flag_prints_usage_and_exits_zero
+```
+
+Expected output of broken files:
+
+`cargo test` compares the output of `vush validate` for the files in `crates/vush/tests/invalid/` with the `.stderr` file beside each one. After an intended change to messages, re-record them and review the diff:
+
+```sh
+VUSH_BLESS=1 cargo test -p vush --test fixtures
 ```
 
 ## Supported Targets
