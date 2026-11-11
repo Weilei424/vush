@@ -326,4 +326,48 @@ scenarios:
         assert!(errors[0].message.contains("looks like a number"));
         assert!(errors[1].message.contains("unknown key `nmae`"));
     }
+
+    /// Where `load` puts the first bad byte, as (line, column).
+    fn locate(bytes: &[u8]) -> (u32, u32) {
+        let valid_up_to = std::str::from_utf8(bytes)
+            .expect_err("each case holds a bad byte")
+            .valid_up_to();
+        let at = utf8_error_location(bytes, valid_up_to);
+        (at.line, at.column)
+    }
+
+    #[test]
+    fn utf8_error_location_counts_lines_and_columns() {
+        let cases: &[(&[u8], (u32, u32))] = &[
+            (b"\xff", (1, 1)),                                   // bad first byte
+            (b"ab\xff", (1, 3)),                                 // plain text
+            (b"a\nb\xff", (2, 2)),                               // LF
+            (b"a\rb\xff", (2, 2)),                               // lone CR
+            (b"a\r\nb\xff", (2, 2)),                             // CRLF
+            (b"a\r\r\nb\xff", (3, 2)),                           // CR then CRLF
+            (b"a\n\rb\xff", (3, 2)),                             // LF then CR
+            (b"a\r\xff", (2, 1)),                                // CR last
+            (b"a\r\n\xff", (2, 1)),                              // CRLF last
+            (b"\xef\xbb\xbfa\xff", (1, 2)),                      // leading mark
+            (b"\xef\xbb\xbf\xff", (1, 1)),                       // mark alone
+            (b"\xef\xbb\xbf\r\nb\xff", (2, 2)),                  // mark then CRLF
+            (b"a\xef\xbb\xbf\xff", (1, 3)),                      // later mark is a character
+            (b"\xc3\xa9\xff", (1, 2)),                           // 2-byte
+            (b"\xe2\x82\xac\xff", (1, 2)),                       // 3-byte
+            (b"\xf0\x9f\x98\x80\xff", (1, 2)),                   // 4-byte
+            (b"ab\xc3", (1, 3)),                                 // cut off
+            (b"a\n\xe2\x82", (2, 1)),                            // cut off after LF
+            (b"\xef\xbb\xbf\xc3\xa9\r\xe2\x82\xac\xff", (2, 2)), // all together
+        ];
+        for (bytes, want) in cases {
+            assert_eq!(locate(bytes), *want, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn utf8_error_location_survives_a_bad_offset() {
+        let start = Location { line: 1, column: 1 };
+        assert_eq!(utf8_error_location(b"ab", 5), start);
+        assert_eq!(utf8_error_location("é".as_bytes(), 1), start);
+    }
 }
