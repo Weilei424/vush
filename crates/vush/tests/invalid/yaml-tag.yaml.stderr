@@ -1,0 +1,4 @@
+error: YAML tags aren't supported
+  --> yaml-tag.yaml:3:7
+
+yaml-tag.yaml: not valid, 1 problem
