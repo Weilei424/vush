@@ -141,13 +141,48 @@
 
 ## Phase 2 Execution Checklist — HTTP executor
 
-- [ ] P2.1 Implement protocol-neutral request/observation/error boundary.
+> P2.1 spec: `docs/superpowers/specs/2026-11-11-phase-2-1-protocol-boundary-design.md` · Plan: `docs/superpowers/plans/2026-11-11-phase-2-1-protocol-boundary.md` (local only; `docs/superpowers/` is gitignored).
+
+- [ ] P2.1 Implement protocol-neutral request/observation/error boundary (design approved 2026-11-11).
+  - Decided 2026-11-11:
+    - One `HttpExecutor::send` call sends one request on the wire, called a hop. Core's driver owns the attempt loop (retries, P2.3) and the hop loop (redirects, P2.2). `vush-http` supplies the redirect rules as a pure `follow`.
+    - The trait lives in `vush_core::protocol::http`, and `vush-http` implements it from P2.2. `vush-core` keeps no dependencies.
+    - Per-user state lives in a session type that `vush-http` defines and core owns. That state is cookies, plus the user's own pool under `pool: vu`. The executor holds none.
+    - There are ten pinned failure labels and four stage labels. A failure carries fixed text, never library text, URLs or values. `Debug` never shows a value.
+    - A rejected redirect ends the attempt with `invalid_redirect`, and a chain longer than `http.redirects` (when that is 1 or more) ends it with `too_many_redirects`. Neither one is a hop. With `redirects: 0` the `3xx` is still the response.
+    - A throwaway spike fitted the draft trait to reqwest, and to hyper with hyper-util and its own connector. It recommends hyper for P2.2.
+  - [ ] Failure kinds and stages with pinned labels (plan Task 1).
+  - [ ] Hop timing, sizes and outcomes, and hop, attempt and step records (plan Task 2).
+  - [ ] `JsonValue` and `HttpRequest` with redacted `Debug`, and an owner for every plan field (plan Task 3).
+  - [ ] `HttpResponse` and `HttpHop` with redacted `Debug` and `record()` (plan Task 4).
+  - [ ] The `HttpExecutor` trait and its contract, a fake executor driven through generics, and `Send` futures (plan Task 5).
+  - [ ] Architecture notes, local docs and all four check commands, with `vush-core` still free of dependencies (plan Task 6).
+  - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies.
   - Check header names and URL schemes before any traffic, and decide how `path` joins `base_url`. P1.3 only requires a `base_url` to exist.
+  - From P2.1:
+    - Implement `send` and `follow` in `vush-http`. This adds the `vush-http → vush-core` dependency.
+    - The spike recommends hyper and hyper-util with Vush's own connector. That connector must reject unsupported schemes itself.
+    - Core's hop loop counts redirects against `http.redirects` and gives each hop the attempt's remaining time. It ends a longer chain with `too_many_redirects`.
+    - Define how the query, form and JSON bodies are encoded, and the default `Content-Type`.
+    - Document the redirect limit and the attempt timeout in `docs/config-schema.md`.
 - [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on.
+  - From P2.1:
+    - Build executors per settings profile, and keep the `pool: vu` pool in the session.
+    - Core's attempt loop decides which failure kinds and statuses are retried, and where the backoff sleeps. Core needs a timer for that.
+    - Decide whether `retry.attempts` and `redirects` need upper bounds, because records grow with them.
+    - Choose the rustls crypto provider.
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
+  - From P2.1:
+    - The session's cookie jar, with `max_cookies` and `cookies: false`.
+    - What happens when a request carries its own `Cookie` header.
+    - `follow` dropping `Authorization` and that header when the origin changes.
 - [ ] P2.5 Implement bounded body capture and safe error diagnostics.
+  - From P2.1:
+    - Whether to drain or close the connection after a cut body. The spike found that dropping the rest of the body closes an HTTP/1.1 connection.
+    - Header limits, and the fixed failure texts.
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
+  - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
 
 ## Phase 3 Execution Checklist — Scenario interpreter
 
@@ -218,8 +253,8 @@
 
 - [x] Phase 0: minimal Cargo workspace/crate boundaries and actual repository conventions. Decided 2026-11-01: `crates/vush` (bin), `crates/vush-core`, `crates/vush-http`; toolchain pinned in `rust-toolchain.toml`; CI on Linux x86_64/arm64 and macOS arm64/x86_64.
 - [x] Phase 1: exact source-location validation behavior. Schema names and provisional default limits decided 2026-11-02 (P1.1). Decided 2026-11-03 (P1.2): every error carries a key path and a line and column in both formats, and never quotes a value from the file.
-- [ ] Phase 2: where the protocol-neutral executor trait lives (e.g. trait in `vush-core`, implemented by `vush-http`) so crate dependencies stay acyclic. The plan compiler's home is decided: `crates/vush-config` (2026-11-02, P1.1), so `crates/vush` doesn't need a library target for it.
-- [ ] Phase 2: maintained HTTP/TLS dependencies and retry/pooling implementation. The YAML library is decided: `saphyr-parser` (2026-11-03, P1.2).
+- [x] Phase 2: where the protocol-neutral executor trait lives. Decided 2026-11-11 (P2.1): `HttpExecutor` in `vush_core::protocol::http`, implemented by `vush-http`, so crate dependencies stay acyclic and `vush-core` has none. The plan compiler's home is decided: `crates/vush-config` (2026-11-02, P1.1), so `crates/vush` doesn't need a library target for it.
+- [ ] Phase 2: maintained HTTP/TLS dependencies and retry/pooling implementation. The YAML library is decided: `saphyr-parser` (2026-11-03, P1.2). Retries run in core's attempt loop (decided in P2.1). The P2.1 spike recommends hyper + hyper-util with Vush's own connector over reqwest, and P2.2 decides.
 - [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership. Also whether `all` and `any` stop at the first decisive condition (the schema example relies on it), whether `vu.id` and `vu.iteration` start at 0 or 1, what exceeding `max_response_size` or `deadline` does, and how `exists` treats JSON `null`.
 - [ ] Whichever phase adds `vush run`: a `--dry-run` that makes every check a run makes before traffic, such as `${env.NAME}` being set and `tls.ca_file` being readable. It never prints the plan's `Debug` output, which holds literal header and body text. Moved from Phase 1 on 2026-11-08.
 - [ ] Phase 5: hard cap vs target request-rate, burst/fairness policy, retry attempt rate, scheduling tick precision, emergency signals.
