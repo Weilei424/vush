@@ -20,9 +20,9 @@ pub struct HttpRequest {
     pub method: HttpMethod,
     /// Where the request goes.
     pub url: RequestUrl,
-    /// Query parameters in order, as resolved text. Not encoded.
+    /// Query parameters. Resolved, not encoded. Appended in this order.
     pub query: Vec<(String, String)>,
-    /// Headers in order, as resolved text. Not checked.
+    /// Headers. Resolved. Order and repeats kept. Not checked by core.
     pub headers: Vec<(String, String)>,
     /// The body, if any.
     pub body: Option<HttpBody>,
@@ -31,13 +31,15 @@ pub struct HttpRequest {
 /// The resolved target of a request.
 #[derive(Clone, PartialEq, Eq)]
 pub enum RequestUrl {
-    /// A full URL, from a step's `url`.
+    /// A full URL, used as written: a request's `url`, or the next URL
+    /// `follow` resolves from a redirect's `Location`.
     Absolute(String),
-    /// A base URL and a path, from a step's `path`. P2.2 defines the join.
+    /// A request's `path`, joined to the resolved `base_url`. P2.2 defines the
+    /// join.
     Joined {
-        /// The base URL.
+        /// The resolved `base_url`.
         base: String,
-        /// The path.
+        /// The request's resolved `path`.
         path: String,
     },
 }
@@ -49,7 +51,7 @@ pub enum HttpBody {
     Json(JsonValue),
     /// Text, sent as it is.
     Text(String),
-    /// Form fields in order, which the executor encodes.
+    /// Form fields. Resolved, not encoded. The executor encodes them.
     Form(Vec<(String, String)>),
 }
 
