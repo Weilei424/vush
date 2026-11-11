@@ -1,0 +1,5 @@
+error: expected one of auto, http1 or http2
+  --> bad-choice.yaml:5:12
+   = at http.version
+
+bad-choice.yaml: not valid, 1 problem
