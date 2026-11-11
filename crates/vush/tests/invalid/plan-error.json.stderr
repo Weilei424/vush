@@ -1,0 +1,5 @@
+error: `attempts` must be 2 or more, because it counts the first attempt
+  --> plan-error.json:13:36
+   = at scenarios[0].steps[0].request.retry.attempts
+
+plan-error.json: not valid, 1 problem
