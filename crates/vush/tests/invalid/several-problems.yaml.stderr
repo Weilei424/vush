@@ -1,0 +1,21 @@
+error: this rate must be above zero
+  --> several-problems.yaml:6:42
+   = at scenarios[0].load.rate
+
+error: `attempts` must be 2 or more, because it counts the first attempt
+  --> several-problems.yaml:8:83
+   = at scenarios[0].steps[0].request.retry.attempts
+
+error: status codes must be from 100 to 599
+  --> several-problems.yaml:9:82
+   = at scenarios[0].steps[1].request.expect.status
+
+error: no `extract` in this scenario's `vu_setup`, `steps` or `vu_teardown` sets this variable
+  --> several-problems.yaml:12:16
+   = at scenarios[0].steps[2].request.url
+
+error: no scenario has this name
+  --> several-problems.yaml:15:15
+   = at thresholds[0].scenario
+
+several-problems.yaml: not valid, 5 problems
