@@ -1,0 +1,4 @@
+error: the file is empty
+  --> empty.yaml
+
+empty.yaml: not valid, 1 problem
