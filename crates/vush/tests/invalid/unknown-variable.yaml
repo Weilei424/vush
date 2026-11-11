@@ -1,0 +1,17 @@
+# a reference to a variable that is never set
+schema_version: 1
+name: broken
+scenarios:
+  - name: ping
+    load: { model: closed_vus, vus: 1, iterations: 1 }
+    steps:
+      - request:
+          method: GET
+          url: "http://localhost:8080/"
+          extract:
+            token: { header: ETag }
+      - request:
+          method: GET
+          url: "http://localhost:8080/"
+          headers:
+            Authorization: "Bearer ${tokne}"
