@@ -1,6 +1,6 @@
 # Backlog — Vush
 
-> **Status:** MVP planning baseline, 2026-11-01. Phase 0 complete 2026-11-01 (CI green on all four targets); Phase 1 in progress; Phases 2–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
+> **Status:** MVP planning baseline, 2026-11-01. Phase 0 complete 2026-11-01 (CI green on all four targets); Phase 1 complete 2026-11-11 (CI green on all four targets); Phases 2–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
 
 ## Status legend
 
@@ -124,7 +124,7 @@
   - [x] CI green on all four runners after the user pushes (plan Task 4). Run 42503992380 on `8faab92`.
   - [x] Fix from Codex's review (2026-11-08): usage errors and help escape control characters in every argument and in the program name, so a newline can't forge an output line. Arguments are escaped rather than rejected, because a real file name can hold a control character.
   - [x] CI green on the Codex fix after the user pushes. Run 42505419884 on `3969d19`.
-- [ ] P1.5 Add fixtures, examples and checks of the schema doc against the code (design approved 2026-11-09). P1.5 closes Phase 1.
+- [x] P1.5 Add fixtures, examples and checks of the schema doc against the code (design approved 2026-11-09, finished 2026-11-11). P1.5 closes Phase 1.
   - Decided 2026-11-09:
     - Valid examples go in `examples/`, and test-only broken files go in `crates/vush/tests/invalid/`. The schema doc's complete example is checked straight from the doc, not copied.
     - Each broken file's exact `vush validate` output is recorded in a golden `.stderr` file and compared byte for byte. `VUSH_BLESS=1 cargo test -p vush --test fixtures` rewrites the goldens, and it never hides a failure.
@@ -134,7 +134,10 @@
   - [x] 21 broken files with byte-for-byte golden output, folder guards and a mixed run (plan Task 3).
   - [x] Every default in the schema doc's tables and prose is checked against the plan the compiler builds. The File rules limits and `720h` are checked against the constants (plan Task 4).
   - [x] The README points to `examples/` and the bless command, and the roadmap's source tree lists `examples/` (plan Task 5).
-  - [ ] CI green on all four runners after the user pushes. Then Phase 1 is marked complete here, in the README, in `IMPLEMENTATION_PLAN.md` and in `ARCHITECTURE_NOTES.md` (plan Task 5).
+  - [x] Fixes from the reviews (2026-11-10 and 2026-11-11):
+    - A bless run lists the goldens it rewrote. It writes straight to stderr, because `cargo test` hides `eprintln!` output from passing tests.
+    - The `fixtures.rs` header and the `several-problems.yaml` comment describe what they hold, and the README says bless re-records the `.stderr` files.
+  - [x] CI green on all four runners after the user pushes. Run 43060171180 on `5b34dd4`. Phase 1 is marked complete here, in the README, in `IMPLEMENTATION_PLAN.md` and in `ARCHITECTURE_NOTES.md` (plan Task 5).
 
 ## Phase 2 Execution Checklist — HTTP executor
 
