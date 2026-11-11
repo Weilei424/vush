@@ -1,0 +1,5 @@
+error: no `extract` in this scenario's `vu_setup`, `steps` or `vu_teardown` sets this variable
+  --> unknown-variable.yaml:17:28
+   = at scenarios[0].steps[1].request.headers.Authorization
+
+unknown-variable.yaml: not valid, 1 problem
