@@ -70,7 +70,7 @@ impl fmt::Debug for HttpResponse {
 pub struct HttpHop {
     /// How long the hop took.
     pub timing: HopTiming,
-    /// The connection the hop used, if it got one.
+    /// The connection that carried the hop, if the executor can tell.
     pub connection: Option<ConnectionId>,
     /// The body bytes sent and received.
     pub sizes: BodySizes,
