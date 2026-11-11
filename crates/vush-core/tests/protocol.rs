@@ -3,9 +3,14 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use vush_core::plan::{
+    Expect, HttpMethod, HttpSettings, JsonNumber, RequestStep, RequestTarget, ResourceLimits,
+    TlsSettings,
+};
+use vush_core::protocol::http::{HttpBody, HttpRequest, RequestUrl};
 use vush_core::protocol::{
     AttemptRecord, BodySizes, ConnectionId, ConnectionSetup, Failure, FailureKind, FailureStage,
-    HopRecord, HopTiming, Outcome, StepRecord,
+    HopRecord, HopTiming, JsonValue, Outcome, StepRecord,
 };
 
 const _: () = {
@@ -21,6 +26,10 @@ const _: () = {
     assert_shareable::<HopRecord>();
     assert_shareable::<AttemptRecord>();
     assert_shareable::<StepRecord>();
+    assert_shareable::<JsonValue>();
+    assert_shareable::<HttpRequest>();
+    assert_shareable::<RequestUrl>();
+    assert_shareable::<HttpBody>();
 };
 
 /// Each kind's place in `FailureKind::ALL`. The match has no wildcard, so a
@@ -222,4 +231,187 @@ fn ending_twice_is_a_bug() {
     let mut attempt = AttemptRecord::new(hop_record(answered(302)));
     attempt.end_with(FailureKind::InvalidRedirect, FailureStage::Prepare);
     attempt.end_with(FailureKind::TooManyRedirects, FailureStage::Prepare);
+}
+
+const SECRET: &str = "hunter2";
+
+fn get() -> HttpMethod {
+    "GET".parse().expect("GET is a method")
+}
+
+/// No planted secret or planted number shows in `debug`.
+fn assert_hidden(debug: &str) {
+    assert!(!debug.contains(SECRET), "{debug}");
+    assert!(!debug.contains("271828"), "{debug}");
+}
+
+fn secret_json() -> JsonValue {
+    JsonValue::Object(vec![
+        (
+            "user".to_string(),
+            JsonValue::Array(vec![JsonValue::String(SECRET.to_string())]),
+        ),
+        (
+            "pin".to_string(),
+            JsonValue::Number(JsonNumber::Int(271_828)),
+        ),
+        ("ok".to_string(), JsonValue::Bool(true)),
+    ])
+}
+
+fn secret_request(url: RequestUrl, body: HttpBody) -> HttpRequest {
+    HttpRequest {
+        method: get(),
+        url,
+        query: vec![("page".to_string(), SECRET.to_string())],
+        headers: vec![("authorization".to_string(), format!("Bearer {SECRET}"))],
+        body: Some(body),
+    }
+}
+
+#[test]
+fn request_debug_hides_every_value() {
+    let urls = [
+        RequestUrl::Absolute(format!(
+            "https://user:{SECRET}@example.test/a?token={SECRET}"
+        )),
+        RequestUrl::Joined {
+            base: format!("https://{SECRET}.example.test"),
+            path: format!("/{SECRET}"),
+        },
+    ];
+    let bodies = [
+        HttpBody::Json(secret_json()),
+        HttpBody::Text(SECRET.to_string()),
+        HttpBody::Form(vec![("password".to_string(), SECRET.to_string())]),
+    ];
+    for url in &urls {
+        for body in &bodies {
+            let debug = format!("{:?}", secret_request(url.clone(), body.clone()));
+            assert_hidden(&debug);
+            for shown in ["GET", "authorization", "page"] {
+                assert!(debug.contains(shown), "{debug}");
+            }
+        }
+    }
+    let json = format!("{:?}", secret_json());
+    assert_hidden(&json);
+    for shown in ["user", "pin", "true"] {
+        assert!(json.contains(shown), "{json}");
+    }
+    let form = format!("{:?}", bodies[2]);
+    assert_hidden(&form);
+    assert!(form.contains("password"), "{form}");
+}
+
+#[test]
+fn debug_escapes_control_characters_in_names() {
+    let name = "x-a\r\nInjected: yes".to_string();
+    let request = HttpRequest {
+        method: get(),
+        url: RequestUrl::Absolute("http://example.test/".to_string()),
+        query: vec![(name.clone(), String::new())],
+        headers: vec![(name.clone(), String::new())],
+        body: Some(HttpBody::Form(vec![(name.clone(), String::new())])),
+    };
+    let json = JsonValue::Object(vec![(name, JsonValue::Null)]);
+    for debug in [format!("{request:?}"), format!("{json:?}")] {
+        assert!(!debug.chars().any(char::is_control), "{debug}");
+        assert!(debug.contains(r"\r\n"), "{debug}");
+    }
+}
+
+#[test]
+fn debug_counts_multibyte_text_without_slicing() {
+    let request = HttpRequest {
+        method: get(),
+        url: RequestUrl::Joined {
+            base: "http://日本.test".to_string(),
+            path: "/é".to_string(),
+        },
+        query: Vec::new(),
+        headers: Vec::new(),
+        body: Some(HttpBody::Text("héllo".to_string())),
+    };
+    let debug = format!("{request:?}");
+    assert!(
+        !debug.contains("héllo") && !debug.contains("日本"),
+        "{debug}"
+    );
+    // "héllo" is 6 bytes. The URL's parts are 18 and 3 bytes.
+    assert!(debug.contains('6'), "{debug}");
+}
+
+/// The nesting `WorkloadPlan::new` documents as tested on a 2 MiB stack.
+const TESTED_NESTING: usize = 1_000;
+
+#[test]
+fn json_nested_to_the_tested_bound_works_on_a_small_stack() {
+    let (length, leaked) = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let mut value = JsonValue::String(SECRET.to_string());
+            for _ in 0..TESTED_NESTING {
+                value = JsonValue::Array(vec![value]);
+            }
+            let copy = value.clone();
+            assert_eq!(copy, value);
+            let debug = format!("{value:?}");
+            (debug.len(), debug.contains(SECRET))
+        })
+        .expect("the thread starts")
+        .join()
+        .expect("no stack overflow");
+    assert!(length > TESTED_NESTING);
+    assert!(!leaked);
+}
+
+#[test]
+fn every_plan_field_has_an_owner() {
+    let step = RequestStep {
+        name: None,
+        method: get(),
+        target: RequestTarget::Url("http://example.test/".parse().expect("a template")),
+        query: Vec::new(),
+        headers: Vec::new(),
+        body: None,
+        timeout: Duration::from_secs(1),
+        required: true,
+        retry: None,
+        expect: Expect::default(),
+        extract: Vec::new(),
+    };
+    // No `..` below: a new plan field won't compile until it has an owner here.
+    let RequestStep {
+        name: _,     // runner and metrics (Phases 3, 6): stays in core as a label
+        method: _,   // request: HttpRequest.method
+        target: _,   // request: `path` is RequestUrl::Joined, `url` is RequestUrl::Absolute
+        query: _,    // request: HttpRequest.query, resolved
+        headers: _,  // request: HttpRequest.headers, resolved
+        body: _,     // request: HttpBody::Json, Text or Form
+        timeout: _,  // driver (P2.2, P2.3): the attempt's limit; each hop gets what is left
+        required: _, // runner (Phase 3)
+        retry: _,    // driver (P2.3): the attempt loop
+        expect: _,   // runner (Phase 3): checked on the last hop's response
+        extract: _,  // runner (Phase 3): read from the last hop's response
+    } = step;
+    let HttpSettings {
+        version: _,           // executor construction (P2.3)
+        pool: _,              // executor construction (P2.3); `vu` puts a pool in each session
+        timeout: _,           // vush-config: already copied into each request step's `timeout`
+        redirects: _,         // driver (P2.2): the hop loop's limit
+        cookies: _,           // session (P2.4)
+        max_response_size: _, // executor construction (P2.5): caps the body, sets `truncated`
+        tls:
+            TlsSettings {
+                ca_file: _,  // executor construction (P2.3)
+                insecure: _, // executor construction (P2.3)
+            },
+    } = HttpSettings::default();
+    let ResourceLimits {
+        max_variables: _,     // runner (Phase 3)
+        max_variable_size: _, // runner (Phase 3)
+        max_cookies: _,       // session (P2.4)
+        hook_timeout: _,      // runner (Phase 3)
+    } = ResourceLimits::default();
 }
