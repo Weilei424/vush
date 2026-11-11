@@ -1,0 +1,18 @@
+# Smoke test: one user makes one request and checks for a 200 response.
+# Validate it with: cargo run -p vush -- validate examples/smoke.yaml
+schema_version: 1
+name: smoke
+base_url: http://localhost:8080
+
+scenarios:
+  - name: health
+    load:
+      model: closed_vus
+      vus: 1
+      iterations: 1 # counted per user
+    steps:
+      - request:
+          method: GET
+          path: /health
+          expect:
+            status: 200
