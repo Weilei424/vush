@@ -15,7 +15,7 @@ Vush aims to provide a fast, resource-efficient, and extensible alternative for 
 
 ## Project Status
 
-🚧 **Early development — repository foundation in place; the load-testing engine is not implemented yet.**
+🚧 **Early development — test files can be written and checked with `vush validate`; the load-testing engine is not implemented yet.**
 
 See `docs/planning/` for the architecture notes, implementation roadmap, and backlog.
 
