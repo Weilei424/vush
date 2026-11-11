@@ -29,8 +29,9 @@ pub enum FailureKind {
     /// A redirect that can't be followed, such as an unparsable `Location` or
     /// one with an unsupported scheme. It ends the attempt.
     InvalidRedirect,
-    /// The chain needed more redirects than `http.redirects` allows. Core's
-    /// hop loop reports it, never the executor, and it ends the attempt.
+    /// The chain needed more redirects than `http.redirects` allows, when that
+    /// is 1 or more. Core's hop loop reports it, never the executor, and it
+    /// ends the attempt.
     TooManyRedirects,
     /// A failure the executor can't place above. It should be rare.
     Other,
