@@ -8,3 +8,10 @@
 //! bounds, and the per-user session that holds cookies. It must not schedule
 //! work or own global counters: scheduling belongs to `vush-core`, and
 //! aggregation to the metrics layer.
+
+// Nothing outside the tests calls these until `send` lands (plan Task 6), and
+// unused code is a warning. Task 6 drops the `cfg(test)`.
+#[cfg(test)]
+mod json;
+#[cfg(test)]
+mod prepare;
