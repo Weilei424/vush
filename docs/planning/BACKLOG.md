@@ -184,7 +184,7 @@
       - `CONNECT`
   - [x] Core's hop loop, `run_attempt` (plan Task 1).
   - [x] Validate-time header, URL and method checks (plan Task 2).
-  - [ ] Request preparation and JSON encoding in `vush-http` (plan Task 3).
+  - [x] Request preparation and JSON encoding in `vush-http` (plan Task 3).
   - [ ] `follow` (plan Task 4).
   - [ ] The connector and TLS (plan Task 5).
   - [ ] The executor and `send`, tested against in-process servers (plan Task 6).
