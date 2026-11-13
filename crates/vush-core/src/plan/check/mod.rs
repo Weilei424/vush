@@ -109,6 +109,7 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
         writers: &writers,
     };
     if let Some(base_url) = &draft.base_url {
+        values::url(base_url, true, &root.key("base_url"), &mut errors);
         vars::template(
             base_url,
             Place::BaseUrl,
@@ -361,14 +362,22 @@ fn check_request(
     errors: &mut Vec<PlanError>,
 ) {
     values::request_name(request.name.as_deref(), at, errors);
+    values::method(&request.method, &at.key("method"), errors);
     values::target(&request.target, scope.has_base_url, at, errors);
     let (key, target) = match &request.target {
         RequestTarget::Path(template) => ("path", template),
         RequestTarget::Url(template) => ("url", template),
     };
+    if let RequestTarget::Url(template) = &request.target {
+        values::url(template, false, &at.key("url"), errors);
+    }
     check_template(target, &at.key(key), scope, errors);
     check_pairs(&request.query, &at.key("query"), scope, errors);
-    check_pairs(&request.headers, &at.key("headers"), scope, errors);
+    let headers = at.key("headers");
+    for (name, value) in &request.headers {
+        values::header(name, value, &headers.key(name), errors);
+        check_template(value, &headers.key(name), scope, errors);
+    }
     match &request.body {
         Some(Body::Json(json)) => check_json(json, &at.key("json"), scope, errors),
         Some(Body::Text(template)) => check_template(template, &at.key("body"), scope, errors),
@@ -981,7 +990,7 @@ mod tests {
 
     #[test]
     fn retrying_a_non_idempotent_method_needs_the_opt_in() {
-        for method in ["POST", "PATCH", "CONNECT", "PURGE", "M-SEARCH"] {
+        for method in ["POST", "PATCH", "PURGE", "M-SEARCH"] {
             assert_eq!(
                 errors(&retrying(method, 2, false)),
                 [at(&format!("{REQ}.retry"), PlanErrorKind::RetryNeedsOptIn)],
@@ -1353,6 +1362,174 @@ mod tests {
             ("json", json),
         ] {
             assert_eq!(check_on_a_small_stack(build), 1, "{name}");
+        }
+    }
+
+    const TOKEN_CHARS: &str =
+        "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    fn with_header(name: &str, value: &str) -> PlanDraft {
+        let mut r = request("GET", url());
+        r.headers = vec![(name.to_string(), tpl(value))];
+        one_request(r)
+    }
+
+    fn with_url(text: &str) -> PlanDraft {
+        one_request(request("GET", RequestTarget::Url(tpl(text))))
+    }
+
+    fn with_base_url(text: &str) -> PlanDraft {
+        let mut d = draft(vec![scenario("a")]);
+        d.base_url = Some(tpl(text));
+        d
+    }
+
+    #[test]
+    fn header_names_must_be_tokens() {
+        for byte in 0x21u8..=0x7e {
+            let name = char::from(byte).to_string();
+            let result = errors(&with_header(&name, "v"));
+            if TOKEN_CHARS.contains(char::from(byte)) {
+                assert!(result.is_empty(), "{name}: {result:?}");
+            } else {
+                assert_eq!(
+                    result,
+                    [at(
+                        &format!("{REQ}.headers.{name}"),
+                        PlanErrorKind::InvalidHeaderName
+                    )],
+                    "{name}"
+                );
+            }
+        }
+        assert_eq!(
+            errors(&with_header("bad name", "v")),
+            [at(
+                &format!("{REQ}.headers.bad name"),
+                PlanErrorKind::InvalidHeaderName
+            )]
+        );
+        assert_eq!(
+            errors(&with_header("", "v")),
+            [at(
+                &format!("{REQ}.headers."),
+                PlanErrorKind::InvalidHeaderName
+            )]
+        );
+    }
+
+    #[test]
+    fn framing_and_connection_headers_are_forbidden() {
+        for name in [
+            "Content-Length",
+            "content-length",
+            "Transfer-Encoding",
+            "CONNECTION",
+            "Keep-Alive",
+            "Proxy-Connection",
+            "Upgrade",
+            "TE",
+            "te",
+        ] {
+            assert_eq!(
+                errors(&with_header(name, "v")),
+                [at(
+                    &format!("{REQ}.headers.{name}"),
+                    PlanErrorKind::ForbiddenHeader
+                )],
+                "{name}"
+            );
+        }
+        for name in ["Host", "Authorization", "Cookie", "X-Any"] {
+            assert!(errors(&with_header(name, "v")).is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn literal_header_values_reject_control_characters() {
+        for bad in ["a\r\nb", "a\0", "a\x7f"] {
+            assert_eq!(
+                errors(&with_header("X-A", bad)),
+                [at(
+                    &format!("{REQ}.headers.X-A"),
+                    PlanErrorKind::ControlCharacterInHeader
+                )],
+                "{bad:?}"
+            );
+        }
+        for ok in ["a\tb", "é", "${vu.id}"] {
+            assert!(errors(&with_header("X-A", ok)).is_empty(), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn urls_must_be_http_or_https() {
+        for bad in ["ftp://h/x", "localhost:8080/x", "example.com/x"] {
+            assert_eq!(
+                errors(&with_url(bad)),
+                [at(&format!("{REQ}.url"), PlanErrorKind::UnsupportedScheme)],
+                "{bad}"
+            );
+            assert_eq!(
+                errors(&with_base_url(bad)),
+                [at("base_url", PlanErrorKind::UnsupportedScheme)],
+                "{bad}"
+            );
+        }
+        for ok in [
+            "HTTPS://h/x",
+            "http://h",
+            "${env.BASE}/x",
+            "http${env.S}://h",
+        ] {
+            assert!(errors(&with_url(ok)).is_empty(), "{ok}");
+            assert!(errors(&with_base_url(ok)).is_empty(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn urls_cannot_carry_credentials() {
+        for bad in ["https://u:p@h/x", "https://u@h"] {
+            assert_eq!(
+                errors(&with_url(bad)),
+                [at(&format!("{REQ}.url"), PlanErrorKind::CredentialsInUrl)],
+                "{bad}"
+            );
+            assert_eq!(
+                errors(&with_base_url(bad)),
+                [at("base_url", PlanErrorKind::CredentialsInUrl)],
+                "{bad}"
+            );
+        }
+        for ok in ["https://h/@x", "https://h?a=@", "https://${env.U}@h"] {
+            assert!(errors(&with_url(ok)).is_empty(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn base_url_cannot_have_a_query_or_fragment() {
+        for bad in ["https://h/?x=1", "https://h/#f"] {
+            assert_eq!(
+                errors(&with_base_url(bad)),
+                [at("base_url", PlanErrorKind::QueryInBaseUrl)],
+                "{bad}"
+            );
+            assert!(errors(&with_url(bad)).is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn connect_is_rejected() {
+        let with_method = |method: &str| one_request(request(method, url()));
+        assert_eq!(
+            errors(&with_method("CONNECT")),
+            [at(
+                &format!("{REQ}.method"),
+                PlanErrorKind::UnsupportedMethod
+            )]
+        );
+        for ok in ["GET", "PATCH", "PURGE"] {
+            assert!(errors(&with_method(ok)).is_empty(), "{ok}");
         }
     }
 }
