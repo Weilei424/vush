@@ -1,0 +1,5 @@
+error: the HTTP client sets this header itself, so a request can't
+  --> forbidden-header.yaml:8:75
+   = at scenarios[0].steps[0].request.headers.Connection
+
+forbidden-header.yaml: not valid, 1 problem
