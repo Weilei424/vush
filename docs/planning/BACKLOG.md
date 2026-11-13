@@ -182,7 +182,7 @@
       - credentials in URLs
       - a query or fragment in `base_url`
       - `CONNECT`
-  - [ ] Core's hop loop, `run_attempt` (plan Task 1).
+  - [x] Core's hop loop, `run_attempt` (plan Task 1).
   - [ ] Validate-time header, URL and method checks (plan Task 2).
   - [ ] Request preparation and JSON encoding in `vush-http` (plan Task 3).
   - [ ] `follow` (plan Task 4).
