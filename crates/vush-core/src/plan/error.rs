@@ -189,6 +189,21 @@ pub enum PlanErrorKind {
     TemplateInName,
     /// A `path` target is used with no `base_url`.
     PathNeedsBaseUrl,
+    /// A header name isn't an HTTP token.
+    InvalidHeaderName,
+    /// A header name is one the HTTP client sets itself.
+    ForbiddenHeader,
+    /// The literal text of a header value holds a control character other
+    /// than tab.
+    ControlCharacterInHeader,
+    /// A URL doesn't start with `http://` or `https://`.
+    UnsupportedScheme,
+    /// A URL holds a user name or password.
+    CredentialsInUrl,
+    /// A `base_url` holds a query or a fragment.
+    QueryInBaseUrl,
+    /// The method is `CONNECT`.
+    UnsupportedMethod,
     /// A threshold names a scenario the file does not have.
     UnknownScenario,
     /// A number in a `json` body or a comparison is NaN or infinite.
@@ -266,6 +281,23 @@ impl fmt::Display for PlanErrorKind {
             Self::PathNeedsBaseUrl => f.write_str(
                 "a `path` needs a `base_url` at the top of the file; use `url` for a full address",
             ),
+            Self::InvalidHeaderName => f.write_str(
+                "a header name can only use letters, digits and !#$%&'*+-.^_`|~",
+            ),
+            Self::ForbiddenHeader => {
+                f.write_str("the HTTP client sets this header itself, so a request can't")
+            }
+            Self::ControlCharacterInHeader => {
+                f.write_str("a header value can't hold control characters, except tab")
+            }
+            Self::UnsupportedScheme => f.write_str("the URL must start with http:// or https://"),
+            Self::CredentialsInUrl => f.write_str(
+                "a URL can't hold a user name or password; send credentials in a header instead",
+            ),
+            Self::QueryInBaseUrl => f.write_str(
+                "a base_url can't have a query or a fragment; put them in each request",
+            ),
+            Self::UnsupportedMethod => f.write_str("CONNECT isn't supported"),
             Self::UnknownScenario => f.write_str("no scenario has this name"),
             Self::NonFiniteNumber => f.write_str("a number must be finite, not NaN or infinity"),
             Self::InvalidVariableName => {
