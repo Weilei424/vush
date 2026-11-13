@@ -113,10 +113,17 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         | PlanErrorKind::PathNeedsBaseUrl
                         | PlanErrorKind::UnknownScenario
                         | PlanErrorKind::NonFiniteNumber
+                        | PlanErrorKind::ControlCharacterInHeader
+                        | PlanErrorKind::UnsupportedScheme
+                        | PlanErrorKind::CredentialsInUrl
+                        | PlanErrorKind::QueryInBaseUrl
+                        | PlanErrorKind::UnsupportedMethod
                         | PlanErrorKind::VariableNotReadable { .. }
                         | PlanErrorKind::VariableNotSet { .. }) => (kind.to_string(), false),
                         kind @ (PlanErrorKind::InvalidVariableName
-                        | PlanErrorKind::ReservedVariableName) => (kind.to_string(), true),
+                        | PlanErrorKind::ReservedVariableName
+                        | PlanErrorKind::InvalidHeaderName
+                        | PlanErrorKind::ForbiddenHeader) => (kind.to_string(), true),
                         // Core dropped the rest, so the list gets the closing note.
                         PlanErrorKind::TooManyErrors => {
                             errors.mark_overflowed();
