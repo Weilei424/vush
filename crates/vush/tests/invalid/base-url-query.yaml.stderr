@@ -1,0 +1,5 @@
+error: a base_url can't have a query or a fragment; put them in each request
+  --> base-url-query.yaml:4:11
+   = at base_url
+
+base-url-query.yaml: not valid, 1 problem
