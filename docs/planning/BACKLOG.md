@@ -183,7 +183,7 @@
       - a query or fragment in `base_url`
       - `CONNECT`
   - [x] Core's hop loop, `run_attempt` (plan Task 1).
-  - [ ] Validate-time header, URL and method checks (plan Task 2).
+  - [x] Validate-time header, URL and method checks (plan Task 2).
   - [ ] Request preparation and JSON encoding in `vush-http` (plan Task 3).
   - [ ] `follow` (plan Task 4).
   - [ ] The connector and TLS (plan Task 5).
