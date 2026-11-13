@@ -1,0 +1,5 @@
+error: CONNECT isn't supported
+  --> connect-method.yaml:8:28
+   = at scenarios[0].steps[0].request.method
+
+connect-method.yaml: not valid, 1 problem
