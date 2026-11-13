@@ -89,9 +89,7 @@ pub(crate) fn request_url(request: &HttpRequest) -> Result<Url, Failure> {
             }
             query.extend(utf8_percent_encode(name, QUERY));
             query.push('=');
-            query.extend(
-                utf8_percent_encode(value, QUERY).map(|s| if s == "%20" { "+" } else { s }),
-            );
+            query.extend(utf8_percent_encode(value, QUERY));
         }
         url.set_query(Some(&query));
     }
@@ -278,6 +276,7 @@ mod tests {
                 "https://h/p?a%20b=c%26d%3De&%C3%A9=%2B%2F%3F%23",
             ),
             ("https://h/p?x=1", vec![("y", "2")], "https://h/p?x=1&y=2"),
+            ("https://h/p", vec![("k", "a b")], "https://h/p?k=a%20b"),
             ("https://h/p", vec![], "https://h/p"),
             (
                 "https://h/p",
