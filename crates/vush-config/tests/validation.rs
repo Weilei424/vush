@@ -163,6 +163,63 @@ fn rows() -> Vec<Row> {
             "at the top of the file",
         ),
         row(
+            "InvalidHeaderName",
+            file(BASE, LOAD, &get("          headers: {\"Bad Name\": x}\n")),
+            "scenarios[0].steps[0].request.headers.Bad Name",
+            "Bad Name",
+            "a header name can only use",
+        ),
+        row(
+            "ForbiddenHeader",
+            file(BASE, LOAD, &get("          headers: {Connection: close}\n")),
+            "scenarios[0].steps[0].request.headers.Connection",
+            "Connection:",
+            "sets this header itself",
+        ),
+        row(
+            "ControlCharacterInHeader",
+            file(BASE, LOAD, &get("          headers: {X-A: \"a\\r\\nb\"}\n")),
+            "scenarios[0].steps[0].request.headers.X-A",
+            "X-A:",
+            "control characters",
+        ),
+        row(
+            "UnsupportedScheme",
+            file(
+                BASE,
+                LOAD,
+                "      - request:\n          method: GET\n          url: ftp://h/x\n",
+            ),
+            "scenarios[0].steps[0].request.url",
+            "url: ftp://h/x",
+            "http:// or https://",
+        ),
+        row(
+            "CredentialsInUrl",
+            file(
+                BASE,
+                LOAD,
+                "      - request:\n          method: GET\n          url: https://u:p@h/x\n",
+            ),
+            "scenarios[0].steps[0].request.url",
+            "url: https://u:p@h/x",
+            "user name or password",
+        ),
+        row(
+            "QueryInBaseUrl",
+            file("base_url: \"https://h/?x=1\"\n", LOAD, &get("")),
+            "base_url",
+            "base_url:",
+            "query or a fragment",
+        ),
+        row(
+            "UnsupportedMethod",
+            file(BASE, LOAD, &request("CONNECT", "")),
+            "scenarios[0].steps[0].request.method",
+            "method: CONNECT",
+            "CONNECT isn't supported",
+        ),
+        row(
             "UnknownScenario",
             file(
                 &top("thresholds:\n  - metric: error_rate\n    scenario: nope\n    lt: 1%\n"),
@@ -293,6 +350,41 @@ fn json_files_report_the_same_rules() {
             vec![BASE_URL],
             LOAD,
             r#"{"method": "GET", "path": "/", "headers": {"A": "${nope}"}}"#.to_owned(),
+        ),
+        (
+            vec![BASE_URL],
+            LOAD,
+            r#"{"method": "GET", "path": "/", "headers": {"Bad Name": "x"}}"#.to_owned(),
+        ),
+        (
+            vec![BASE_URL],
+            LOAD,
+            r#"{"method": "GET", "path": "/", "headers": {"Connection": "close"}}"#.to_owned(),
+        ),
+        (
+            vec![BASE_URL],
+            LOAD,
+            r#"{"method": "GET", "path": "/", "headers": {"X-A": "a\r\nb"}}"#.to_owned(),
+        ),
+        (
+            vec![BASE_URL],
+            LOAD,
+            r#"{"method": "GET", "url": "ftp://h/x"}"#.to_owned(),
+        ),
+        (
+            vec![BASE_URL],
+            LOAD,
+            r#"{"method": "GET", "url": "https://u:p@h/x"}"#.to_owned(),
+        ),
+        (
+            vec![r#""base_url": "https://h/?x=1""#],
+            LOAD,
+            PLAIN.to_owned(),
+        ),
+        (
+            vec![BASE_URL],
+            LOAD,
+            r#"{"method": "CONNECT", "path": "/"}"#.to_owned(),
         ),
         (
             vec![BASE_URL],
