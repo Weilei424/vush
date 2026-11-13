@@ -1,0 +1,5 @@
+error: the URL must start with http:// or https://
+  --> unsupported-scheme.yaml:8:38
+   = at scenarios[0].steps[0].request.url
+
+unsupported-scheme.yaml: not valid, 1 problem
