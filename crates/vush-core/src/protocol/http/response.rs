@@ -29,8 +29,9 @@ pub struct HttpResponse {
     pub status: u16,
     /// The version the response arrived over.
     pub version: WireVersion,
-    /// In the order received, repeats kept. Names are lowercase. Values are
-    /// raw bytes, because servers send non-UTF-8 values.
+    /// Repeats of one name keep the order received, and the order across
+    /// names isn't kept. Names are lowercase. Values are raw bytes, because
+    /// servers send non-UTF-8 values.
     pub headers: Vec<(String, Vec<u8>)>,
     /// At most the executor's response-size limit.
     pub body: Vec<u8>,
