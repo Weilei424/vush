@@ -25,7 +25,9 @@ pub struct HttpRequest {
     pub url: RequestUrl,
     /// Query parameters. Resolved, not encoded. Appended in this order.
     pub query: Vec<(String, String)>,
-    /// Headers. Resolved. Order and repeats kept. Not checked by core.
+    /// Headers. Resolved. Repeats of one name keep their order. The order
+    /// across different names isn't kept on the wire (RFC 9110 §5.3). Not
+    /// checked by core.
     pub headers: Vec<(String, String)>,
     /// The body, if any.
     pub body: Option<HttpBody>,
