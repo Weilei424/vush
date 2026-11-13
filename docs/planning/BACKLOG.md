@@ -162,32 +162,59 @@
     - The executor contract now states the shape of `follow`'s next request (an `Absolute` URL and an empty `query`), and that a `3xx` without a `Location` gives `Ok(None)`. It also says a session must only be used with the executor that made it.
     - New tests pin a failed hop's connection, sizes and timing through `record()`, and the escaping of response header names.
   - [x] CI green on all four runners after the user pushes (plan Task 6). Run 43117235155 on `be1e1aa`, 2026-11-11.
-- [ ] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies.
-  - Check header names and URL schemes before any traffic, and decide how `path` joins `base_url`. P1.3 only requires a `base_url` to exist.
-  - From P2.1:
-    - Implement `send` and `follow` in `vush-http`. This adds the `vush-http → vush-core` dependency.
-    - The spike recommends hyper and hyper-util with Vush's own connector. That connector must reject unsupported schemes itself.
-    - Core's hop loop counts redirects against `http.redirects` and gives each hop the attempt's remaining time. It ends a longer chain with `too_many_redirects` when `redirects` is 1 or more. With `redirects: 0` the `3xx` is the response.
-    - Define how the query, form and JSON bodies are encoded, and the default `Content-Type`.
-    - Document the redirect limit and the attempt timeout in `docs/config-schema.md`.
+- [ ] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies (design approved 2026-11-12).
+  - Spec: `docs/superpowers/specs/2026-11-12-phase-2-2-http-executor-design.md` · Plan: `docs/superpowers/plans/2026-11-12-phase-2-2-http-executor.md` (local only).
+  - Decided 2026-11-12:
+    - **Libraries:** hyper and hyper-util with Vush's own connector, plus `h2` to classify HTTP/2 failures. rustls uses `ring` only, with the system's trusted roots (`rustls-native-certs`).
+    - **Scope:** HTTPS is in P2.2. `tls.ca_file` and `tls.insecure` stay in P2.3, and until then building an executor that uses them fails.
+    - **The hop loop** is `vush_core::runner::run_attempt`. It shares the attempt's timeout using the hop times, so core still has no dependencies and no clock.
+    - **The join:** `path` joins `base_url` with one `/`, not by RFC 3986 resolution.
+    - **Encodings:** query values use `%20` for a space, forms use `+`, and JSON keeps integers exact.
+    - **Default headers:** a `Content-Type` per body kind, and `User-Agent: vush/<version>`. Repeats of one header name keep their order, and the order across names isn't kept.
+    - **`follow`:**
+      - It follows `301`, `302`, `303`, `307` and `308` that carry a `Location`.
+      - `POST` becomes `GET` on `301`/`302`, and every method except `HEAD` becomes `GET` on `303`.
+      - It drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` on an origin change.
+    - **`vush validate` rejects:**
+      - bad and forbidden header names
+      - control characters in literal header values
+      - literal non-`http(s)` schemes
+      - credentials in URLs
+      - a query or fragment in `base_url`
+      - `CONNECT`
+  - [ ] Core's hop loop, `run_attempt` (plan Task 1).
+  - [ ] Validate-time header, URL and method checks (plan Task 2).
+  - [ ] Request preparation and JSON encoding in `vush-http` (plan Task 3).
+  - [ ] `follow` (plan Task 4).
+  - [ ] The connector and TLS (plan Task 5).
+  - [ ] The executor and `send`, tested against in-process servers (plan Task 6).
+  - [ ] Redirects end to end through `run_attempt` (plan Task 7).
+  - [ ] Schema doc, architecture notes and local docs (plan Task 8).
+  - [ ] CI green on all four runners after the user pushes (plan Task 8).
 - [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on.
   - From P2.1:
     - Build executors per settings profile, and keep the `pool: vu` pool in the session.
     - Decide whether to enforce that a session is only used with the executor that made it, for example with an executor ID in the session that fails fast. Under `pool: vu` a session holds connections built with its executor's settings.
     - Core's attempt loop decides which failure kinds and statuses are retried, and where the backoff sleeps. Core needs a timer for that.
     - Decide whether `retry.attempts` and `redirects` need upper bounds, because records grow with them.
-    - Choose the rustls crypto provider.
+  - From P2.2:
+    - `tls.ca_file` builds on `Executor::with_roots`. Lift `BuildError::Unsupported` for `tls.ca_file` and `tls.insecure`.
+    - The crypto provider is decided: `ring`.
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
   - From P2.1:
     - The session's cookie jar, with `max_cookies` and `cookies: false`.
     - What happens when a request carries its own `Cookie` header.
-    - `follow` dropping `Authorization` and that header when the origin changes.
+    - `follow` dropping `Authorization` and that header when the origin changes. From P2.2: `follow` already drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` on an origin change. Test it against the jar.
 - [ ] P2.5 Implement bounded body capture and safe error diagnostics.
   - From P2.1:
     - Whether to drain or close the connection after a cut body. The spike found that dropping the rest of the body closes an HTTP/1.1 connection.
     - Header limits, and the fixed failure texts.
+  - From P2.2:
+    - A body past the limit is cut, and its connection is closed.
+    - Vush never sends `Accept-Encoding` and never decompresses. Decide whether that changes, with limits on decompression.
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
+  - From P2.2: tests never ask a real resolver, so a `dns` failure from a real cause needs a controlled one. Decide whether the connector's private resolver seam becomes public.
 
 ## Phase 3 Execution Checklist — Scenario interpreter
 
@@ -259,7 +286,7 @@
 - [x] Phase 0: minimal Cargo workspace/crate boundaries and actual repository conventions. Decided 2026-11-01: `crates/vush` (bin), `crates/vush-core`, `crates/vush-http`; toolchain pinned in `rust-toolchain.toml`; CI on Linux x86_64/arm64 and macOS arm64/x86_64.
 - [x] Phase 1: exact source-location validation behavior. Schema names and provisional default limits decided 2026-11-02 (P1.1). Decided 2026-11-03 (P1.2): every error carries a key path and a line and column in both formats, and never quotes a value from the file.
 - [x] Phase 2: where the protocol-neutral executor trait lives. Decided 2026-11-11 (P2.1): `HttpExecutor` in `vush_core::protocol::http`, implemented by `vush-http`, so crate dependencies stay acyclic and `vush-core` has none. The plan compiler's home is decided: `crates/vush-config` (2026-11-02, P1.1), so `crates/vush` doesn't need a library target for it.
-- [ ] Phase 2: maintained HTTP/TLS dependencies and retry/pooling implementation. The YAML library is decided: `saphyr-parser` (2026-11-03, P1.2). Retries run in core's attempt loop (decided in P2.1). The P2.1 spike recommends hyper + hyper-util with Vush's own connector over reqwest, and P2.2 decides.
+- [ ] Phase 2: maintained HTTP/TLS dependencies and retry/pooling implementation. The YAML library is decided: `saphyr-parser` (2026-11-03, P1.2). Retries run in core's attempt loop (decided in P2.1). Decided 2026-11-12 (P2.2 design): hyper + hyper-util with Vush's own connector, rustls with `ring`, and the system's trusted roots. Pooling and retries remain for P2.3.
 - [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership. Also whether `all` and `any` stop at the first decisive condition (the schema example relies on it), whether `vu.id` and `vu.iteration` start at 0 or 1, what exceeding `max_response_size` or `deadline` does, and how `exists` treats JSON `null`.
 - [ ] Whichever phase adds `vush run`: a `--dry-run` that makes every check a run makes before traffic, such as `${env.NAME}` being set and `tls.ca_file` being readable. It never prints the plan's `Debug` output, which holds literal header and body text. Moved from Phase 1 on 2026-11-08.
 - [ ] Phase 5: hard cap vs target request-rate, burst/fairness policy, retry attempt rate, scheduling tick precision, emergency signals.
