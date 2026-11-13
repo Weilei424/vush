@@ -1,0 +1,8 @@
+# the CONNECT method
+schema_version: 1
+name: broken
+scenarios:
+  - name: ping
+    load: { model: closed_vus, vus: 1, iterations: 1 }
+    steps:
+      - request: { method: CONNECT, url: "http://localhost:8080/" }
