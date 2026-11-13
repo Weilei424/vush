@@ -9,3 +9,10 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+percent-encoding = { workspace = true }
+url = { workspace = true }
+vush-core = { workspace = true }
