@@ -1,0 +1,5 @@
+error: a header value can't hold control characters, except tab
+  --> header-control-character.yaml:8:80
+   = at scenarios[0].steps[0].request.headers.X-A
+
+header-control-character.yaml: not valid, 1 problem
