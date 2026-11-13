@@ -6,6 +6,7 @@ use std::time::Duration;
 use super::super::error::{PlanError, PlanErrorKind};
 use super::super::load::{ClosedStop, ClosedVusLoad, LoadModel, RateSchedule, Stage};
 use super::super::step::{Condition, HttpMethod, RequestTarget, RetryPolicy, StatusMatch};
+use super::super::template::{Template, TemplatePart};
 use super::super::value::{JsonNumber, MAX_DURATION, Rate};
 use super::{At, push};
 
@@ -137,6 +138,102 @@ pub(super) fn target(
 ) {
     if matches!(target, RequestTarget::Path(_)) && !has_base_url {
         push(errors, &at.key("path"), PlanErrorKind::PathNeedsBaseUrl);
+    }
+}
+
+/// Header names the HTTP client sets itself, compared case-insensitively.
+const FORBIDDEN_HEADERS: [&str; 7] = [
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "upgrade",
+    "te",
+];
+
+/// Whether a byte may appear in an HTTP token, such as a header name.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// Checks one header. `at` is the header's own place, `...headers.<name>`:
+/// a bad name is reported there and so is a bad literal value.
+pub(super) fn header(name: &str, value: &Template, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if name.is_empty() || !name.bytes().all(is_token_byte) {
+        push(errors, at, PlanErrorKind::InvalidHeaderName);
+    } else if FORBIDDEN_HEADERS
+        .iter()
+        .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+    {
+        push(errors, at, PlanErrorKind::ForbiddenHeader);
+    }
+    let control = value.parts().iter().any(|part| match part {
+        TemplatePart::Text(text) => text
+            .bytes()
+            .any(|byte| (byte < 0x20 && byte != b'\t') || byte == 0x7f),
+        TemplatePart::Var(_) => false,
+    });
+    if control {
+        push(errors, at, PlanErrorKind::ControlCharacterInHeader);
+    }
+}
+
+/// The text of a template's first part when that is literal, else empty.
+fn literal_prefix(template: &Template) -> &str {
+    match template.parts().first() {
+        Some(TemplatePart::Text(text)) => text,
+        _ => "",
+    }
+}
+
+/// Whether `text` starts with `prefix`, ignoring ASCII case.
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+/// Whether `text` is shaped like a URL scheme: a letter, then letters,
+/// digits, `+`, `-` or `.`.
+fn is_scheme(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+/// Checks a URL, the `url` of a request or the `base_url` when `is_base`.
+/// Only the literal text before the first `${` is read, and the whole value
+/// when it has no reference. `at` is the URL's own place.
+pub(super) fn url(template: &Template, is_base: bool, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    let prefix = literal_prefix(template);
+    let whole_literal = matches!(template.parts(), [TemplatePart::Text(_)]);
+    let other_scheme = prefix.split_once(':').is_some_and(|(scheme, _)| {
+        is_scheme(scheme)
+            && !scheme.eq_ignore_ascii_case("http")
+            && !scheme.eq_ignore_ascii_case("https")
+    });
+    let not_http = whole_literal
+        && !starts_with_ignore_case(prefix, "http://")
+        && !starts_with_ignore_case(prefix, "https://");
+    if other_scheme || not_http {
+        push(errors, at, PlanErrorKind::UnsupportedScheme);
+    }
+    if let Some((_, rest)) = prefix.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        if authority.contains('@') {
+            push(errors, at, PlanErrorKind::CredentialsInUrl);
+        }
+    }
+    if is_base && prefix.contains(['?', '#']) {
+        push(errors, at, PlanErrorKind::QueryInBaseUrl);
+    }
+}
+
+/// Checks a method. `at` is the `method` place.
+pub(super) fn method(method: &HttpMethod, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if method.as_str() == "CONNECT" {
+        push(errors, at, PlanErrorKind::UnsupportedMethod);
     }
 }
 
