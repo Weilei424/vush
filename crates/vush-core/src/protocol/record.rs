@@ -116,7 +116,10 @@ impl AttemptRecord {
     }
 
     /// Ends the attempt with a failure that no hop carries. It is a bug to end
-    /// an attempt twice.
+    /// an attempt twice. Core uses it three ways: a rejected redirect
+    /// (`invalid_redirect`), an exhausted redirect limit
+    /// (`too_many_redirects`), and no time left before the next hop
+    /// (`timeout` in `prepare`).
     pub fn end_with(&mut self, kind: FailureKind, stage: FailureStage) {
         debug_assert!(self.ending.is_none(), "an attempt ends only once");
         self.ending = Some((kind, stage));
