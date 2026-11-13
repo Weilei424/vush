@@ -101,7 +101,7 @@ JSON paths are used in `extract` (`json_path`) and in `expect.json` (`path`).
 |---|---|---|---|---|
 | `schema_version` | integer, must be `1` | yes | | 1 |
 | `name` | string | yes | | 6 |
-| `base_url` | template | no | none | 2 |
+| `base_url` | template. Must start with `http://` or `https://`, and can't hold a user name or password, a query or a fragment | no | none | 2 |
 | `http` | [block](#http) | no | the defaults in that table | 2 |
 | `limits` | [block](#limits) | no | the defaults in that table | 3–5 |
 | `setup`, `teardown` | [step list](#steps) | no | empty | 3 |
@@ -270,15 +270,17 @@ A step list holds steps in order. A step is a map with exactly one key, which na
 | Key | Type | Required | Default |
 |---|---|---|---|
 | `name` | string, a fixed label for metrics. `${` in it is an error | no | none |
-| `method` | an HTTP method: uppercase letters, digits and `-`, starting with a letter. Any method is allowed | yes | |
-| `path` or `url` | template; exactly one. `path` is joined to `base_url` and needs a `base_url`. `url` is used as written | yes | |
-| `query`, `headers` | map of string to template. Order is kept | no | empty |
+| `method` | an HTTP method: uppercase letters, digits and `-`, starting with a letter. Any method except `CONNECT` is allowed | yes | |
+| `path` or `url` | template; exactly one. `path` is joined to `base_url` and needs a `base_url`. `url` is used as written, must start with `http://` or `https://`, and can't hold a user name or password | yes | |
+| `query`, `headers` | map of string to template. `query` order is kept. For `headers`, see the rules below | no | empty |
 | `json`, `body` or `form` | a JSON value, a template, or a map of string to template; at most one | no | none |
 | `timeout` | duration, longer than zero | no | the step's `http.timeout` |
 | `required` | boolean | no | `true` |
 | `retry` | [block](#retry) | no | no retries |
 | `expect` | [block](#expect) | no | see below |
 | `extract` | map of variable name to [source](#extract) | no | empty |
+
+Header names are HTTP tokens: letters, digits and any of `! # $ % & ' * + - . ^ _` the backtick, `|` and `~`. The client sets `content-length`, `transfer-encoding`, `connection`, `keep-alive`, `proxy-connection`, `upgrade` and `te` itself, so a request can't set them, in any letter case. `Host`, `Authorization` and `Cookie` can be set. A header value can't hold control characters except tab.
 
 A failed required step ends the current iteration. A failed optional step (`required: false`) lets the iteration continue, and leaves its extractions unset.
 
@@ -290,7 +292,7 @@ A failed required step ends the current iteration. A failed optional step (`requ
 | `backoff` | duration, can be `0s`. A fixed delay between attempts | no | `100ms` |
 | `allow_non_idempotent` | boolean. Must be `true` to retry any method other than `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` and `TRACE` | no | `false` |
 
-Retries are off unless you add a `retry` block. They happen on transport errors and `5xx` responses. Every attempt counts as a physical request attempt. Any method is allowed, so a custom method is not retried unless `allow_non_idempotent` is `true`.
+Retries are off unless you add a `retry` block. They happen on transport errors and `5xx` responses. Every attempt counts as a physical request attempt. Any method other than `CONNECT` is allowed, so a custom method is not retried unless `allow_non_idempotent` is `true`.
 
 #### `expect`
 
@@ -404,6 +406,8 @@ A test file holds one YAML or JSON document. These rules apply however the file 
 | Nesting | At most 128 levels of maps and lists |
 | Values | At most 250,000, counting copies made by YAML anchors and aliases |
 | Text | At most 64 MiB of keys and strings, counting copies made by YAML anchors and aliases |
+
+The request rules above (header names and values, the URL scheme, credentials in a URL, a query in `base_url`, and `CONNECT`) are checked here only where the text is literal. They are checked again when the request is sent, for values that come from variables.
 
 Most errors give a key path, a line and a column. Syntax errors give a line and a column, and errors about the whole file, such as its size, give neither. Some rules are checked only after the file has no other errors, so fixing one round of errors can reveal more. An error never quotes a value from the file, so a token in a test file can't reach a log through an error message. Key names can appear, escaped and cut to 64 characters, so don't put secrets in key names.
 
