@@ -1,6 +1,6 @@
 # Backlog — Vush
 
-> **Status:** MVP planning baseline, 2026-11-01. Phase 0 complete 2026-11-01 (CI green on all four targets); Phase 1 complete 2026-11-11 (CI green on all four targets); Phases 2–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
+> **Status:** MVP planning baseline, 2026-11-01. Phase 0 complete 2026-11-01 (CI green on all four targets); Phase 1 complete 2026-11-11 (CI green on all four targets); Phase 2 in progress (P2.1 complete 2026-11-11, CI green on all four targets); Phases 3–8 remain baseline planning. `IMPLEMENTATION_PLAN.md` defines phase goals and acceptance criteria; `ARCHITECTURE_NOTES.md` is the architecture reference. This is a phase/task checklist, **not** a substitute for phase-specific design specs/plans.
 
 ## Status legend
 
@@ -143,7 +143,7 @@
 
 > P2.1 spec: `docs/superpowers/specs/2026-11-11-phase-2-1-protocol-boundary-design.md` · Plan: `docs/superpowers/plans/2026-11-11-phase-2-1-protocol-boundary.md` (local only; `docs/superpowers/` is gitignored).
 
-- [ ] P2.1 Implement protocol-neutral request/observation/error boundary (design approved 2026-11-11).
+- [x] P2.1 Implement protocol-neutral request/observation/error boundary (design approved 2026-11-11, finished 2026-11-11).
   - Decided 2026-11-11:
     - One `HttpExecutor::send` call is a hop: it sends one request on the wire, or none when it fails in `prepare`. Core's driver owns the attempt loop (retries, P2.3) and the hop loop (redirects, P2.2). `vush-http` supplies the redirect rules as a pure `follow`.
     - The trait lives in `vush_core::protocol::http`, and `vush-http` implements it from P2.2. `vush-core` keeps no dependencies.
@@ -161,7 +161,7 @@
     - The contract, the failure docs and the architecture notes now say `too_many_redirects` applies only when `http.redirects` is 1 or more. With `redirects: 0` the `3xx` is the response.
     - The executor contract now states the shape of `follow`'s next request (an `Absolute` URL and an empty `query`), and that a `3xx` without a `Location` gives `Ok(None)`. It also says a session must only be used with the executor that made it.
     - New tests pin a failed hop's connection, sizes and timing through `record()`, and the escaping of response header names.
-  - [ ] CI green on all four runners after the user pushes (plan Task 6).
+  - [x] CI green on all four runners after the user pushes (plan Task 6). Run 43117235155 on `be1e1aa`, 2026-11-11.
 - [ ] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies.
   - Check header names and URL schemes before any traffic, and decide how `path` joins `base_url`. P1.3 only requires a `base_url` to exist.
   - From P2.1:
