@@ -215,15 +215,12 @@ scenarios:
     assert!(found[0].path.ends_with("json.a.b.c"), "{}", found[0].path);
     assert_eq!(lines(&found), [13]);
 
-    // A newline in a header name is written escaped in the path.
-    let text = request("          headers:\n            \"X\\nY\": \"${nope}\"\n");
+    // A newline in a query name is written escaped in the path. (A header
+    // name can't hold one, because header names must be tokens.)
+    let text = request("          query:\n            \"X\\nY\": \"${nope}\"\n");
     let found = errors(&text, Format::Yaml);
     assert_eq!(found.len(), 1, "{found:?}");
-    assert!(
-        found[0].path.ends_with("headers.X\\nY"),
-        "{}",
-        found[0].path
-    );
+    assert!(found[0].path.ends_with("query.X\\nY"), "{}", found[0].path);
     assert!(!found[0].path.contains('\n'));
     assert_eq!(lines(&found), [12]);
 }
