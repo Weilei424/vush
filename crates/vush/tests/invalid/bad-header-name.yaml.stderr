@@ -1,0 +1,5 @@
+error: a header name can only use letters, digits and !#$%&'*+-.^_`|~
+  --> bad-header-name.yaml:8:75
+   = at scenarios[0].steps[0].request.headers.Bad Name
+
+bad-header-name.yaml: not valid, 1 problem
