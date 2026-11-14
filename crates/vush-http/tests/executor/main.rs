@@ -5,4 +5,5 @@
 
 mod common;
 mod failures;
+mod redirects;
 mod send;
