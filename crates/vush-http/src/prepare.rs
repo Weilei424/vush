@@ -31,7 +31,6 @@ const QUERY: &AsciiSet = &NON_ALPHANUMERIC
 /// A request that passed every check, ready for the wire.
 pub(crate) struct Prepared {
     pub method: Method,
-    pub url: Url,
     pub uri: Uri,
     pub headers: HeaderMap,
     pub body: Bytes,
@@ -155,7 +154,6 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
         .map_err(|_| invalid("the URL can't be parsed"))?;
     Ok(Prepared {
         method,
-        url,
         uri,
         headers,
         body: Bytes::from(body),
@@ -405,7 +403,6 @@ mod tests {
         r.method = "PUT".parse().unwrap();
         let p = prepare(&r).unwrap();
         assert_eq!(p.method, Method::PUT);
-        assert_eq!(p.url.as_str(), "https://h/a%20b");
         assert_eq!(p.uri.to_string(), "https://h/a%20b");
     }
 
