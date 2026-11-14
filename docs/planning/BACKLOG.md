@@ -188,7 +188,7 @@
   - [x] `follow` (plan Task 4).
   - [x] The connector and TLS (plan Task 5).
   - [x] The executor and `send`, tested against in-process servers (plan Task 6).
-  - [ ] Redirects end to end through `run_attempt` (plan Task 7).
+  - [x] Redirects end to end through `run_attempt` (plan Task 7).
   - [ ] Schema doc, architecture notes and local docs (plan Task 8).
   - [ ] CI green on all four runners after the user pushes (plan Task 8).
 - [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on.
