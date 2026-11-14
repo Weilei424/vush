@@ -27,7 +27,7 @@ use rcgen::{
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use vush_core::plan::{ByteSize, HttpMethod, HttpSettings, HttpVersion, JsonNumber};
 use vush_core::protocol::JsonValue;
@@ -490,13 +490,26 @@ pub async fn spawn_raw(behavior: fn(TcpStream) -> BoxFuture) -> SocketAddr {
     addr
 }
 
-/// An address on 127.0.0.1 where nothing listens any more.
-pub async fn refused_addr() -> SocketAddr {
-    bind().await.local_addr().unwrap()
+/// A port on 127.0.0.1 that refuses every connection. Its socket is bound
+/// but never listens, and it stays bound while the guard lives, so no other
+/// test can take the port.
+pub struct RefusedPort {
+    _socket: TcpSocket,
+    pub addr: SocketAddr,
 }
 
-/// A listener that never answers, and counts the connections that reached
-/// it.
+pub fn refused_port() -> RefusedPort {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind(SocketAddr::new(LOCALHOST, 0)).unwrap();
+    let addr = socket.local_addr().unwrap();
+    RefusedPort {
+        _socket: socket,
+        addr,
+    }
+}
+
+/// A listener that never answers. A test can take each connection as it
+/// arrives, or count the connections that reached it.
 pub struct CountingListener {
     listener: TcpListener,
     pub addr: SocketAddr,
@@ -507,6 +520,12 @@ impl CountingListener {
         let listener = bind().await;
         let addr = listener.local_addr().unwrap();
         Self { listener, addr }
+    }
+
+    /// Waits for the next connection and hands it over, so the test knows it
+    /// arrived and can hold it open.
+    pub async fn arrival(&self) -> TcpStream {
+        self.listener.accept().await.unwrap().0
     }
 
     /// How many connections arrived before this call. It connects a probe,
@@ -621,6 +640,14 @@ pub fn stalled_body(stream: TcpStream) -> BoxFuture {
 
 pub fn garbage_status(stream: TcpStream) -> BoxFuture {
     answer(stream, b"HELLO\r\n\r\n")
+}
+
+/// A chunked body whose second chunk has a size line that isn't hex.
+pub fn malformed_chunk(stream: TcpStream) -> BoxFuture {
+    answer(
+        stream,
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\nzz\r\n",
+    )
 }
 
 /// Two `set-cookie` headers and a value that isn't UTF-8.
