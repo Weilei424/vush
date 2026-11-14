@@ -19,7 +19,7 @@ use crate::body::CountingBody;
 use crate::classify::{classify, failure, timeout};
 use crate::connector::{ConnInfo, Connector};
 use crate::prepare::{Prepared, prepare};
-use crate::stage::{MARKER, StageMarker};
+use crate::stage::StageMarker;
 use crate::tls::client_config;
 
 /// Why an executor couldn't be built. Each text is fixed.
@@ -117,10 +117,7 @@ impl Executor {
         let marker = StageMarker::new();
         marker.set(FailureStage::Connect);
         let hop = self.drive(request, capture, &marker, progress);
-        match MARKER
-            .scope(marker.clone(), tokio::time::timeout(timeout_after, hop))
-            .await
-        {
+        match tokio::time::timeout(timeout_after, hop).await {
             Ok(outcome) => outcome,
             Err(_elapsed) => Err(timeout(marker.get())),
         }
@@ -149,13 +146,18 @@ impl Executor {
                 response.await
             }
         };
-        // A failure before the head is in `headers`, unless the connector
-        // placed it.
+        // A head that failed in the same poll that assigned its connection
+        // got there before the marker moved.
+        if capture.connection_metadata().is_some() {
+            marker.set(FailureStage::Headers);
+        }
+        // A failure before the head is in the marker's stage, unless its
+        // cause places it.
         let head = match head {
             Ok(head) => head,
             Err(error) => {
                 progress.error_connection = error.connect_info().and_then(conn_info);
-                return Err(classify(&error, FailureStage::Headers));
+                return Err(classify(&error, marker.get()));
             }
         };
         progress.to_headers = Some(progress.start.elapsed());
