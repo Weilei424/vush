@@ -12,7 +12,9 @@ publish = false
 [workspace.dependencies]
 bytes = "1"
 clap = { version = "4.6", features = ["derive"] }
+h2 = "0.4"
 http = "1"
+http-body-util = "0.1"
 hyper = "1"
 hyper-util = "0.1"
 percent-encoding = "2"
