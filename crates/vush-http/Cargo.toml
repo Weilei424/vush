@@ -13,6 +13,17 @@ workspace = true
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 percent-encoding = { workspace = true }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+rustls-native-certs = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "time", "macros"] }
+tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
+tower-service = { workspace = true }
 url = { workspace = true }
 vush-core = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
