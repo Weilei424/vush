@@ -111,7 +111,11 @@ impl Executor {
         timeout_after: Duration,
         progress: &mut Progress,
     ) -> Result<HttpResponse, Failure> {
+        // `prepare` is done, so the hop is waiting for a connection: its own
+        // connect, a pooled one, or, under `http2`, another hop's connect,
+        // which hyper-util shares without running the connector for this hop.
         let marker = StageMarker::new();
+        marker.set(FailureStage::Connect);
         let hop = self.drive(request, capture, &marker, progress);
         match MARKER
             .scope(marker.clone(), tokio::time::timeout(timeout_after, hop))
@@ -132,10 +136,9 @@ impl Executor {
         progress: &mut Progress,
     ) -> Result<HttpResponse, Failure> {
         let mut response = self.client.request(request);
-        // The connector moves the marker to `connect` when it runs in this
-        // task. A pooled connection never runs it, and a connect that loses
-        // to a pooled connection finishes on another task, so the move to
-        // `headers` comes from hyper-util assigning a connection.
+        // The hop is in `connect` until hyper-util assigns it a connection,
+        // new or pooled. Only that tells this hop apart: a connect that loses
+        // to a pooled connection finishes on another task.
         let head = tokio::select! {
             biased;
             head = &mut response => head,
