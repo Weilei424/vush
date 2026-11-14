@@ -200,6 +200,7 @@
   - From P2.2:
     - `tls.ca_file` builds on `Executor::with_roots`. Lift `BuildError::Unsupported` for `tls.ca_file` and `tls.insecure`.
     - The crypto provider is decided: `ring`.
+    - When a request takes a pooled connection while a connect for it is still running, hyper-util finishes that connect in the background, and the connector has no timeout of its own. Bound it.
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
   - From P2.1:
     - The session's cookie jar, with `max_cookies` and `cookies: false`.
@@ -250,6 +251,7 @@
 
 - [ ] P6.1 Document metric names/units/windows; bounded histograms and label cardinality.
 - [ ] P6.2 Aggregate request/iteration time, scheduler/queue delay, achieved rates, errors, drop reasons and in-flight counts.
+  - From P2.2: `setup` goes to the first hop that asks for the connection's setup times. Under a shared pool, that may not be the hop that waited for the connection.
 - [ ] P6.3 Add optional sampled detailed events with redaction and finite capacity.
 - [ ] P6.4 Add assertions, performance thresholds, dropped-work thresholds and pass/fail policy.
 - [ ] P6.5 Add human-readable summary, versioned JSON output and deterministic exit-code mapping.
