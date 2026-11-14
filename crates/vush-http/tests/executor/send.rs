@@ -37,7 +37,19 @@ async fn echo_sees_the_exact_request() {
     assert_eq!(echo.target, "/v1/items?a%20b=1");
     assert_eq!(echo.values("x-test"), ["yes"]);
     assert_eq!(echo.values("x-rep"), ["1", "2"]);
-    assert_eq!(echo.values("user-agent"), ["vush/0.1.0"]);
+    assert_eq!(
+        echo.values("user-agent"),
+        [concat!("vush/", env!("CARGO_PKG_VERSION"))]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_user_agent_replaces_the_default() {
+    let addr = spawn_h1(echo).await;
+    let mut request = get(format!("http://{addr}/"));
+    request.headers = pairs(&[("User-Agent", "custom/1")]);
+    let echo = Echo::of(&send(&executor(HttpVersion::Auto), &request).await);
+    assert_eq!(echo.values("user-agent"), ["custom/1"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
