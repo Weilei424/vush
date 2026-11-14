@@ -201,6 +201,7 @@
     - `tls.ca_file` builds on `Executor::with_roots`. Lift `BuildError::Unsupported` for `tls.ca_file` and `tls.insecure`.
     - The crypto provider is decided: `ring`.
     - When a request takes a pooled connection while a connect for it is still running, hyper-util finishes that connect in the background, and the connector has no timeout of its own. Bound it.
+    - A hop that waits on a shared HTTP/2 connect that fails reports `connect` in `connect` ("the shared connection attempt failed"), not the kind the connect itself failed with, such as `tls`. P2.3 or P2.6 decides whether to pass the real kind on to the waiting hops.
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
   - From P2.1:
     - The session's cookie jar, with `max_cookies` and `cookies: false`.
