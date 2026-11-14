@@ -121,7 +121,7 @@ File-level `setup` runs once, before any scenario. File-level `teardown` runs on
 | `timeout` | duration | `30s` | For one physical attempt, including every redirect it follows. Longer than zero |
 | `redirects` | integer, 0 or more | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
 | `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user |
-| `max_response_size` | size | `1MiB` | Upper bound on the size of a response body |
+| `max_response_size` | size | `1MiB` | Upper bound on the size of a response body. A longer body is cut at the limit and marked `truncated`, and it still counts as a response |
 | `tls.ca_file` | path | none | Relative to the test file's directory. Read when the run starts |
 | `tls.insecure` | boolean | `false` | Skips certificate verification |
 
