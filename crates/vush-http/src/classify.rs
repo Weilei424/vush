@@ -3,17 +3,20 @@
 use std::error::Error;
 use std::io;
 
+use hyper_util::client::legacy::Error as ClientError;
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 
 use crate::connector::ConnectError;
 
 /// The fixed message of each kind `send` reports beyond `prepare` and the
-/// connector's own.
+/// connector's own. The connector reports its own `connect` failures, so
+/// this one is for a hop that waited for another hop's connect.
 fn message(kind: FailureKind) -> &'static str {
     match kind {
         FailureKind::Timeout => "the hop ran out of time",
         FailureKind::ConnectionClosed => "the connection closed before the response was complete",
         FailureKind::Protocol => "the response broke HTTP rules",
+        FailureKind::Connect => "the shared connection attempt failed",
         _ => "the request failed for an unclassified reason",
     }
 }
@@ -46,9 +49,13 @@ fn chain<'a>(error: &'a (dyn Error + 'static)) -> impl Iterator<Item = &'a (dyn 
 /// Classifies an error from hyper-util's client or a response body.
 ///
 /// The whole chain is searched for each cause in turn: a connector error,
-/// then an HTTP/2 error, then a hyper error, then an I/O error. A connector
-/// error keeps its own kind, in `prepare` for `invalid_request` (nothing was
-/// sent) and in `connect` otherwise. Every other failure is in `stage`.
+/// then a hyper-util connect error with no connector error beneath it, then
+/// an HTTP/2 error, then a hyper error, then malformed data, then any other
+/// I/O error.
+///
+/// A connector error keeps its own kind, in `prepare` for `invalid_request`
+/// (nothing was sent) and in `connect` otherwise. A connect error without
+/// one is `connect` in `connect`. Every other failure is in `stage`.
 pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Failure {
     if let Some(error) = chain(error).find_map(|e| e.downcast_ref::<ConnectError>()) {
         let stage = match error.kind {
@@ -60,6 +67,17 @@ pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Fa
             stage,
             message: error.message,
         };
+    }
+    // Under `http2`, hyper-util lets one hop per origin connect at a time,
+    // and the others wait for it. When that connect fails or goes away, each
+    // waiter gets a connect error that no connector error caused. The hop
+    // isn't sent again: the waiters would queue behind each new connect, and
+    // a cascade would settle only one of them per round.
+    if chain(error)
+        .filter_map(|e| e.downcast_ref::<ClientError>())
+        .any(ClientError::is_connect)
+    {
+        return failure(FailureKind::Connect, FailureStage::Connect);
     }
     if let Some(error) = chain(error).find_map(|e| e.downcast_ref::<h2::Error>()) {
         // A reset or GOAWAY the peer sent closes the stream or the
@@ -81,17 +99,45 @@ pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Fa
             return failure(FailureKind::ConnectionClosed, stage);
         }
     }
+    if chain(error).any(malformed) {
+        return failure(FailureKind::Protocol, stage);
+    }
     if chain(error).any(|e| e.is::<io::Error>()) {
         return failure(FailureKind::ConnectionClosed, stage);
     }
     failure(FailureKind::Other, stage)
 }
 
+/// Whether `error` is an I/O error for bytes that break the rules, such as
+/// the size line of a chunked body that isn't hex. tokio-rustls reports a
+/// broken TLS record the same way, so an error that wraps a TLS or a
+/// connector error isn't malformed data: TLS broke, not HTTP.
+fn malformed(error: &(dyn Error + 'static)) -> bool {
+    let Some(io) = error.downcast_ref::<io::Error>() else {
+        return false;
+    };
+    matches!(
+        io.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
+    ) && !chain(error)
+        .skip(1)
+        .any(|e| e.is::<rustls::Error>() || e.is::<ConnectError>())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use bytes::Bytes;
+    use http_body_util::Empty;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
 
     use super::*;
+    use crate::connector::Conn;
 
     /// An error of no known type, with an optional cause.
     #[derive(Debug)]
@@ -119,6 +165,62 @@ mod tests {
     ) -> (FailureKind, FailureStage) {
         let failure = classify(error, stage);
         (failure.kind, failure.stage)
+    }
+
+    /// A connector whose connects never finish.
+    #[derive(Clone)]
+    struct Stalled;
+
+    impl tower_service::Service<http::Uri> for Stalled {
+        type Response = Conn;
+        type Error = ConnectError;
+        type Future = Pin<Box<dyn Future<Output = Result<Conn, ConnectError>> + Send>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), ConnectError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: http::Uri) -> Self::Future {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Polls `future` once, so it runs as far as it can without waiting.
+    async fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
+    }
+
+    /// Under `http2`, hyper-util lets one request per origin connect at a
+    /// time, and the others wait for that connect. When it goes away, each
+    /// waiter gets a connect error with no `ConnectError` beneath it. Only
+    /// hyper-util can build that error, so its own client makes one here,
+    /// without a socket.
+    #[tokio::test]
+    async fn a_cancelled_wait_for_a_shared_connect_is_connect() {
+        let client: Client<Stalled, Empty<Bytes>> = Client::builder(TokioExecutor::new())
+            .http2_only(true)
+            .build(Stalled);
+        let request = || {
+            http::Request::get("http://127.0.0.1:1/")
+                .body(Empty::new())
+                .unwrap()
+        };
+        let mut owner = client.request(request());
+        let mut waiter = client.request(request());
+        // The first request starts the shared connect, and the second waits.
+        assert!(poll_once(&mut owner).await.is_pending());
+        assert!(poll_once(&mut waiter).await.is_pending());
+        drop(owner);
+        let error = waiter.await.expect_err("the shared connect went away");
+        assert!(error.is_connect());
+        assert_eq!(
+            classify(&error, FailureStage::Headers),
+            Failure {
+                kind: FailureKind::Connect,
+                stage: FailureStage::Connect,
+                message: "the shared connection attempt failed",
+            }
+        );
     }
 
     #[test]
@@ -178,6 +280,24 @@ mod tests {
     }
 
     #[test]
+    fn malformed_data_is_protocol_unless_tls_reported_it() {
+        for kind in [io::ErrorKind::InvalidData, io::ErrorKind::InvalidInput] {
+            let malformed = wrapped(io::Error::new(kind, "invalid chunk size line"));
+            assert_eq!(
+                kind_and_stage(&malformed, FailureStage::Body),
+                (FailureKind::Protocol, FailureStage::Body),
+                "{kind:?}"
+            );
+        }
+        // tokio-rustls reports a broken TLS record as invalid data.
+        let tls = io::Error::new(io::ErrorKind::InvalidData, rustls::Error::DecryptError);
+        assert_eq!(
+            kind_and_stage(&wrapped(tls), FailureStage::Body),
+            (FailureKind::ConnectionClosed, FailureStage::Body)
+        );
+    }
+
+    #[test]
     fn unknown_errors_are_other() {
         assert_eq!(
             kind_and_stage(&wrapped(Wrapper(None)), FailureStage::Headers),
@@ -194,6 +314,7 @@ mod tests {
                 "the connection closed before the response was complete",
             ),
             (FailureKind::Protocol, "the response broke HTTP rules"),
+            (FailureKind::Connect, "the shared connection attempt failed"),
             (
                 FailureKind::Other,
                 "the request failed for an unclassified reason",
