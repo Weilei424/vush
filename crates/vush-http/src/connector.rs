@@ -27,9 +27,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use vush_core::plan::HttpVersion;
-use vush_core::protocol::{ConnectionId, ConnectionSetup, FailureKind, FailureStage};
-
-use crate::stage::mark;
+use vush_core::protocol::{ConnectionId, ConnectionSetup, FailureKind};
 
 /// The next connection ID. Every connector in the process shares it, so IDs
 /// never repeat across executors.
@@ -182,7 +180,6 @@ impl Connector {
     }
 
     async fn connect(self, uri: Uri) -> Result<Conn, ConnectError> {
-        mark(FailureStage::Connect);
         let (host, port) = host_and_port(&uri)?;
 
         let (addrs, dns) = match &host {
@@ -377,12 +374,11 @@ mod tests {
     };
     use rustls::RootCertStore;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpSocket};
     use tokio_rustls::TlsAcceptor;
     use tower_service::Service;
 
     use super::*;
-    use crate::stage::{MARKER, StageMarker};
     use crate::tls::client_config;
 
     type Ca = CertifiedIssuer<'static, KeyPair>;
@@ -502,10 +498,22 @@ mod tests {
         addr
     }
 
-    /// An address on 127.0.0.1 where nothing listens any more.
-    async fn refused_addr() -> SocketAddr {
-        let listener = TcpListener::bind((LOCALHOST, 0)).await.unwrap();
-        listener.local_addr().unwrap()
+    /// A port on 127.0.0.1 that refuses every connection. Its socket is
+    /// bound but never listens, and it stays bound while the guard lives, so
+    /// no other test can take the port.
+    struct RefusedPort {
+        _socket: TcpSocket,
+        addr: SocketAddr,
+    }
+
+    fn refused_port() -> RefusedPort {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind(SocketAddr::new(LOCALHOST, 0)).unwrap();
+        let addr = socket.local_addr().unwrap();
+        RefusedPort {
+            _socket: socket,
+            addr,
+        }
     }
 
     fn connector(roots: RootCertStore, version: HttpVersion) -> Connector {
@@ -625,8 +633,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_port_fails_as_connect() {
-        let addr = refused_addr().await;
-        let error = connect_err(&mut plain(), &format!("http://{addr}/")).await;
+        let refused = refused_port();
+        let error = connect_err(&mut plain(), &format!("http://{}/", refused.addr)).await;
         assert_eq!(error, REFUSED);
     }
 
@@ -641,7 +649,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_resolved_name_is_timed_and_tried_address_by_address() {
-        let addrs = vec![refused_addr().await, tcp_server().await];
+        let refused = refused_port();
+        let addrs = vec![refused.addr, tcp_server().await];
         let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = asked.clone();
         let resolver: Resolver = Arc::new(move |host, port| {
@@ -709,35 +718,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_connector_marks_the_connect_stage() {
-        let url = format!("http://{}/", tcp_server().await);
-        let marker = StageMarker::new();
-        assert_eq!(marker.get(), FailureStage::Prepare);
-        let mut connector = plain();
-        MARKER
-            .scope(marker.clone(), connect(&mut connector, &url))
-            .await
-            .unwrap();
-        assert_eq!(marker.get(), FailureStage::Connect);
-    }
-
-    #[tokio::test]
     async fn connect_errors_hold_no_host_or_port() {
         let (roots, ca) = ca();
-        let refused = refused_addr().await;
+        let refused = refused_port();
         let untrusted = tls_server(self_signed_leaf(&localhost_san()), &[]).await;
         let other_name = [SanType::DnsName("other.test".try_into().unwrap())];
         let wrong_name = tls_server(leaf(&ca, &other_name), &[]).await;
         let no_h2 = tls_server(leaf(&ca, &localhost_san()), &[b"http/1.1"]).await;
 
         let mut errors = vec![
-            connect_err(&mut plain(), &format!("ftp://{refused}/")).await,
+            connect_err(&mut plain(), &format!("ftp://{}/", refused.addr)).await,
             connect_err(
                 &mut resolving(failing_resolver()),
                 "http://unresolvable.test/",
             )
             .await,
-            connect_err(&mut plain(), &format!("http://{refused}/")).await,
+            connect_err(&mut plain(), &format!("http://{}/", refused.addr)).await,
         ];
         for addr in [untrusted, wrong_name] {
             let mut connector = connector(roots.clone(), HttpVersion::Auto);
@@ -757,7 +753,8 @@ mod tests {
                 NO_HTTP2
             ]
         );
-        let ports = [refused, untrusted, wrong_name, no_h2].map(|addr| addr.port().to_string());
+        let ports =
+            [refused.addr, untrusted, wrong_name, no_h2].map(|addr| addr.port().to_string());
         for error in errors {
             assert_eq!(error.to_string(), error.message);
             let shown = format!("{error} {error:?}");
