@@ -118,8 +118,8 @@ File-level `setup` runs once, before any scenario. File-level `teardown` runs on
 |---|---|---|---|
 | `version` | `auto`, `http1` or `http2` | `auto` | `auto` negotiates the version with the server |
 | `pool` | `shared`, `scenario` or `vu` | `shared` | One connection pool for the whole run, one per scenario, or one per user. Sharing a pool never shares cookies or credentials |
-| `timeout` | duration | `30s` | For one physical attempt. Longer than zero |
-| `redirects` | integer, 0 or more | `5` | The most redirects to follow. `0` means don't follow |
+| `timeout` | duration | `30s` | For one physical attempt, including every redirect it follows. Longer than zero |
+| `redirects` | integer, 0 or more | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
 | `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user |
 | `max_response_size` | size | `1MiB` | Upper bound on the size of a response body |
 | `tls.ca_file` | path | none | Relative to the test file's directory. Read when the run starts |
@@ -271,7 +271,7 @@ A step list holds steps in order. A step is a map with exactly one key, which na
 |---|---|---|---|
 | `name` | string, a fixed label for metrics. `${` in it is an error | no | none |
 | `method` | an HTTP method: uppercase letters, digits and `-`, starting with a letter. Any method except `CONNECT` is allowed | yes | |
-| `path` or `url` | template; exactly one. `path` is joined to `base_url` and needs a `base_url`. `url` is used as written, must start with `http://` or `https://`, and can't hold a user name or password | yes | |
+| `path` or `url` | template; exactly one. `path` is joined to `base_url` with one `/` between them, and needs a `base_url`. `url` is used as written, must start with `http://` or `https://`, and can't hold a user name or password | yes | |
 | `query`, `headers` | map of string to template. `query` order is kept. For `headers`, see the rules below | no | empty |
 | `json`, `body` or `form` | a JSON value, a template, or a map of string to template; at most one | no | none |
 | `timeout` | duration, longer than zero | no | the step's `http.timeout` |
@@ -362,6 +362,56 @@ A condition is exactly one of:
 | `count` | integer, 1 or more | yes | |
 | `deadline` | duration, longer than zero. A time limit for the whole loop | no | `60s` |
 | `steps` | non-empty step list | yes | |
+
+## How requests are sent
+
+This section says what a request becomes on the wire. It holds for every step.
+
+### URLs
+
+- A URL is parsed the way browsers parse it. The scheme and host are lowercased, a space in the path becomes `%20`, and a non-ASCII host becomes punycode.
+- The scheme must be `http` or `https`, the host can't be empty, and the URL can't hold a user name or password.
+- A fragment (`#...`) is removed, because it is never sent.
+- A `base_url` can't hold a query or a fragment.
+- A `path` is joined to `base_url` by removing any trailing `/` from the base, any leading `/` from the path, and putting one `/` between them. An empty `path` gives the base itself, and a `path` can carry its own `?query`.
+
+| `base_url` | `path` | URL sent |
+|---|---|---|
+| `https://api.test/v1` | `/users` | `https://api.test/v1/users` |
+| `https://api.test/v1/` | `users` | `https://api.test/v1/users` |
+| `https://api.test` | `/users?active=1` | `https://api.test/users?active=1` |
+| `https://api.test/v1` | empty | `https://api.test/v1` |
+
+### Query, body and headers
+
+- `query` pairs are added in order as `name=value` joined with `&`, after a `?`, or after a `&` when the URL already has a query. Names and values are percent-encoded, so a space becomes `%20`.
+- `json` is sent compact, with members in their given order. Integers are exact, and non-ASCII text is sent as UTF-8.
+- `form` is sent as `application/x-www-form-urlencoded`, and a space becomes `+`.
+- `body` is sent as its UTF-8 bytes.
+- `Content-Type` is added when there is a body and the request has none: `application/json` for `json`, `application/x-www-form-urlencoded` for `form` and `text/plain; charset=utf-8` for `body`.
+- `User-Agent: vush/<version>` is added when the request has none.
+- No `Accept-Encoding` is sent, so a server normally sends the body uncompressed. Vush never decompresses a body.
+- Repeats of one header name are sent in their given order. The order across different names isn't kept.
+
+### Redirects
+
+On a followed redirect, the next request's method and body depend on the status:
+
+| Status | Method | Body |
+|---|---|---|
+| `303` | `GET`, except that `HEAD` stays `HEAD` | dropped |
+| `301`, `302` | `POST` becomes `GET`, any other method is kept | dropped for `POST`, kept otherwise |
+| `307`, `308` | kept | kept |
+
+When the body is dropped, the `Content-Type` header is dropped too. The `Location` is resolved against the URL that was sent, and it must follow the URL rules above. Two `Location` headers, one that can't be parsed, or one that fails those rules fails the attempt with `invalid_redirect`. The next request keeps the original headers, except those dropped for another origin (see `redirects` in [`http`](#http)).
+
+### Values from variables
+
+What a variable supplies is checked when the request is sent, with the same rules as a literal value. A request that breaks one fails as `invalid_request`, and nothing is sent.
+
+### HTTP versions
+
+`version: http1` always uses HTTP/1.1. `version: http2` needs the server's agreement over TLS: a server that refuses `h2`, or that picks no protocol, fails the request as `tls`. Over plaintext, `http2` speaks HTTP/2 without negotiation. `version: auto` uses HTTP/2 over TLS when the server picks it, and HTTP/1.1 otherwise.
 
 ## `thresholds`
 
