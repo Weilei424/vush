@@ -12,8 +12,14 @@
 // Nothing outside the tests calls these until `send` lands (plan Task 6), and
 // unused code is a warning. Task 6 drops the `cfg(test)`.
 #[cfg(test)]
+mod connector;
+#[cfg(test)]
 mod follow;
 #[cfg(test)]
 mod json;
 #[cfg(test)]
 mod prepare;
+#[cfg(test)]
+mod stage;
+#[cfg(test)]
+mod tls;
