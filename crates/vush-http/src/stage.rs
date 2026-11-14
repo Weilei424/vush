@@ -2,6 +2,10 @@
 //!
 //! `send` sets [`MARKER`] around the hop's future. Code that runs inside that
 //! task, such as the connector, moves it with [`mark`].
+//!
+//! A marker only moves forward, in the order `prepare`, `connect`, `headers`,
+//! `body`. So a late move, such as the connector's when hyper-util retries a
+//! request on a new connection, can't take a hop back to an earlier stage.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -9,7 +13,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use vush_core::protocol::FailureStage;
 
 /// A hop's current stage, shared between the hop and the code it drives.
-/// Clones share one stage.
+/// Clones share one stage, and it only moves forward.
 #[derive(Clone)]
 pub(crate) struct StageMarker(Arc<AtomicU8>);
 
@@ -19,8 +23,9 @@ impl StageMarker {
         Self(Arc::new(AtomicU8::new(encode(FailureStage::Prepare))))
     }
 
+    /// Moves to `stage`, unless the marker is already past it.
     pub(crate) fn set(&self, stage: FailureStage) {
-        self.0.store(encode(stage), Ordering::Relaxed);
+        self.0.fetch_max(encode(stage), Ordering::Relaxed);
     }
 
     pub(crate) fn get(&self) -> FailureStage {
@@ -33,6 +38,7 @@ impl StageMarker {
     }
 }
 
+/// Stages in the order a hop goes through them.
 fn encode(stage: FailureStage) -> u8 {
     match stage {
         FailureStage::Prepare => 0,
@@ -47,8 +53,8 @@ tokio::task_local! {
     pub(crate) static MARKER: StageMarker;
 }
 
-/// Moves the running hop's marker to `stage`. Outside a hop's task, as when
-/// hyper-util finishes a connect in the background, it does nothing.
+/// Moves the running hop's marker forward to `stage`. Outside a hop's task,
+/// as when hyper-util finishes a connect in the background, it does nothing.
 pub(crate) fn mark(stage: FailureStage) {
     // An error only means no marker is in scope.
     let _ = MARKER.try_with(|marker| marker.set(stage));
@@ -67,6 +73,18 @@ mod tests {
             clone.set(stage);
             assert_eq!(marker.get(), stage);
         }
+    }
+
+    #[test]
+    fn a_marker_never_moves_backwards() {
+        let marker = StageMarker::new();
+        marker.set(FailureStage::Headers);
+        for earlier in [FailureStage::Connect, FailureStage::Prepare] {
+            marker.set(earlier);
+            assert_eq!(marker.get(), FailureStage::Headers, "{earlier:?}");
+        }
+        marker.set(FailureStage::Body);
+        assert_eq!(marker.get(), FailureStage::Body);
     }
 
     #[test]
