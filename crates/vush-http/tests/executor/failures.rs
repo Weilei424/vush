@@ -1,6 +1,7 @@
 //! Hops that fail, each from a real cause, with the exact kind and stage.
 //! None of them may land on `other`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::RootCertStore;
@@ -41,6 +42,27 @@ async fn a_handshake_that_never_finishes_times_out_in_connect() {
     .await;
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
     assert_eq!(hop.connection, None);
+}
+
+/// Under `http2`, hyper-util opens one connection per origin at a time. The
+/// second hop never runs the connector: it waits for the first hop's connect,
+/// which never finishes. It is still waiting for a connection, not preparing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hop_waiting_for_a_shared_http2_connect_times_out_in_connect() {
+    let addr = spawn_raw(hold).await;
+    let executor = Arc::new(trusting(&TestCa::generate(), HttpVersion::Http2));
+    let hops = [(), ()].map(|()| {
+        let executor = executor.clone();
+        let request = get(format!("https://{addr}/"));
+        tokio::spawn(
+            async move { send_within(&executor, &request, Duration::from_millis(500)).await },
+        )
+    });
+    for hop in hops {
+        let hop = hop.await.unwrap();
+        assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
+        assert_eq!(hop.connection, None);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
