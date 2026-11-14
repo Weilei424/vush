@@ -12,7 +12,9 @@ workspace = true
 
 [dependencies]
 bytes = { workspace = true }
+h2 = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 percent-encoding = { workspace = true }
@@ -25,5 +27,7 @@ url = { workspace = true }
 vush-core = { workspace = true }
 
 [dev-dependencies]
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["server", "server-auto", "tokio"] }
 rcgen = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
