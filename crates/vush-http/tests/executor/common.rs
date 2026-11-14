@@ -146,7 +146,11 @@ pub struct Echo {
 
 impl Echo {
     pub fn of(hop: &HttpHop) -> Self {
-        let bytes = &response(hop).body;
+        Self::of_response(response(hop))
+    }
+
+    pub fn of_response(response: &HttpResponse) -> Self {
+        let bytes = &response.body;
         let blank = bytes
             .windows(2)
             .position(|pair| pair == b"\n\n")
