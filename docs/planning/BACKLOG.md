@@ -186,7 +186,7 @@
   - [x] Validate-time header, URL and method checks (plan Task 2).
   - [x] Request preparation and JSON encoding in `vush-http` (plan Task 3).
   - [x] `follow` (plan Task 4).
-  - [ ] The connector and TLS (plan Task 5).
+  - [x] The connector and TLS (plan Task 5).
   - [ ] The executor and `send`, tested against in-process servers (plan Task 6).
   - [ ] Redirects end to end through `run_attempt` (plan Task 7).
   - [ ] Schema doc, architecture notes and local docs (plan Task 8).
