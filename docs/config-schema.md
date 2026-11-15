@@ -118,7 +118,7 @@ File-level `setup` runs once, before any scenario. File-level `teardown` runs on
 |---|---|---|---|
 | `version` | `auto`, `http1` or `http2` | `auto` | `auto` negotiates the version with the server |
 | `pool` | `shared`, `scenario` or `vu` | `shared` | One connection pool for the whole run, one per scenario, or one per user. Sharing a pool never shares cookies or credentials |
-| `timeout` | duration | `30s` | For one physical attempt, including every redirect it follows. Longer than zero |
+| `timeout` | duration | `30s` | For one physical attempt, including every redirect it follows and the time spent preparing each request. Longer than zero |
 | `redirects` | integer, 0 or more | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
 | `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user |
 | `max_response_size` | size | `1MiB` | Upper bound on the size of a response body. A longer body is cut at the limit and marked `truncated`, and it still counts as a response |
@@ -392,6 +392,7 @@ This section says what a request becomes on the wire. It holds for every step.
 - `User-Agent: vush/<version>` is added when the request has none.
 - No `Accept-Encoding` is sent, so a server normally sends the body uncompressed. Vush never decompresses a body.
 - Repeats of one header name are sent in their given order. The order across different names isn't kept.
+- A request holds at most 24,568 header names, counting an added `Content-Type` or `User-Agent`. With more, it fails as `invalid_request`, and nothing is sent.
 
 ### Redirects
 
