@@ -14,6 +14,9 @@ pub const DEFAULT_REPEAT_DEADLINE: Duration = Duration::from_secs(60);
 /// The fixed delay between retry attempts when `backoff` is not set.
 pub const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
+/// The most attempts one request step may make, the first included.
+pub const MAX_RETRY_ATTEMPTS: u32 = 10;
+
 const METHOD_EXPECTED: &str = "an HTTP method such as GET, POST or M-SEARCH (uppercase A-Z, 0-9 and -, starting with a letter)";
 
 /// One step of a step list.
@@ -34,6 +37,14 @@ impl HttpMethod {
     /// The method as written, e.g. `GET`.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether the method is GET, HEAD, PUT, DELETE, OPTIONS or TRACE.
+    pub fn is_idempotent(&self) -> bool {
+        matches!(
+            self.0.as_str(),
+            "GET" | "HEAD" | "PUT" | "DELETE" | "OPTIONS" | "TRACE"
+        )
     }
 }
 
@@ -106,7 +117,7 @@ pub struct RequestStep {
 /// Retries of one request step. Every attempt counts as a physical attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPolicy {
-    /// Total attempts, including the first.
+    /// Total attempts, including the first: 2 to `MAX_RETRY_ATTEMPTS`.
     pub attempts: u32,
     /// A fixed delay between attempts.
     pub backoff: Duration,
@@ -228,6 +239,22 @@ mod tests {
         );
         assert_eq!(DEFAULT_REPEAT_DEADLINE, Duration::from_secs(60));
         assert_eq!(DEFAULT_RETRY_BACKOFF, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn idempotent_methods_are_the_six() {
+        for text in ["GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"] {
+            assert!(
+                text.parse::<HttpMethod>().unwrap().is_idempotent(),
+                "{text}"
+            );
+        }
+        for text in ["POST", "PATCH", "PURGE", "M-SEARCH"] {
+            assert!(
+                !text.parse::<HttpMethod>().unwrap().is_idempotent(),
+                "{text}"
+            );
+        }
     }
 
     #[test]
