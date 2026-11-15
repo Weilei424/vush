@@ -19,10 +19,13 @@ use crate::protocol::http::{HttpHop, HttpRequest, HttpResponse};
 /// 1. **One hop per call.** `send` sends exactly one request on the wire, or
 ///    none when it fails in `prepare`. It never follows a redirect and never
 ///    retries.
-/// 2. **Finite time.** `send` finishes within `timeout`, which covers
+/// 2. **Finite time.** `timeout` covers the whole hop: preparing the request,
 ///    connecting, sending, the response head and the body. A hop that runs out
-///    of time ends with a `timeout` failure. A zero `timeout` fails with
-///    `timeout` in `prepare`, without sending anything.
+///    of time ends with a `timeout` failure. Only preparing can run past
+///    `timeout`, because it is synchronous and can't be cut short: a hop whose
+///    preparation used up the time fails with `timeout` in `prepare` as soon
+///    as it is done, without sending anything. A zero `timeout` fails the same
+///    way before preparing.
 /// 3. **No panics on input.** Nothing a server or the network does, and
 ///    nothing in a request (for example a header value holding `\r\n`), makes
 ///    `send` or `follow` panic. Every problem comes back as a [`Failure`].
