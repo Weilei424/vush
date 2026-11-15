@@ -11,13 +11,16 @@
 //!
 //! # Building an executor
 //!
-//! [`Executor::new`] builds one from a plan's [`HttpSettings`] and trusts the
-//! system's root certificates. [`Executor::with_roots`] trusts exactly the
-//! roots it is given. Either fails with a [`BuildError`] for settings that
-//! aren't supported yet. An executor needs no runtime to be built, but `send`
-//! must run inside a Tokio runtime.
+//! [`Executor::new`] builds one from a plan's [`HttpSettings`] and the test
+//! file's directory. It trusts the system's root certificates plus those in
+//! `tls.ca_file`, which is resolved against that directory.
+//! [`Executor::with_roots`] takes a stand-in for the system's roots. Either
+//! fails with a [`BuildError`] when `tls.ca_file` can't be used, and `new`
+//! also when no root is trusted. An executor needs no runtime to be built,
+//! but `send` must run inside a Tokio runtime.
 //!
 //! ```no_run
+//! use std::path::Path;
 //! use std::time::Duration;
 //!
 //! use vush_core::plan::HttpSettings;
@@ -25,7 +28,7 @@
 //! use vush_http::Executor;
 //!
 //! # async fn run() -> Result<(), vush_http::BuildError> {
-//! let executor = Executor::new(&HttpSettings::default())?;
+//! let executor = Executor::new(&HttpSettings::default(), Path::new("."))?;
 //! let mut session = executor.new_session();
 //! let request = HttpRequest {
 //!     method: "GET".parse().expect("GET is a method"),
@@ -56,4 +59,4 @@ mod prepare;
 mod stage;
 mod tls;
 
-pub use executor::{BuildError, Executor, Session};
+pub use executor::{BuildError, CaFileProblem, Executor, Scope, Session};
