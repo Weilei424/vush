@@ -6,14 +6,15 @@ use std::time::Duration;
 
 use rustls::RootCertStore;
 use vush_core::plan::HttpVersion;
-use vush_core::protocol::http::HttpBody;
+use vush_core::protocol::http::{HttpBody, HttpRequest};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 use vush_http::{BuildError, Executor};
 
 use crate::common::{
     CountingListener, LOCALHOST, MIB, TestCa, close_after_head, echo, executor, failure,
     garbage_status, get, h2_reset_after_one_frame, hold, malformed_chunk, pairs, refused_port,
-    send, send_within, settings, silent_after_head, spawn_raw, spawn_tls, stalled_body, trusting,
+    send, send_within, settings, silent_after_head, spawn_auto, spawn_raw, spawn_tls, stalled_body,
+    trusting,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -220,6 +221,82 @@ async fn invalid_requests_send_nothing() {
         assert_eq!(hop.sizes.sent, 0);
         assert_eq!(hop.connection, None);
     }
+    assert_eq!(listener.accepted().await, 0);
+}
+
+/// How many header names an `http::HeaderMap` holds.
+fn header_capacity() -> usize {
+    let mut map = http::HeaderMap::new();
+    let mut held = 0;
+    loop {
+        let name = http::HeaderName::from_bytes(format!("x-{held}").as_bytes()).unwrap();
+        if map
+            .try_append(name, http::HeaderValue::from_static("v"))
+            .is_err()
+        {
+            return held;
+        }
+        held += 1;
+    }
+}
+
+fn with_distinct_headers(url: String, count: usize) -> HttpRequest {
+    let mut request = get(url);
+    request.headers = (0..count).map(|n| (format!("x-{n}"), "v".into())).collect();
+    request
+}
+
+/// `prepare` keeps 8 places in the header map for the headers hyper adds,
+/// and the user agent takes one more.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_with_too_many_headers_fails_in_prepare() {
+    let most = header_capacity() - 8 - 1;
+    let listener = CountingListener::bind().await;
+    let request = with_distinct_headers(format!("http://{}/", listener.addr), most + 1);
+    let hop = send(&executor(HttpVersion::Auto), &request).await;
+    assert_eq!(
+        failure(&hop),
+        (FailureKind::InvalidRequest, FailureStage::Prepare)
+    );
+    assert_eq!(hop.connection, None);
+    assert_eq!(listener.accepted().await, 0);
+
+    // The most a request can hold reaches hyper, which adds its own headers
+    // without a panic. The server refuses so many: HTTP/1.1 answers `431`,
+    // or resets while the headers are still being written, and HTTP/2
+    // resets the stream.
+    let addr = spawn_auto(echo).await;
+    for version in [HttpVersion::Http1, HttpVersion::Http2] {
+        let request = with_distinct_headers(format!("http://{addr}/"), most);
+        let hop = send(&executor(version), &request).await;
+        assert!(hop.connection.is_some(), "{version:?}");
+        match &hop.outcome {
+            Ok(response) => assert_eq!(response.status, 431, "{version:?}"),
+            Err(error) => assert_eq!(error.kind, FailureKind::ConnectionClosed, "{version:?}"),
+        }
+    }
+}
+
+/// `prepare` can't be cut short, so its time is charged once it is done.
+/// Copying a 4 MiB body takes far longer than the microsecond allowed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prepare_that_uses_up_the_timeout_fails_in_prepare() {
+    let listener = CountingListener::bind().await;
+    let mut request = get(format!("http://{}/", listener.addr));
+    request.body = Some(HttpBody::Text("x".repeat(4 * MIB as usize)));
+    let executor = executor(HttpVersion::Auto);
+    let hop = send_within(&executor, &request, Duration::from_micros(1)).await;
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Prepare));
+    assert_eq!(hop.sizes.sent, 0);
+    assert_eq!(hop.connection, None);
+
+    // A request that fails its checks says so, however long they took.
+    let ftp = get(format!("ftp://{}/", listener.addr));
+    let hop = send_within(&executor, &ftp, Duration::from_micros(1)).await;
+    assert_eq!(
+        failure(&hop),
+        (FailureKind::InvalidRequest, FailureStage::Prepare)
+    );
     assert_eq!(listener.accepted().await, 0);
 }
 
