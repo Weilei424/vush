@@ -102,6 +102,24 @@ fn rows() -> Vec<Row> {
             "in total",
         ),
         row(
+            "TooManyAttempts",
+            file(
+                BASE,
+                LOAD,
+                &get("          retry:\n            attempts: 11\n"),
+            ),
+            "scenarios[0].steps[0].request.retry.attempts",
+            "attempts: 11",
+            "at most 10",
+        ),
+        row(
+            "RedirectsTooHigh",
+            file(&top("http: {redirects: 21}\n"), LOAD, &get("")),
+            "http.redirects",
+            "redirects: 21",
+            "at most 20",
+        ),
+        row(
             "TooFewAttempts",
             file(
                 BASE,
