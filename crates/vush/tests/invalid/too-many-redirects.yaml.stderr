@@ -1,0 +1,5 @@
+error: `redirects` must be at most 20
+  --> too-many-redirects.yaml:4:20
+   = at http.redirects
+
+too-many-redirects.yaml: not valid, 1 problem
