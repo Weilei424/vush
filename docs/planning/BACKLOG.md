@@ -196,18 +196,28 @@
     - The whole hop, preparing included, runs against one deadline. The `HttpExecutor` contract says only preparing can run past `timeout`.
     - The refused-port test fixtures hold a loopback connection open, so a connect is refused on macOS too instead of timing out.
   - [x] CI green on all four runners after the user pushes (plan Task 8). Run 43666322885 on `77a1eed`, 2026-11-14.
-- [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on.
-  - From P2.1:
-    - Build executors per settings profile, and keep the `pool: vu` pool in the session.
-    - Decide whether to enforce that a session is only used with the executor that made it, for example with an executor ID in the session that fails fast. Under `pool: vu` a session holds connections built with its executor's settings.
-    - Core's attempt loop decides which failure kinds and statuses are retried, and where the backoff sleeps. Core needs a timer for that.
-    - Decide whether `retry.attempts` and `redirects` need upper bounds, because records grow with them.
-  - From P2.2:
-    - `tls.ca_file` builds on `Executor::with_roots`. Lift `BuildError::Unsupported` for `tls.ca_file` and `tls.insecure`.
-    - The crypto provider is decided: `ring`.
-    - When a request takes a pooled connection while a connect for it is still running, hyper-util finishes that connect in the background, and the connector has no timeout of its own. Bound it.
-    - A hop that waits on a shared HTTP/2 connect that fails reports `connect` in `connect` ("the shared connection attempt failed"), not the kind the connect itself failed with, such as `tls`. P2.3 or P2.6 decides whether to pass the real kind on to the waiting hops.
+- [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on (design approved 2026-11-15).
+  - Spec: `docs/superpowers/specs/2026-11-15-phase-2-3-pools-tls-retries-design.md` · Plan: `docs/superpowers/plans/2026-11-15-phase-2-3-pools-tls-retries.md` (local only).
+  - Decided 2026-11-15:
+    - **`tls.ca_file` adds to the system's roots.** `SSL_CERT_FILE` and `SSL_CERT_DIR` already replace the system store. The file is read once, is at most 1 MiB, and must hold only usable certificates. `insecure` wins over `ca_file`, which is then not read.
+    - **`pool: shared` shares by connection profile:** the HTTP version plus the trust (the system's roots, the system's roots plus one `ca_file`, or `insecure`). Profiles that differ never share a connection.
+    - **`pool: scenario`** gives each scenario one pool for its steps and hooks, and the file-level hooks one more. **`pool: vu`** puts the pool in the session, and copies of a session share it.
+    - **One builder per run:** `vush_http::Executors::new(&plan, test_dir)`. `BuildError::Unsupported` goes away.
+    - **A session belongs to its executor** (answers P2.1's question). Another executor's session fails at once with `invalid_request` in `prepare`.
+    - **Time bounds:** idle connections close after 90 s. Background connects are bounded by the longest attempt timeout of the requests the pool serves.
+    - **Retries** run in `vush_core::runner::run_step`, which sleeps through a `Timer` trait that core defines. A `5xx`, or any failure except `invalid_request`, `invalid_redirect` and `too_many_redirects`, is retried. Each attempt gets the full `timeout`, starts again from the original request, and uses the same session. There is no backoff after the last attempt.
+    - **Caps:** `retry.attempts` is at most 10 and `redirects` at most 20, checked by `vush validate`. A step records at most 210 hops.
+    - **Deferred:** the waiting hops' real kind after a failed shared connect (P2.6), retry accounting against `rate` (P5.1), and any backoff other than a fixed one.
+  - [ ] The caps on `retry.attempts` and `redirects`, and `HttpMethod::is_idempotent` (plan Task 1).
+  - [ ] Core's attempt loop, `run_step`, with an injected timer (plan Task 2).
+  - [ ] `tls.ca_file` and `tls.insecure` on the lone executor (plan Task 3).
+  - [ ] The connector's connect limit (plan Task 4).
+  - [ ] Sessions that belong to their executor, and `pool: vu` (plan Task 5).
+  - [ ] `Executors`, with pools shared by profile across a plan (plan Task 6).
+  - [ ] Retries end to end, and the architecture notes (plan Task 7).
+  - [ ] CI green on all four runners after the user pushes (plan Task 7).
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
+  - From P2.3: the session already holds its executor's ID and, under `pool: vu`, the user's pool. The jar joins them there.
   - From P2.1:
     - The session's cookie jar, with `max_cookies` and `cookies: false`.
     - What happens when a request carries its own `Cookie` header.
@@ -222,6 +232,7 @@
     - Vush never sends `Accept-Encoding` and never decompresses. Decide whether that changes, with limits on decompression.
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
+  - From P2.3: a hop that waits on a shared HTTP/2 connect that fails still reports `connect` in `connect` ("the shared connection attempt failed"). Decide whether to pass the connect's real kind, such as `tls`, on to the waiting hops.
   - From P2.2: tests never ask a real resolver, so a `dns` failure from a real cause needs a controlled one. Decide whether the connector's private resolver seam becomes public.
 
 ## Phase 3 Execution Checklist — Scenario interpreter
