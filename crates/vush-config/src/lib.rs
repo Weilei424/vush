@@ -105,6 +105,8 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         | PlanErrorKind::IdleRamp
                         | PlanErrorKind::ZeroLengthRamp
                         | PlanErrorKind::TooFewAttempts
+                        | PlanErrorKind::TooManyAttempts
+                        | PlanErrorKind::RedirectsTooHigh
                         | PlanErrorKind::RetryNeedsOptIn
                         | PlanErrorKind::StatusOutOfRange
                         | PlanErrorKind::EmptyStatus
