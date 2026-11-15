@@ -44,13 +44,17 @@ fn invalid(message: &'static str) -> Failure {
     }
 }
 
-/// Places `prepare` keeps free in the header map for the headers hyper and
-/// hyper-util add later, such as `Host` and `Content-Length`. They add them
-/// with calls that panic when the map is full.
-pub(crate) const ROOM_FOR_HYPER: usize = 8;
+/// The most header names a request holds of its own, until P2.5 sets the
+/// real limit. Repeats of one name count once, and the `Content-Type` and
+/// `User-Agent` that `prepare` adds don't count.
+///
+/// hyper and hyper-util add `Host` and `Content-Length` with calls that
+/// panic if `http::HeaderMap` would have to grow past its largest size,
+/// 32,768 slots. Names that collide in its hash make it grow early, but past
+/// that size only once it holds 6,554 names, a fifth of its slots. This
+/// limit keeps every request far below that.
+pub(crate) const MAX_HEADER_NAMES: usize = 4096;
 
-/// `http`'s header map holds a fixed number of names, and panics past it
-/// unless it is asked to fail.
 fn too_many() -> Failure {
     invalid("the request has too many headers")
 }
@@ -125,6 +129,9 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
         // `from_bytes` refuses 0x00-0x1F except tab, and 0x7F.
         let value = HeaderValue::from_bytes(value.as_bytes())
             .map_err(|_| invalid("a header value holds a control character"))?;
+        if headers.keys_len() == MAX_HEADER_NAMES && !headers.contains_key(&name) {
+            return Err(too_many());
+        }
         headers.try_append(name, value).map_err(|_| too_many())?;
     }
 
@@ -162,9 +169,6 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
             )
             .map_err(|_| too_many())?;
     }
-    headers
-        .try_reserve(ROOM_FOR_HYPER)
-        .map_err(|_| too_many())?;
 
     let uri = url
         .as_str()
@@ -181,6 +185,7 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     use vush_core::plan::JsonNumber;
     use vush_core::protocol::JsonValue;
 
@@ -415,69 +420,120 @@ mod tests {
         }
     }
 
-    /// How many header names an `http::HeaderMap` holds. Past that, its
-    /// `append` and `insert` panic.
-    fn header_capacity() -> usize {
-        let mut map = HeaderMap::new();
-        let mut held = 0;
-        loop {
-            let name = HeaderName::from_bytes(format!("x-{held}").as_bytes()).unwrap();
-            if map.try_append(name, HeaderValue::from_static("v")).is_err() {
-                return held;
-            }
-            held += 1;
-        }
-    }
-
-    fn distinct_headers(count: usize) -> HttpRequest {
+    fn with_names<S: AsRef<str>>(names: &[S]) -> HttpRequest {
         let mut r = absolute("https://h/");
-        r.headers = (0..count).map(|n| (format!("x-{n}"), "v".into())).collect();
+        r.headers = names
+            .iter()
+            .map(|name| (name.as_ref().to_owned(), "v".into()))
+            .collect();
         r
     }
 
-    /// Fills the places kept for hyper with the same panicking call hyper
-    /// uses.
-    fn fill_room_for_hyper(headers: &mut HeaderMap) {
-        for n in 0..ROOM_FOR_HYPER {
-            let name = HeaderName::from_bytes(format!("hyper-{n}").as_bytes()).unwrap();
-            headers.insert(name, HeaderValue::from_static("v"));
+    fn distinct_names(count: usize) -> Vec<String> {
+        (0..count).map(|n| format!("x-{n}")).collect()
+    }
+
+    /// The hash `http::HeaderMap` gives a custom name until it switches to a
+    /// keyed hash: FNV-1a over what `HeaderName` hashes (its enum tag, then
+    /// its bytes), cut to 15 bits.
+    fn map_hash(name: &str) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for &byte in 1isize.to_ne_bytes().iter().chain(name.as_bytes()) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
+        hash & 0x7fff
+    }
+
+    fn names_hashing_to(prefix: &str, hash: u64, count: usize) -> Vec<String> {
+        let mut name = String::new();
+        let mut found = Vec::new();
+        for n in 0.. {
+            name.clear();
+            write!(name, "{prefix}-{n}").unwrap();
+            if map_hash(&name) == hash {
+                found.push(name.clone());
+                if found.len() == count {
+                    break;
+                }
+            }
+        }
+        found
+    }
+
+    /// `count` header names, the request's own `User-Agent` among them,
+    /// that leave the map in its danger state. 140 names hash to the slot
+    /// after `SLOT` and fill one run of slots. Two names hash to `SLOT`: the
+    /// first takes it, and the last takes the run's first slot and shifts
+    /// the whole run, so the map's next insert must grow it. The other names
+    /// keep clear of those slots at every size the map takes.
+    fn names_that_shift_a_run(count: usize) -> Vec<String> {
+        const SLOT: u64 = 0x1234;
+        let clear = |hash: u64| {
+            [0x1fff, 0x3fff, 0x7fff]
+                .iter()
+                .all(|mask| !(SLOT - 256..SLOT + 512).contains(&(hash & mask)))
+        };
+        let run = names_hashing_to("a", SLOT + 1, 140);
+        let shift = names_hashing_to("b", SLOT, 2);
+        let mut names = vec!["user-agent".to_owned()];
+        names.extend(
+            (0..)
+                .map(|n| format!("x-{n}"))
+                .filter(|name| clear(map_hash(name)))
+                .take(count - 1 - run.len() - shift.len()),
+        );
+        names.extend(run);
+        names.extend(shift);
+        names
+    }
+
+    /// What hyper-util and hyper do to the map after `prepare`, with the
+    /// same calls, which panic when the map can't grow.
+    fn add_like_hyper(headers: &mut HeaderMap) {
+        headers
+            .entry(http::header::HOST)
+            .or_insert_with(|| HeaderValue::from_static("h"));
+        let _ = headers.entry(http::header::TRANSFER_ENCODING);
+        headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from(1u64));
+        headers
+            .entry(http::header::CONTENT_LENGTH)
+            .or_insert_with(|| HeaderValue::from(1u64));
     }
 
     #[test]
-    fn a_request_with_too_many_headers_is_refused() {
-        let most = header_capacity() - ROOM_FOR_HYPER;
+    fn a_request_holds_at_most_the_header_name_limit() {
         let too_many = invalid("the request has too many headers");
+        let most = MAX_HEADER_NAMES;
 
-        // The user agent takes the last place, and hyper's places stay free.
-        let mut p = prepare(&distinct_headers(most - 1)).unwrap();
-        assert_eq!(p.headers.keys_len(), most);
-        fill_room_for_hyper(&mut p.headers);
-        // A repeated name takes no new place.
-        let mut r = distinct_headers(most - 1);
+        // The content type and the user agent don't count, and neither do
+        // repeats of one name.
+        let mut r = with_names(&distinct_names(most));
         r.headers.push(("x-0".into(), "again".into()));
-        assert_eq!(prepare(&r).unwrap().headers.len(), most + 1);
-        // The content type and the user agent take the last two.
-        let mut r = distinct_headers(most - 2);
         r.body = Some(HttpBody::Text("t".into()));
-        let mut p = prepare(&r).unwrap();
-        assert_eq!(p.headers.keys_len(), most);
-        fill_room_for_hyper(&mut p.headers);
+        let p = prepare(&r).unwrap();
+        assert_eq!(p.headers.keys_len(), most + 2);
+        assert_eq!(p.headers.len(), most + 3);
 
-        // One too many: no room left for hyper, then no place for the
-        // content type, for the user agent, and for one of the request's
-        // own headers.
-        let mut type_too_many = distinct_headers(most - 1);
-        type_too_many.body = Some(HttpBody::Text("t".into()));
-        let cases = [
-            distinct_headers(most),
-            type_too_many,
-            distinct_headers(most + ROOM_FOR_HYPER),
-            distinct_headers(most + ROOM_FOR_HYPER + 1),
-        ];
-        for (n, r) in cases.iter().enumerate() {
-            assert_eq!(prepare(r).err().unwrap(), too_many, "case {n}");
-        }
+        let mut over = distinct_names(most + 1);
+        assert_eq!(prepare(&with_names(&over)).err().unwrap(), too_many);
+        // The name past the limit is refused even after a repeat.
+        over.insert(most, "x-0".into());
+        assert_eq!(prepare(&with_names(&over)).err().unwrap(), too_many);
+    }
+
+    /// Hyper's calls panic when the map would grow past its largest size.
+    /// The map grows early once its names collide, but even then only at
+    /// 6,554 names or more, and the limit stays far below that.
+    #[test]
+    fn colliding_header_names_leave_hyper_room() {
+        let mut p = prepare(&with_names(&names_that_shift_a_run(MAX_HEADER_NAMES))).unwrap();
+        let before = p.headers.capacity();
+        assert!(p.headers.keys_len() < before);
+        add_like_hyper(&mut p.headers);
+        // Only the danger state grows a map that still had room.
+        assert!(p.headers.capacity() > before);
+        assert_eq!(p.headers.keys_len(), MAX_HEADER_NAMES + 2);
     }
 
     #[test]
