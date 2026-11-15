@@ -125,6 +125,11 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
         &root.key("http").key("timeout"),
         &mut errors,
     );
+    values::redirects(
+        draft.http.redirects,
+        &root.key("http").key("redirects"),
+        &mut errors,
+    );
     let limits = root.key("limits");
     values::duration(
         draft.limits.hook_timeout,
@@ -220,6 +225,13 @@ fn check_scenario<'a>(
         &at.key("http").key("timeout"),
         errors,
     );
+    if scenario.http.redirects != draft.http.redirects {
+        values::redirects(
+            scenario.http.redirects,
+            &at.key("http").key("redirects"),
+            errors,
+        );
+    }
     let limits = at.key("limits");
     values::inherited(
         scenario.limits.hook_timeout,
@@ -998,9 +1010,86 @@ mod tests {
             );
             assert!(errors(&retrying(method, 2, true)).is_empty(), "{method}");
         }
-        for method in values::IDEMPOTENT {
+        for method in ["GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"] {
             assert!(errors(&retrying(method, 2, false)).is_empty(), "{method}");
         }
+    }
+
+    #[test]
+    fn attempts_are_capped_at_ten() {
+        assert!(errors(&retrying("GET", 10, false)).is_empty());
+        for attempts in [11, u32::MAX] {
+            assert_eq!(
+                errors(&retrying("GET", attempts, false)),
+                [at(
+                    &format!("{REQ}.retry.attempts"),
+                    PlanErrorKind::TooManyAttempts
+                )]
+            );
+        }
+    }
+
+    fn with_redirects(file: u32, scenarios: &[u32]) -> PlanDraft {
+        let mut d = draft(
+            scenarios
+                .iter()
+                .enumerate()
+                .map(|(i, &redirects)| {
+                    let mut s = scenario(&format!("s{i}"));
+                    s.http.redirects = redirects;
+                    s
+                })
+                .collect(),
+        );
+        d.http.redirects = file;
+        d
+    }
+
+    #[test]
+    fn redirects_are_capped_at_twenty() {
+        assert!(errors(&with_redirects(20, &[20])).is_empty());
+        assert_eq!(
+            errors(&with_redirects(21, &[21])),
+            [at("http.redirects", PlanErrorKind::RedirectsTooHigh)]
+        );
+        assert_eq!(
+            errors(&with_redirects(5, &[21])),
+            [at(
+                "scenarios[0].http.redirects",
+                PlanErrorKind::RedirectsTooHigh
+            )]
+        );
+    }
+
+    #[test]
+    fn an_inherited_redirect_cap_is_reported_once() {
+        assert_eq!(
+            errors(&with_redirects(21, &[21, 21])),
+            [at("http.redirects", PlanErrorKind::RedirectsTooHigh)]
+        );
+        assert_eq!(
+            errors(&with_redirects(21, &[21, 22])),
+            [
+                at("http.redirects", PlanErrorKind::RedirectsTooHigh),
+                at(
+                    "scenarios[1].http.redirects",
+                    PlanErrorKind::RedirectsTooHigh
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn cap_texts_state_the_constants() {
+        use super::super::{MAX_REDIRECTS, MAX_RETRY_ATTEMPTS};
+        assert_eq!(
+            PlanErrorKind::TooManyAttempts.to_string(),
+            format!("`attempts` must be at most {MAX_RETRY_ATTEMPTS}")
+        );
+        assert_eq!(
+            PlanErrorKind::RedirectsTooHigh.to_string(),
+            format!("`redirects` must be at most {MAX_REDIRECTS}")
+        );
     }
 
     fn with_status(status: StatusMatch) -> PlanDraft {
