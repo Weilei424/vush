@@ -224,33 +224,16 @@ async fn invalid_requests_send_nothing() {
     assert_eq!(listener.accepted().await, 0);
 }
 
-/// How many header names an `http::HeaderMap` holds.
-fn header_capacity() -> usize {
-    let mut map = http::HeaderMap::new();
-    let mut held = 0;
-    loop {
-        let name = http::HeaderName::from_bytes(format!("x-{held}").as_bytes()).unwrap();
-        if map
-            .try_append(name, http::HeaderValue::from_static("v"))
-            .is_err()
-        {
-            return held;
-        }
-        held += 1;
-    }
-}
-
 fn with_distinct_headers(url: String, count: usize) -> HttpRequest {
     let mut request = get(url);
     request.headers = (0..count).map(|n| (format!("x-{n}"), "v".into())).collect();
     request
 }
 
-/// `prepare` keeps 8 places in the header map for the headers hyper adds,
-/// and the user agent takes one more.
+/// A request holds at most 4,096 header names of its own.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_with_too_many_headers_fails_in_prepare() {
-    let most = header_capacity() - 8 - 1;
+    let most = 4096;
     let listener = CountingListener::bind().await;
     let request = with_distinct_headers(format!("http://{}/", listener.addr), most + 1);
     let hop = send(&executor(HttpVersion::Auto), &request).await;
