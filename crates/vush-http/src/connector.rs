@@ -379,7 +379,7 @@ mod tests {
     use tower_service::Service;
 
     use super::*;
-    use crate::tls::client_config;
+    use crate::tls::{Verification, client_config};
 
     type Ca = CertifiedIssuer<'static, KeyPair>;
     type Leaf = (CertificateDer<'static>, PrivateKeyDer<'static>);
@@ -523,7 +523,7 @@ mod tests {
     }
 
     fn connector(roots: RootCertStore, version: HttpVersion) -> Connector {
-        Connector::new(client_config(roots, version), version)
+        Connector::new(client_config(Verification::Roots(roots), version), version)
     }
 
     fn plain() -> Connector {
@@ -531,7 +531,10 @@ mod tests {
     }
 
     fn resolving(resolver: Resolver) -> Connector {
-        let tls = client_config(RootCertStore::empty(), HttpVersion::Auto);
+        let tls = client_config(
+            Verification::Roots(RootCertStore::empty()),
+            HttpVersion::Auto,
+        );
         Connector::with_resolver(tls, HttpVersion::Auto, resolver)
     }
 
@@ -635,6 +638,18 @@ mod tests {
             let error = connect_err(&mut connector, &format!("https://{addr}/")).await;
             assert_eq!(error, HANDSHAKE);
         }
+    }
+
+    #[tokio::test]
+    async fn insecure_accepts_any_certificate_for_any_name() {
+        let other_name = [SanType::DnsName("other.test".try_into().unwrap())];
+        let addr = tls_server(self_signed_leaf(&other_name), &[b"h2", b"http/1.1"]).await;
+        let tls = client_config(Verification::Insecure, HttpVersion::Auto);
+        let mut connector = Connector::new(tls, HttpVersion::Auto);
+        let conn = connect(&mut connector, &format!("https://{addr}/"))
+            .await
+            .unwrap();
+        assert!(conn.connected().is_negotiated_h2());
     }
 
     #[tokio::test]
