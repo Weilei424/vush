@@ -102,13 +102,14 @@ impl Executor {
         })
     }
 
-    /// Runs the rest of the hop under the time `prepare` left, and reports a
-    /// timeout in the stage the marker shows.
+    /// Runs the rest of the hop until the hop's deadline, and reports a
+    /// timeout in the stage the marker shows. With no deadline, the hop
+    /// never runs out of time.
     async fn exchange(
         &self,
         request: Request<CountingBody>,
         capture: &mut CaptureConnection,
-        timeout_after: Duration,
+        deadline: Option<Instant>,
         progress: &mut Progress,
     ) -> Result<HttpResponse, Failure> {
         // `prepare` is done, so the hop is waiting for a connection: its own
@@ -117,7 +118,10 @@ impl Executor {
         let marker = StageMarker::new();
         marker.set(FailureStage::Connect);
         let hop = self.drive(request, capture, &marker, progress);
-        match tokio::time::timeout(timeout_after, hop).await {
+        let Some(deadline) = deadline else {
+            return hop.await;
+        };
+        match tokio::time::timeout_at(deadline.into(), hop).await {
             Ok(outcome) => outcome,
             Err(_elapsed) => Err(timeout(marker.get())),
         }
@@ -213,6 +217,8 @@ impl HttpExecutor for Executor {
         timeout_after: Duration,
     ) -> HttpHop {
         let mut progress = Progress::new();
+        // A timeout too long to add to the start has no deadline.
+        let deadline = progress.start.checked_add(timeout_after);
         let sent = Arc::new(AtomicU64::new(0));
         let mut capture = None;
         let outcome = if timeout_after.is_zero() {
@@ -220,18 +226,16 @@ impl HttpExecutor for Executor {
         } else {
             match prepare(request) {
                 Err(failure) => Err(failure),
+                // `prepare` can't be cut short, so the deadline is checked
+                // once it is done.
+                Ok(_) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
+                    Err(timeout(FailureStage::Prepare))
+                }
                 Ok(prepared) => {
-                    // `prepare` can't be cut short, so its time is charged
-                    // once it is done, and the rest of the hop gets what is
-                    // left.
-                    let left = timeout_after.saturating_sub(progress.start.elapsed());
-                    if left.is_zero() {
-                        Err(timeout(FailureStage::Prepare))
-                    } else {
-                        let mut request = wire_request(prepared, sent.clone());
-                        let capture = capture.insert(capture_connection(&mut request));
-                        self.exchange(request, capture, left, &mut progress).await
-                    }
+                    let mut request = wire_request(prepared, sent.clone());
+                    let capture = capture.insert(capture_connection(&mut request));
+                    self.exchange(request, capture, deadline, &mut progress)
+                        .await
                 }
             }
         };
