@@ -162,7 +162,7 @@
     - The executor contract now states the shape of `follow`'s next request (an `Absolute` URL and an empty `query`), and that a `3xx` without a `Location` gives `Ok(None)`. It also says a session must only be used with the executor that made it.
     - New tests pin a failed hop's connection, sizes and timing through `record()`, and the escaping of response header names.
   - [x] CI green on all four runners after the user pushes (plan Task 6). Run 43117235155 on `be1e1aa`, 2026-11-11.
-- [ ] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies (design approved 2026-11-12).
+- [x] P2.2 Support HTTP1.1/2 over HTTP/HTTPS; redirects, methods, headers, query and bodies (design approved 2026-11-12, finished 2026-11-14).
   - Spec: `docs/superpowers/specs/2026-11-12-phase-2-2-http-executor-design.md` · Plan: `docs/superpowers/plans/2026-11-12-phase-2-2-http-executor.md` (local only).
   - Decided 2026-11-12:
     - **Libraries:** hyper and hyper-util with Vush's own connector, plus `h2` to classify HTTP/2 failures. rustls uses `ring` only, with the system's trusted roots (`rustls-native-certs`).
@@ -190,7 +190,12 @@
   - [x] The executor and `send`, tested against in-process servers (plan Task 6).
   - [x] Redirects end to end through `run_attempt` (plan Task 7).
   - [x] Schema doc, architecture notes and local docs (plan Task 8).
-  - [ ] CI green on all four runners after the user pushes (plan Task 8).
+  - [x] Fixes from the final review and two Codex reviews (2026-11-14):
+    - A hop that waited on another hop's failed shared connection fails as `connect` in `connect`. A malformed chunked body is `protocol`, not `connection_closed`.
+    - A request holds at most 4,096 header names of its own. Past that it fails as `invalid_request` in `prepare` instead of panicking in `http` or hyper.
+    - The whole hop, preparing included, runs against one deadline. The `HttpExecutor` contract says only preparing can run past `timeout`.
+    - The refused-port test fixtures hold a loopback connection open, so a connect is refused on macOS too instead of timing out.
+  - [x] CI green on all four runners after the user pushes (plan Task 8). Run 43666322885 on `77a1eed`, 2026-11-14.
 - [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on.
   - From P2.1:
     - Build executors per settings profile, and keep the `pool: vu` pool in the session.
