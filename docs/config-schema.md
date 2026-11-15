@@ -292,7 +292,7 @@ A failed required step ends the current iteration. A failed optional step (`requ
 | `backoff` | duration, can be `0s`. A fixed delay between attempts | no | `100ms` |
 | `allow_non_idempotent` | boolean. Must be `true` to retry any method other than `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` and `TRACE` | no | `false` |
 
-Retries are off unless you add a `retry` block. They happen on transport errors and `5xx` responses. Every attempt counts as a physical request attempt. Any method other than `CONNECT` is allowed, so a custom method is not retried unless `allow_non_idempotent` is `true`.
+Retries are off unless you add a `retry` block. An attempt is retried when it ends with a `5xx` response, or fails for any reason except `invalid_request`, `invalid_redirect` and `too_many_redirects`. Each attempt gets the full `timeout`, starts again from the original request, and follows its redirects again. `backoff` is waited between attempts, never after the last one. Every attempt counts as a physical request attempt. Any method other than `CONNECT` is allowed, so a custom method is not retried unless `allow_non_idempotent` is `true`. The request's own method decides, even when a redirect changed it.
 
 #### `expect`
 
