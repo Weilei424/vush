@@ -213,7 +213,7 @@
     - Header limits, and the fixed failure texts.
   - From P2.2:
     - A body past the limit is cut, and its connection is closed.
-    - A request holds at most 24,568 header names: the 24,576 that `http::HeaderMap` holds, less 8 kept for the headers hyper adds. Past that, it fails `invalid_request` in `prepare`. Set the real limit, decide whether `vush validate` checks it, and keep it well below the map's size, since a map whose names collide often grows early.
+    - A request holds at most 4,096 header names of its own, an interim cap. Past it, the request fails `invalid_request` in `prepare`. hyper adds `Host` and `Content-Length` with calls that panic if `http::HeaderMap` must grow past 32,768 slots. Names that collide in its hash can force that from 6,554 names, so any real limit stays below that. Set the real limit, and decide whether `vush validate` checks it.
     - Vush never sends `Accept-Encoding` and never decompresses. Decide whether that changes, with limits on decompression.
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
