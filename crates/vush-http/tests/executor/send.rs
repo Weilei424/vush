@@ -1,6 +1,8 @@
 //! Requests that get a response: what arrives at the server, which version
 //! is spoken, what comes back, and how connections are shared.
 
+use std::path::Path;
+
 use rustls::RootCertStore;
 use vush_core::plan::HttpVersion;
 use vush_core::protocol::http::{HttpBody, HttpExecutor, HttpRequest, RequestUrl, WireVersion};
@@ -8,9 +10,9 @@ use vush_core::protocol::{FailureKind, FailureStage};
 use vush_http::Executor;
 
 use crate::common::{
-    Echo, LOCALHOST, MIB, TestCa, echo, executor, failure, get, head_with_length, header_values,
-    json_a_1, method, no_content, pairs, raw_headers, redirecting, response, send, settings, sized,
-    spawn_auto, spawn_h1, spawn_raw, spawn_tls, trusting,
+    Echo, LOCALHOST, MIB, NO_DIR, TestCa, echo, executor, failure, get, head_with_length,
+    header_values, json_a_1, method, no_content, pairs, raw_headers, redirecting, response, send,
+    settings, sized, spawn_auto, spawn_h1, spawn_raw, spawn_tls, trusting,
 };
 
 const H2_AND_H1: &[&[u8]] = &[b"h2", b"http/1.1"];
@@ -170,8 +172,9 @@ async fn tls_trust_is_checked() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bodies_over_the_limit_are_cut() {
     let addr = spawn_h1(sized).await;
+    let settings = settings(HttpVersion::Auto, MIB);
     let executor =
-        Executor::with_roots(&settings(HttpVersion::Auto, MIB), RootCertStore::empty()).unwrap();
+        Executor::with_roots(&settings, Path::new(NO_DIR), RootCertStore::empty()).unwrap();
     for (path, truncated) in [
         ("/fixed/2097152", true),
         ("/chunked/2097152", true),
