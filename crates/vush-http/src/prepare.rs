@@ -44,6 +44,17 @@ fn invalid(message: &'static str) -> Failure {
     }
 }
 
+/// Places `prepare` keeps free in the header map for the headers hyper and
+/// hyper-util add later, such as `Host` and `Content-Length`. They add them
+/// with calls that panic when the map is full.
+pub(crate) const ROOM_FOR_HYPER: usize = 8;
+
+/// `http`'s header map holds a fixed number of names, and panics past it
+/// unless it is asked to fail.
+fn too_many() -> Failure {
+    invalid("the request has too many headers")
+}
+
 fn parse(text: &str) -> Result<Url, Failure> {
     Url::parse(text).map_err(|_| invalid("the URL can't be parsed"))
 }
@@ -114,7 +125,7 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
         // `from_bytes` refuses 0x00-0x1F except tab, and 0x7F.
         let value = HeaderValue::from_bytes(value.as_bytes())
             .map_err(|_| invalid("a header value holds a control character"))?;
-        headers.append(name, value);
+        headers.try_append(name, value).map_err(|_| too_many())?;
     }
 
     let (body, content_type) = match &request.body {
@@ -136,17 +147,24 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
     if let Some(content_type) = content_type
         && !headers.contains_key(http::header::CONTENT_TYPE)
     {
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            HeaderValue::from_static(content_type),
-        );
+        headers
+            .try_insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static(content_type),
+            )
+            .map_err(|_| too_many())?;
     }
     if !headers.contains_key(http::header::USER_AGENT) {
-        headers.insert(
-            http::header::USER_AGENT,
-            HeaderValue::from_static(USER_AGENT),
-        );
+        headers
+            .try_insert(
+                http::header::USER_AGENT,
+                HeaderValue::from_static(USER_AGENT),
+            )
+            .map_err(|_| too_many())?;
     }
+    headers
+        .try_reserve(ROOM_FOR_HYPER)
+        .map_err(|_| too_many())?;
 
     let uri = url
         .as_str()
@@ -394,6 +412,71 @@ mod tests {
         assert_eq!(p.headers.get("x-b").unwrap().as_bytes(), "é".as_bytes());
         for n in ["host", "authorization", "cookie"] {
             assert!(p.headers.contains_key(n), "{n}");
+        }
+    }
+
+    /// How many header names an `http::HeaderMap` holds. Past that, its
+    /// `append` and `insert` panic.
+    fn header_capacity() -> usize {
+        let mut map = HeaderMap::new();
+        let mut held = 0;
+        loop {
+            let name = HeaderName::from_bytes(format!("x-{held}").as_bytes()).unwrap();
+            if map.try_append(name, HeaderValue::from_static("v")).is_err() {
+                return held;
+            }
+            held += 1;
+        }
+    }
+
+    fn distinct_headers(count: usize) -> HttpRequest {
+        let mut r = absolute("https://h/");
+        r.headers = (0..count).map(|n| (format!("x-{n}"), "v".into())).collect();
+        r
+    }
+
+    /// Fills the places kept for hyper with the same panicking call hyper
+    /// uses.
+    fn fill_room_for_hyper(headers: &mut HeaderMap) {
+        for n in 0..ROOM_FOR_HYPER {
+            let name = HeaderName::from_bytes(format!("hyper-{n}").as_bytes()).unwrap();
+            headers.insert(name, HeaderValue::from_static("v"));
+        }
+    }
+
+    #[test]
+    fn a_request_with_too_many_headers_is_refused() {
+        let most = header_capacity() - ROOM_FOR_HYPER;
+        let too_many = invalid("the request has too many headers");
+
+        // The user agent takes the last place, and hyper's places stay free.
+        let mut p = prepare(&distinct_headers(most - 1)).unwrap();
+        assert_eq!(p.headers.keys_len(), most);
+        fill_room_for_hyper(&mut p.headers);
+        // A repeated name takes no new place.
+        let mut r = distinct_headers(most - 1);
+        r.headers.push(("x-0".into(), "again".into()));
+        assert_eq!(prepare(&r).unwrap().headers.len(), most + 1);
+        // The content type and the user agent take the last two.
+        let mut r = distinct_headers(most - 2);
+        r.body = Some(HttpBody::Text("t".into()));
+        let mut p = prepare(&r).unwrap();
+        assert_eq!(p.headers.keys_len(), most);
+        fill_room_for_hyper(&mut p.headers);
+
+        // One too many: no room left for hyper, then no place for the
+        // content type, for the user agent, and for one of the request's
+        // own headers.
+        let mut type_too_many = distinct_headers(most - 1);
+        type_too_many.body = Some(HttpBody::Text("t".into()));
+        let cases = [
+            distinct_headers(most),
+            type_too_many,
+            distinct_headers(most + ROOM_FOR_HYPER),
+            distinct_headers(most + ROOM_FOR_HYPER + 1),
+        ];
+        for (n, r) in cases.iter().enumerate() {
+            assert_eq!(prepare(r).err().unwrap(), too_many, "case {n}");
         }
     }
 
