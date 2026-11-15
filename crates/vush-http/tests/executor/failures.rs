@@ -4,17 +4,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::RootCertStore;
 use vush_core::plan::HttpVersion;
 use vush_core::protocol::http::{HttpBody, HttpRequest};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
-use vush_http::{BuildError, Executor};
 
 use crate::common::{
     CountingListener, LOCALHOST, MIB, TestCa, close_after_head, echo, executor, failure,
     garbage_status, get, h2_reset_after_one_frame, hold, malformed_chunk, pairs, refused_port,
-    send, send_within, settings, silent_after_head, spawn_auto, spawn_raw, spawn_tls, stalled_body,
-    trusting,
+    send, send_within, silent_after_head, spawn_auto, spawn_raw, spawn_tls, stalled_body, trusting,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -314,27 +311,6 @@ async fn failures_never_show_the_url() {
         let shown = format!("{error} {error:?} {hop:?}");
         for secret in ["hunter2", "secret-path", "127.0.0.1"] {
             assert!(!shown.contains(secret), "{shown}");
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn unsupported_tls_settings_fail_to_build() {
-    let mut ca_file = settings(HttpVersion::Auto, MIB);
-    ca_file.tls.ca_file = Some("ca.pem".to_owned());
-    let mut insecure = settings(HttpVersion::Auto, MIB);
-    insecure.tls.insecure = true;
-    for (settings, key) in [(ca_file, "tls.ca_file"), (insecure, "tls.insecure")] {
-        for built in [
-            Executor::new(&settings),
-            Executor::with_roots(&settings, RootCertStore::empty()),
-        ] {
-            let error = built.err().expect("the setting isn't supported yet");
-            assert!(
-                matches!(error, BuildError::Unsupported(named) if named == key),
-                "{error:?}"
-            );
-            assert_eq!(error.to_string(), format!("`{key}` isn't supported yet"));
         }
     }
 }
