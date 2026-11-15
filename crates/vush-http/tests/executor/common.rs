@@ -9,8 +9,10 @@ use std::error::Error as StdError;
 use std::future::{Future, pending};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -41,6 +43,8 @@ pub const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const MIB: u64 = 1_048_576;
 /// The hop timeout of every test that doesn't state its own.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
+/// The test directory of executors that set no `tls.ca_file`.
+pub const NO_DIR: &str = ".";
 
 pub type BoxError = Box<dyn StdError + Send + Sync>;
 pub type ReplyBody = BoxBody<Bytes, BoxError>;
@@ -63,12 +67,13 @@ pub fn settings(version: HttpVersion, limit: u64) -> HttpSettings {
 
 /// An executor that trusts no certificate, for plaintext servers.
 pub fn executor(version: HttpVersion) -> Executor {
-    Executor::with_roots(&settings(version, MIB), RootCertStore::empty()).unwrap()
+    let settings = settings(version, MIB);
+    Executor::with_roots(&settings, Path::new(NO_DIR), RootCertStore::empty()).unwrap()
 }
 
 /// An executor that trusts only `ca`.
 pub fn trusting(ca: &TestCa, version: HttpVersion) -> Executor {
-    Executor::with_roots(&settings(version, MIB), ca.roots()).unwrap()
+    Executor::with_roots(&settings(version, MIB), Path::new(NO_DIR), ca.roots()).unwrap()
 }
 
 pub fn method(name: &str) -> HttpMethod {
@@ -215,6 +220,11 @@ impl TestCa {
         roots
     }
 
+    /// This CA's certificate in PEM.
+    pub fn pem(&self) -> String {
+        self.0.pem()
+    }
+
     /// A leaf for the IP address `ip`, so no name is ever resolved.
     pub fn leaf_for_ip(&self, ip: IpAddr) -> Leaf {
         self.leaf(SanType::IpAddress(ip))
@@ -237,6 +247,43 @@ impl TestCa {
             cert: cert.der().clone(),
             key: PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
         }
+    }
+}
+
+// ---- Files ----
+
+/// A directory of its own under the system's temp dir, named from the
+/// process ID and a counter, and removed on drop.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!("vush-http-test-{}-{n}", std::process::id());
+        let path = std::env::temp_dir().join(name);
+        // A directory left by a process that had the same ID.
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Writes `contents` to the file `name` in this directory, and gives its
+    /// path.
+    pub fn write(&self, name: &str, contents: &[u8]) -> PathBuf {
+        let path = self.0.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
