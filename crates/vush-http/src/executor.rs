@@ -102,8 +102,8 @@ impl Executor {
         })
     }
 
-    /// Runs the hop under its timeout, and reports a timeout in the stage the
-    /// marker shows.
+    /// Runs the rest of the hop under the time `prepare` left, and reports a
+    /// timeout in the stage the marker shows.
     async fn exchange(
         &self,
         request: Request<CountingBody>,
@@ -221,10 +221,17 @@ impl HttpExecutor for Executor {
             match prepare(request) {
                 Err(failure) => Err(failure),
                 Ok(prepared) => {
-                    let mut request = wire_request(prepared, sent.clone());
-                    let capture = capture.insert(capture_connection(&mut request));
-                    self.exchange(request, capture, timeout_after, &mut progress)
-                        .await
+                    // `prepare` can't be cut short, so its time is charged
+                    // once it is done, and the rest of the hop gets what is
+                    // left.
+                    let left = timeout_after.saturating_sub(progress.start.elapsed());
+                    if left.is_zero() {
+                        Err(timeout(FailureStage::Prepare))
+                    } else {
+                        let mut request = wire_request(prepared, sent.clone());
+                        let capture = capture.insert(capture_connection(&mut request));
+                        self.exchange(request, capture, left, &mut progress).await
+                    }
                 }
             }
         };
