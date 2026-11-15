@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use super::super::error::{PlanError, PlanErrorKind};
 use super::super::load::{ClosedStop, ClosedVusLoad, LoadModel, RateSchedule, Stage};
-use super::super::step::{Condition, HttpMethod, RequestTarget, RetryPolicy, StatusMatch};
+use super::super::settings::MAX_REDIRECTS;
+use super::super::step::{
+    Condition, HttpMethod, MAX_RETRY_ATTEMPTS, RequestTarget, RetryPolicy, StatusMatch,
+};
 use super::super::template::{Template, TemplatePart};
 use super::super::value::{JsonNumber, MAX_DURATION, Rate};
 use super::{At, push};
@@ -30,6 +33,13 @@ pub(super) fn inherited(
 ) {
     if value != parent {
         duration(value, true, at, errors);
+    }
+}
+
+/// Checks a redirect limit. `at` is the `redirects` place.
+pub(super) fn redirects(value: u32, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if value > MAX_REDIRECTS {
+        push(errors, at, PlanErrorKind::RedirectsTooHigh);
     }
 }
 
@@ -118,9 +128,6 @@ fn ramp<T>(
         push(errors, &stages_at, PlanErrorKind::ZeroLengthRamp);
     }
 }
-
-/// Methods that may be retried without `allow_non_idempotent`.
-pub(super) const IDEMPOTENT: [&str; 6] = ["GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"];
 
 /// Checks a request name. `at` is the request; problems are reported at `name`.
 pub(super) fn request_name(name: Option<&str>, at: &At<'_>, errors: &mut Vec<PlanError>) {
@@ -247,8 +254,11 @@ pub(super) fn retry(
     if retry.attempts < 2 {
         push(errors, &at.key("attempts"), PlanErrorKind::TooFewAttempts);
     }
+    if retry.attempts > MAX_RETRY_ATTEMPTS {
+        push(errors, &at.key("attempts"), PlanErrorKind::TooManyAttempts);
+    }
     duration(retry.backoff, false, &at.key("backoff"), errors);
-    if !retry.allow_non_idempotent && !IDEMPOTENT.contains(&method.as_str()) {
+    if !retry.allow_non_idempotent && !method.is_idempotent() {
         push(errors, at, PlanErrorKind::RetryNeedsOptIn);
     }
 }
