@@ -21,11 +21,13 @@ pub use error::{
 };
 pub use json_path::{JsonPath, JsonPathSegment};
 pub use load::{ClosedStop, ClosedVusLoad, LoadModel, QueuePolicy, RateSchedule, Stage};
-pub use settings::{HttpSettings, HttpVersion, PoolScope, ResourceLimits, TlsSettings};
+pub use settings::{
+    HttpSettings, HttpVersion, MAX_REDIRECTS, PoolScope, ResourceLimits, TlsSettings,
+};
 pub use step::{
     Body, Comparison, Condition, DEFAULT_REPEAT_DEADLINE, DEFAULT_RETRY_BACKOFF, Expect,
-    ExtractSource, Extraction, HttpMethod, IfStep, JsonAssertion, JsonTemplate, RepeatStep,
-    RequestStep, RequestTarget, RetryPolicy, Scalar, StatusMatch, Step,
+    ExtractSource, Extraction, HttpMethod, IfStep, JsonAssertion, JsonTemplate, MAX_RETRY_ATTEMPTS,
+    RepeatStep, RequestStep, RequestTarget, RetryPolicy, Scalar, StatusMatch, Step,
 };
 pub use template::{Template, TemplatePart, VarRef};
 pub use threshold::{Bound, BoundOp, PercentileStat, Threshold, ThresholdCheck};
