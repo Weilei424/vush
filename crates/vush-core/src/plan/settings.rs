@@ -35,6 +35,9 @@ pub struct TlsSettings {
     pub insecure: bool,
 }
 
+/// The most redirects one attempt may follow.
+pub const MAX_REDIRECTS: u32 = 20;
+
 /// HTTP settings, after file-level and scenario-level values are merged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpSettings {
@@ -42,7 +45,7 @@ pub struct HttpSettings {
     pub pool: PoolScope,
     /// The timeout of one physical attempt.
     pub timeout: Duration,
-    /// How many redirects to follow. `0` means none.
+    /// How many redirects to follow, at most `MAX_REDIRECTS`. `0` means none.
     pub redirects: u32,
     /// Whether each user keeps cookies.
     pub cookies: bool,
