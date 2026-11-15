@@ -119,7 +119,7 @@ File-level `setup` runs once, before any scenario. File-level `teardown` runs on
 | `version` | `auto`, `http1` or `http2` | `auto` | `auto` negotiates the version with the server |
 | `pool` | `shared`, `scenario` or `vu` | `shared` | One connection pool for the whole run, one per scenario, or one per user. Sharing a pool never shares cookies or credentials |
 | `timeout` | duration | `30s` | For one physical attempt, including every redirect it follows and the time spent preparing each request. Longer than zero |
-| `redirects` | integer, 0 or more | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
+| `redirects` | integer, 0 to 20 | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
 | `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user |
 | `max_response_size` | size | `1MiB` | Upper bound on the size of a response body. A longer body is cut at the limit and marked `truncated`, and it still counts as a response |
 | `tls.ca_file` | path | none | Relative to the test file's directory. Read when the run starts |
@@ -288,7 +288,7 @@ A failed required step ends the current iteration. A failed optional step (`requ
 
 | Key | Type | Required | Default |
 |---|---|---|---|
-| `attempts` | integer, 2 or more. The total number of attempts, including the first | yes | |
+| `attempts` | integer, 2 to 10. The total number of attempts, including the first | yes | |
 | `backoff` | duration, can be `0s`. A fixed delay between attempts | no | `100ms` |
 | `allow_non_idempotent` | boolean. Must be `true` to retry any method other than `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` and `TRACE` | no | `false` |
 
