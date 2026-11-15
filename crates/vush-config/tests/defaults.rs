@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use vush_config::{Format, MAX_DEPTH, MAX_FILE_BYTES, MAX_TEXT_BYTES, MAX_VALUES, parse};
 use vush_core::plan::{
-    Expect, HttpSettings, MAX_DURATION, RequestStep, ResourceLimits, StatusMatch, Step,
-    WorkloadPlan, parse_duration,
+    Expect, HttpSettings, MAX_DURATION, MAX_REDIRECTS, MAX_RETRY_ATTEMPTS, RequestStep,
+    ResourceLimits, StatusMatch, Step, WorkloadPlan, parse_duration,
 };
 
 use Check::{Holds, Same};
@@ -818,4 +818,30 @@ fn duration_cap_matches_max_duration() {
     }
     assert_eq!(parse_duration("720h").ok(), Some(MAX_DURATION));
     assert_eq!(MAX_DURATION.as_secs(), 30 * 24 * 60 * 60);
+}
+
+#[test]
+fn retry_and_redirect_caps_match_the_constants() {
+    let tables = doc_tables();
+    let type_cell = |heading: &str, key: &str| -> String {
+        let table = tables
+            .iter()
+            .find(|table| table.heading == heading)
+            .unwrap_or_else(|| panic!("no table under the {heading} heading"));
+        let row = table
+            .rows
+            .iter()
+            .find(|row| row[0] == key)
+            .unwrap_or_else(|| panic!("no {key} row under {heading}"));
+        row[1].clone()
+    };
+    assert_eq!(
+        type_cell("`http`", "`redirects`"),
+        format!("integer, 0 to {MAX_REDIRECTS}")
+    );
+    let attempts = type_cell("`retry`", "`attempts`");
+    assert!(
+        attempts.starts_with(&format!("integer, 2 to {MAX_RETRY_ATTEMPTS}.")),
+        "the `attempts` type cell reads: {attempts}"
+    );
 }
