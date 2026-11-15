@@ -392,7 +392,7 @@ This section says what a request becomes on the wire. It holds for every step.
 - `User-Agent: vush/<version>` is added when the request has none.
 - No `Accept-Encoding` is sent, so a server normally sends the body uncompressed. Vush never decompresses a body.
 - Repeats of one header name are sent in their given order. The order across different names isn't kept.
-- A request holds at most 24,568 header names, counting an added `Content-Type` or `User-Agent`. With more, it fails as `invalid_request`, and nothing is sent.
+- A request holds at most 4,096 header names of its own. Repeats of one name count once, and an added `Content-Type` or `User-Agent` doesn't count. With more, it fails as `invalid_request`, and nothing is sent.
 
 ### Redirects
 
