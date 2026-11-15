@@ -1,6 +1,7 @@
 //! The executor: one pooled hyper-util client over Vush's own connector.
 
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -20,16 +21,43 @@ use crate::classify::{classify, failure, timeout};
 use crate::connector::{ConnInfo, Connector};
 use crate::prepare::{Prepared, prepare};
 use crate::stage::StageMarker;
-use crate::tls::client_config;
+use crate::tls::{Trust, Verification, add_ca_file, client_config, system_roots};
 
-/// Why an executor couldn't be built. Each text is fixed.
+/// Why an executor couldn't be built. Each text is fixed: it names a
+/// setting's key, never the path it holds, the file's content or a library's
+/// text.
 #[derive(Debug)]
 pub enum BuildError {
-    /// [`Executor::new`] found no system root certificate it could use.
+    /// Settings that verify certificates have no trusted root: the system
+    /// has no usable root certificate, and no `tls.ca_file` adds one.
     NoTrustedRoots,
-    /// The settings use a key that isn't supported yet. It holds the key,
-    /// `tls.ca_file` or `tls.insecure`.
-    Unsupported(&'static str),
+    /// The `tls.ca_file` of the settings at `at` can't be used.
+    CaFile { at: Scope, problem: CaFileProblem },
+}
+
+/// Where in the test file a setting comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The file-level `http` block.
+    File,
+    /// The merged `http` settings of the scenario at this index.
+    Scenario(usize),
+}
+
+/// Why a `tls.ca_file` can't be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaFileProblem {
+    /// The file doesn't exist.
+    NotFound,
+    /// The file can't be read, for any other reason. A directory is one.
+    Unreadable,
+    /// The file is larger than 1 MiB.
+    TooLarge,
+    /// The file holds no PEM certificate.
+    NoCertificates,
+    /// A PEM section can't be decoded, or a certificate can't be used as a
+    /// root.
+    BadCertificate,
 }
 
 impl fmt::Display for BuildError {
@@ -38,7 +66,22 @@ impl fmt::Display for BuildError {
             Self::NoTrustedRoots => {
                 f.write_str("no trusted root certificates could be loaded from the system")
             }
-            Self::Unsupported(key) => write!(f, "`{key}` isn't supported yet"),
+            Self::CaFile { at, problem } => {
+                match at {
+                    Scope::File => f.write_str("`http")?,
+                    Scope::Scenario(index) => write!(f, "`scenarios[{index}].http")?,
+                }
+                f.write_str(".tls.ca_file` can't be used: ")?;
+                f.write_str(match problem {
+                    CaFileProblem::NotFound => "the file doesn't exist",
+                    CaFileProblem::Unreadable => "the file can't be read",
+                    CaFileProblem::TooLarge => "the file is larger than 1 MiB",
+                    CaFileProblem::NoCertificates => "the file holds no PEM certificate",
+                    CaFileProblem::BadCertificate => {
+                        "the file holds a certificate that can't be used"
+                    }
+                })
+            }
         }
     }
 }
@@ -66,40 +109,57 @@ pub struct Session {}
 /// - `cookies` has no effect until P2.4, because the session keeps nothing.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
 ///   `send`, and follows redirects itself.
-/// - `tls.ca_file` and `tls.insecure` make building fail with
-///   [`BuildError::Unsupported`] until P2.3.
+/// - `tls.ca_file` names a PEM file, resolved against the test file's
+///   directory, whose certificates are trusted as well as the system's
+///   roots. It is read once, while building. `tls.insecure` accepts any
+///   certificate for any name, though the handshake's signatures are still
+///   checked, and `tls.ca_file` is then not read.
 pub struct Executor {
     client: Client<Connector, CountingBody>,
     limit: u64,
 }
 
 impl Executor {
-    /// An executor that trusts the system's root certificates. Those that
-    /// don't parse are skipped, and if none is left, building fails with
-    /// [`BuildError::NoTrustedRoots`].
-    pub fn new(settings: &HttpSettings) -> Result<Self, BuildError> {
-        supported(settings)?;
-        let mut roots = RootCertStore::empty();
-        let (added, _skipped) =
-            roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-        if added == 0 {
+    /// An executor that trusts the system's root certificates, plus those in
+    /// `tls.ca_file`, which is resolved against `test_dir`, the test file's
+    /// directory. System roots that don't parse are skipped.
+    ///
+    /// Building fails with [`BuildError::CaFile`] when `tls.ca_file` can't be
+    /// used, and with [`BuildError::NoTrustedRoots`] when no root is left.
+    /// Under `tls.insecure`, neither the system's roots nor `tls.ca_file` are
+    /// read.
+    pub fn new(settings: &HttpSettings, test_dir: &Path) -> Result<Self, BuildError> {
+        let verification = verification(settings, test_dir, system_roots)?;
+        if let Verification::Roots(roots) = &verification
+            && roots.is_empty()
+        {
             return Err(BuildError::NoTrustedRoots);
         }
-        Self::with_roots(settings, roots)
+        Ok(Self::build(settings, verification))
     }
 
-    /// An executor that trusts exactly `roots`.
-    pub fn with_roots(settings: &HttpSettings, roots: RootCertStore) -> Result<Self, BuildError> {
-        supported(settings)?;
+    /// Like [`Executor::new`], with `system` standing in for the system's
+    /// roots. It never fails with [`BuildError::NoTrustedRoots`], so
+    /// `RootCertStore::empty()` serves plaintext servers.
+    pub fn with_roots(
+        settings: &HttpSettings,
+        test_dir: &Path,
+        system: RootCertStore,
+    ) -> Result<Self, BuildError> {
+        let verification = verification(settings, test_dir, || system)?;
+        Ok(Self::build(settings, verification))
+    }
+
+    fn build(settings: &HttpSettings, verification: Verification) -> Self {
         let version = settings.version;
-        let connector = Connector::new(client_config(roots, version), version);
+        let connector = Connector::new(client_config(verification, version), version);
         let client = Client::builder(TokioExecutor::new())
             .http2_only(version == HttpVersion::Http2)
             .build(connector);
-        Ok(Self {
+        Self {
             client,
             limit: settings.max_response_size.0,
-        })
+        }
     }
 
     /// Runs the rest of the hop until the hop's deadline, and reports a
@@ -296,14 +356,28 @@ impl Progress {
     }
 }
 
-fn supported(settings: &HttpSettings) -> Result<(), BuildError> {
-    if settings.tls.ca_file.is_some() {
-        return Err(BuildError::Unsupported("tls.ca_file"));
-    }
-    if settings.tls.insecure {
-        return Err(BuildError::Unsupported("tls.insecure"));
-    }
-    Ok(())
+/// How a lone executor checks certificates. `system` gives the system's
+/// roots, and is called only when the settings verify. A `tls.ca_file`
+/// problem is reported at [`Scope::File`], because a lone executor's
+/// settings are file-shaped.
+fn verification(
+    settings: &HttpSettings,
+    test_dir: &Path,
+    system: impl FnOnce() -> RootCertStore,
+) -> Result<Verification, BuildError> {
+    let roots = match Trust::of(settings, test_dir) {
+        Trust::Insecure => return Ok(Verification::Insecure),
+        Trust::System => system(),
+        Trust::SystemPlus(path) => {
+            let mut roots = system();
+            add_ca_file(&mut roots, &path).map_err(|problem| BuildError::CaFile {
+                at: Scope::File,
+                problem,
+            })?;
+            roots
+        }
+    };
+    Ok(Verification::Roots(roots))
 }
 
 fn wire_request(prepared: Prepared, sent: Arc<AtomicU64>) -> Request<CountingBody> {
