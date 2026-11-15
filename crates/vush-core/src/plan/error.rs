@@ -177,6 +177,10 @@ pub enum PlanErrorKind {
     ZeroLengthRamp,
     /// `retry.attempts` is below 2.
     TooFewAttempts,
+    /// `retry.attempts` is above `MAX_RETRY_ATTEMPTS`.
+    TooManyAttempts,
+    /// `http.redirects` is above `MAX_REDIRECTS`.
+    RedirectsTooHigh,
     /// A non-idempotent method is retried without `allow_non_idempotent`.
     RetryNeedsOptIn,
     /// A status code is outside 100 to 599.
@@ -266,6 +270,14 @@ impl fmt::Display for PlanErrorKind {
             }
             Self::TooFewAttempts => {
                 f.write_str("`attempts` must be 2 or more, because it counts the first attempt")
+            }
+            Self::TooManyAttempts => write!(
+                f,
+                "`attempts` must be at most {}",
+                super::MAX_RETRY_ATTEMPTS
+            ),
+            Self::RedirectsTooHigh => {
+                write!(f, "`redirects` must be at most {}", super::MAX_REDIRECTS)
             }
             Self::RetryNeedsOptIn => f.write_str(
                 "retrying a method other than GET, HEAD, PUT, DELETE, OPTIONS or TRACE needs `allow_non_idempotent: true`",
