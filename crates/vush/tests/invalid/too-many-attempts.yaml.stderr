@@ -1,0 +1,5 @@
+error: `attempts` must be at most 10
+  --> too-many-attempts.yaml:8:83
+   = at scenarios[0].steps[0].request.retry.attempts
+
+too-many-attempts.yaml: not valid, 1 problem
