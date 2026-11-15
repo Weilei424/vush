@@ -146,6 +146,8 @@ impl AttemptRecord {
 }
 
 /// All the attempts a request step made, in order.
+///
+/// `run_step` builds it: the first attempt, then one per retry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepRecord {
     attempts: Vec<AttemptRecord>,
