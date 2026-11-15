@@ -209,7 +209,7 @@
     - **Caps:** `retry.attempts` is at most 10 and `redirects` at most 20, checked by `vush validate`. A step records at most 210 hops.
     - **Deferred:** the waiting hops' real kind after a failed shared connect (P2.6), retry accounting against `rate` (P5.1), and any backoff other than a fixed one.
   - [x] The caps on `retry.attempts` and `redirects`, and `HttpMethod::is_idempotent` (plan Task 1).
-  - [ ] Core's attempt loop, `run_step`, with an injected timer (plan Task 2).
+  - [x] Core's attempt loop, `run_step`, with an injected timer (plan Task 2).
   - [ ] `tls.ca_file` and `tls.insecure` on the lone executor (plan Task 3).
   - [ ] The connector's connect limit (plan Task 4).
   - [ ] Sessions that belong to their executor, and `pool: vu` (plan Task 5).
