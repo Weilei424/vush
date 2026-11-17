@@ -7,5 +7,6 @@ mod common;
 mod failures;
 mod pools;
 mod redirects;
+mod retries;
 mod send;
 mod tls;
