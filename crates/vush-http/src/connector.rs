@@ -4,6 +4,11 @@
 //! timing each step. Each connection gets a [`ConnInfo`] with a process-wide
 //! ID and its setup times, which hyper-util copies into every response.
 //!
+//! Each connect, from resolving to the end of the handshake, runs under a
+//! limit and fails as a timeout past it. hyper-util finishes a connect in the
+//! background after its hop took a pooled connection instead, so no hop's
+//! deadline bounds that connect.
+//!
 //! Its errors carry a kind and a fixed message, never a host, a port or a
 //! library's text.
 
@@ -15,7 +20,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use http::Uri;
 use hyper::rt::{Read, ReadBufCursor, Write};
@@ -83,6 +88,7 @@ const UNREACHABLE: ConnectError = error(
 );
 const HANDSHAKE_FAILED: ConnectError = error(FailureKind::Tls, "the TLS handshake failed");
 const NO_HTTP2: ConnectError = error(FailureKind::Tls, "the server didn't agree to HTTP/2");
+const TOO_LONG: ConnectError = error(FailureKind::Timeout, "the connection took too long");
 
 /// Looks up a host name's addresses for a port. A seam, so a test can fail a
 /// lookup without asking a real resolver.
@@ -153,16 +159,19 @@ pub(crate) fn host_and_port(uri: &Uri) -> Result<(Host, u16), ConnectError> {
 pub(crate) struct Connector {
     tls: TlsConnector,
     version: HttpVersion,
+    limit: Duration,
     resolver: Resolver,
 }
 
 impl Connector {
     /// A connector that uses `tls` for `https` and the system's resolver.
-    /// `version` must be the one `tls` was built for.
-    pub(crate) fn new(tls: Arc<ClientConfig>, version: HttpVersion) -> Self {
+    /// `version` must be the one `tls` was built for. A connect that takes
+    /// longer than `limit` fails as a timeout.
+    pub(crate) fn new(tls: Arc<ClientConfig>, version: HttpVersion, limit: Duration) -> Self {
         Self {
             tls: TlsConnector::from(tls),
             version,
+            limit,
             resolver: Arc::new(lookup),
         }
     }
@@ -171,15 +180,24 @@ impl Connector {
     pub(crate) fn with_resolver(
         tls: Arc<ClientConfig>,
         version: HttpVersion,
+        limit: Duration,
         resolver: Resolver,
     ) -> Self {
         Self {
             resolver,
-            ..Self::new(tls, version)
+            ..Self::new(tls, version, limit)
         }
     }
 
+    /// The whole connect, resolving, TCP and TLS, under the limit.
     async fn connect(self, uri: Uri) -> Result<Conn, ConnectError> {
+        let limit = self.limit;
+        tokio::time::timeout(limit, self.open(uri))
+            .await
+            .unwrap_or(Err(TOO_LONG))
+    }
+
+    async fn open(self, uri: Uri) -> Result<Conn, ConnectError> {
         let (host, port) = host_and_port(&uri)?;
 
         let (addrs, dns) = match &host {
@@ -367,6 +385,7 @@ impl Write for Conn {
 mod tests {
     use std::net::Ipv4Addr;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair,
@@ -412,6 +431,10 @@ mod tests {
     const NO_HTTP2: ConnectError = ConnectError {
         kind: FailureKind::Tls,
         message: "the server didn't agree to HTTP/2",
+    };
+    const TOO_LONG: ConnectError = ConnectError {
+        kind: FailureKind::Timeout,
+        message: "the connection took too long",
     };
 
     fn ca() -> (RootCertStore, Ca) {
@@ -522,8 +545,15 @@ mod tests {
         }
     }
 
+    /// The limit of every connector a test doesn't give its own.
+    const LIMIT: Duration = Duration::from_secs(30);
+
     fn connector(roots: RootCertStore, version: HttpVersion) -> Connector {
-        Connector::new(client_config(Verification::Roots(roots), version), version)
+        Connector::new(
+            client_config(Verification::Roots(roots), version),
+            version,
+            LIMIT,
+        )
     }
 
     fn plain() -> Connector {
@@ -535,7 +565,7 @@ mod tests {
             Verification::Roots(RootCertStore::empty()),
             HttpVersion::Auto,
         );
-        Connector::with_resolver(tls, HttpVersion::Auto, resolver)
+        Connector::with_resolver(tls, HttpVersion::Auto, LIMIT, resolver)
     }
 
     fn failing_resolver() -> Resolver {
@@ -645,11 +675,26 @@ mod tests {
         let other_name = [SanType::DnsName("other.test".try_into().unwrap())];
         let addr = tls_server(self_signed_leaf(&other_name), &[b"h2", b"http/1.1"]).await;
         let tls = client_config(Verification::Insecure, HttpVersion::Auto);
-        let mut connector = Connector::new(tls, HttpVersion::Auto);
+        let mut connector = Connector::new(tls, HttpVersion::Auto, LIMIT);
         let conn = connect(&mut connector, &format!("https://{addr}/"))
             .await
             .unwrap();
         assert!(conn.connected().is_negotiated_h2());
+    }
+
+    #[tokio::test]
+    async fn a_connect_past_its_limit_fails_as_timeout() {
+        let addr = tcp_server().await;
+        let tls = client_config(
+            Verification::Roots(RootCertStore::empty()),
+            HttpVersion::Auto,
+        );
+        let mut connector = Connector::new(tls, HttpVersion::Auto, Duration::from_millis(200));
+        let url = format!("https://{addr}/");
+        let error = tokio::time::timeout(Duration::from_secs(5), connect_err(&mut connector, &url))
+            .await
+            .expect("the limit should end the connect");
+        assert_eq!(error, TOO_LONG);
     }
 
     #[tokio::test]
