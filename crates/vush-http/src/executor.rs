@@ -10,9 +10,9 @@ use http::{Extensions, Request, Version};
 use http_body_util::BodyExt;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{CaptureConnection, Connected, capture_connection};
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::RootCertStore;
-use vush_core::plan::{HttpSettings, HttpVersion};
+use vush_core::plan::{HttpSettings, HttpVersion, PoolScope};
 use vush_core::protocol::http::{HttpExecutor, HttpHop, HttpRequest, HttpResponse, WireVersion};
 use vush_core::protocol::{BodySizes, Failure, FailureKind, FailureStage, HopTiming};
 
@@ -88,10 +88,46 @@ impl fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-/// One user's protocol state. It holds nothing yet: P2.3 fills it with the
-/// user's own pool under `pool: vu`, and P2.4 with the cookie jar.
-#[derive(Clone, Default)]
-pub struct Session {}
+/// How long a pool keeps an idle connection before it closes it.
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// The ID the next executor gets. IDs are never reused in a process.
+static NEXT_EXECUTOR: AtomicU64 = AtomicU64::new(0);
+
+/// One user's protocol state. It holds the ID of the executor that made it,
+/// which `send` checks, and under `pool: vu` the user's own pool, so users
+/// never share connections. A clone shares that pool. P2.4 adds the cookie
+/// jar.
+#[derive(Clone)]
+pub struct Session {
+    owner: u64,
+    client: Option<Client<Connector, CountingBody>>,
+}
+
+/// Builds a pool. Every pool, pooled or per user, is built here, so each
+/// closes its idle connections after [`IDLE_TIMEOUT`].
+pub(crate) fn client(
+    connector: Connector,
+    version: HttpVersion,
+) -> Client<Connector, CountingBody> {
+    Client::builder(TokioExecutor::new())
+        .pool_idle_timeout(IDLE_TIMEOUT)
+        .pool_timer(TokioTimer::new())
+        .http2_only(version == HttpVersion::Http2)
+        .build(connector)
+}
+
+/// Where an executor's connections live.
+pub(crate) enum Transport {
+    /// One pool for every session of the executor.
+    /// Boxed, because a client is much larger than a connector.
+    Pooled(Box<Client<Connector, CountingBody>>),
+    /// Each session builds its own pool from this connector.
+    PerSession {
+        connector: Connector,
+        version: HttpVersion,
+    },
+}
 
 /// Sends HTTP/1.1 and HTTP/2 requests, in plaintext or over TLS, through one
 /// pooled client.
@@ -105,7 +141,10 @@ pub struct Session {}
 ///   knowledge in plaintext.
 /// - `max_response_size` is the body limit. A longer body is cut at it and
 ///   marked `truncated`.
-/// - `pool` is treated as `shared` until P2.3: an executor has one pool.
+/// - `pool` says where connections live. Under `shared` and `scenario`, all
+///   the sessions of an executor use its one pool, so a lone executor's pool
+///   is its own. Under `vu`, each session holds its own pool, which its clones
+///   share. Every pool closes a connection that has been idle for 90 s.
 /// - `cookies` has no effect until P2.4, because the session keeps nothing.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
 ///   `send`, and follows redirects itself.
@@ -115,7 +154,8 @@ pub struct Session {}
 ///   certificate for any name, though the handshake's signatures are still
 ///   checked, and `tls.ca_file` is then not read.
 pub struct Executor {
-    client: Client<Connector, CountingBody>,
+    id: u64,
+    transport: Transport,
     limit: u64,
 }
 
@@ -157,12 +197,35 @@ impl Executor {
             version,
             settings.timeout,
         );
-        let client = Client::builder(TokioExecutor::new())
-            .http2_only(version == HttpVersion::Http2)
-            .build(connector);
+        let transport = match settings.pool {
+            PoolScope::Shared | PoolScope::Scenario => {
+                Transport::Pooled(Box::new(client(connector, version)))
+            }
+            PoolScope::Vu => Transport::PerSession { connector, version },
+        };
+        Self::from_parts(transport, settings.max_response_size.0)
+    }
+
+    /// An executor over `transport`, with the body limit `max_response_size`.
+    /// It gets an ID of its own.
+    pub(crate) fn from_parts(transport: Transport, max_response_size: u64) -> Self {
         Self {
-            client,
-            limit: settings.max_response_size.0,
+            id: NEXT_EXECUTOR.fetch_add(1, Ordering::Relaxed),
+            transport,
+            limit: max_response_size,
+        }
+    }
+
+    /// The pool a session's requests go through: its own under `pool: vu`,
+    /// the executor's otherwise.
+    fn client_of<'a>(&'a self, session: &'a Session) -> &'a Client<Connector, CountingBody> {
+        match &self.transport {
+            Transport::Pooled(client) => client,
+            // The owner check passed, so this executor made the session, and
+            // it gave the session a client.
+            Transport::PerSession { .. } => session.client.as_ref().unwrap_or_else(|| {
+                unreachable!("a session of a per-session executor holds a client")
+            }),
         }
     }
 
@@ -171,6 +234,7 @@ impl Executor {
     /// never runs out of time.
     async fn exchange(
         &self,
+        client: &Client<Connector, CountingBody>,
         request: Request<CountingBody>,
         capture: &mut CaptureConnection,
         deadline: Option<Instant>,
@@ -181,7 +245,7 @@ impl Executor {
         // which hyper-util shares without running the connector for this hop.
         let marker = StageMarker::new();
         marker.set(FailureStage::Connect);
-        let hop = self.drive(request, capture, &marker, progress);
+        let hop = self.drive(client, request, capture, &marker, progress);
         let Some(deadline) = deadline else {
             return hop.await;
         };
@@ -195,12 +259,13 @@ impl Executor {
     /// limit.
     async fn drive(
         &self,
+        client: &Client<Connector, CountingBody>,
         request: Request<CountingBody>,
         capture: &mut CaptureConnection,
         marker: &StageMarker,
         progress: &mut Progress,
     ) -> Result<HttpResponse, Failure> {
-        let mut response = self.client.request(request);
+        let mut response = client.request(request);
         // The hop is in `connect` until hyper-util assigns it a connection,
         // new or pooled. Only that tells this hop apart: a connect that loses
         // to a pooled connection finishes on another task.
@@ -271,12 +336,21 @@ impl HttpExecutor for Executor {
     type Session = Session;
 
     fn new_session(&self) -> Session {
-        Session::default()
+        let client = match &self.transport {
+            Transport::Pooled(_) => None,
+            Transport::PerSession { connector, version } => {
+                Some(client(connector.clone(), *version))
+            }
+        };
+        Session {
+            owner: self.id,
+            client,
+        }
     }
 
     async fn send(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         request: &HttpRequest,
         timeout_after: Duration,
     ) -> HttpHop {
@@ -285,7 +359,13 @@ impl HttpExecutor for Executor {
         let deadline = progress.start.checked_add(timeout_after);
         let sent = Arc::new(AtomicU64::new(0));
         let mut capture = None;
-        let outcome = if timeout_after.is_zero() {
+        let outcome = if session.owner != self.id {
+            Err(Failure {
+                kind: FailureKind::InvalidRequest,
+                stage: FailureStage::Prepare,
+                message: "the session belongs to another executor",
+            })
+        } else if timeout_after.is_zero() {
             Err(timeout(FailureStage::Prepare))
         } else {
             match prepare(request) {
@@ -298,8 +378,14 @@ impl HttpExecutor for Executor {
                 Ok(prepared) => {
                     let mut request = wire_request(prepared, sent.clone());
                     let capture = capture.insert(capture_connection(&mut request));
-                    self.exchange(request, capture, deadline, &mut progress)
-                        .await
+                    self.exchange(
+                        self.client_of(session),
+                        request,
+                        capture,
+                        deadline,
+                        &mut progress,
+                    )
+                    .await
                 }
             }
         };
