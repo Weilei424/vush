@@ -40,7 +40,9 @@ use crate::protocol::http::{HttpHop, HttpRequest, HttpResponse};
 ///    `pool: vu` may be shared between copies. Core relies on this for
 ///    `reset_each_iteration`, by restoring a copy taken after `vu_setup`. A
 ///    session must only be used with the executor that made it, because under
-///    `pool: vu` it holds connections built with that executor's settings.
+///    `pool: vu` it holds connections built with that executor's settings. An
+///    executor refuses another executor's session: `send` fails with
+///    `invalid_request` in `prepare` and sends nothing.
 /// 7. **`follow` is pure.** It does no I/O and takes no session. It returns
 ///    `Ok(Some(next))` when the response is a redirect it follows, `Ok(None)`
 ///    when it isn't one, and `Err` with kind `invalid_redirect` and stage
