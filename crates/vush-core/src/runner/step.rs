@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::plan::RetryPolicy;
+use crate::plan::{MAX_REDIRECTS, MAX_RETRY_ATTEMPTS, RetryPolicy};
 use crate::protocol::http::{HttpExecutor, HttpRequest, HttpResponse};
 use crate::protocol::{FailureKind, Outcome, StepRecord};
 
@@ -48,8 +48,11 @@ pub struct StepResult {
 ///   `timeout`, and uses the same session. Between attempts the step waits
 ///   `backoff` through `timer`, even when it is zero, and never after the
 ///   last attempt.
-/// - The step takes at most `attempts × timeout + (attempts − 1) × backoff`.
-///   Core has no clock, so the caller supplies the `timer`.
+/// - The caps hold for every policy, even one built by hand: the step makes
+///   at most [`MAX_RETRY_ATTEMPTS`] attempts, each following at most
+///   [`MAX_REDIRECTS`] redirects, so it records at most 210 hops. It takes at
+///   most `attempts × timeout + (attempts − 1) × backoff`, with `attempts` so
+///   capped. Core has no clock, so the caller supplies the `timer`.
 ///
 /// The future is `Send` whenever the executor's and the timer's futures are.
 pub async fn run_step<E: HttpExecutor, T: Timer>(
@@ -64,10 +67,11 @@ pub async fn run_step<E: HttpExecutor, T: Timer>(
             if retry.attempts >= 2
                 && (request.method.is_idempotent() || retry.allow_non_idempotent) =>
         {
-            (retry.attempts, retry.backoff)
+            (retry.attempts.min(MAX_RETRY_ATTEMPTS), retry.backoff)
         }
         _ => (1, Duration::ZERO),
     };
+    let redirects = policy.redirects.min(MAX_REDIRECTS);
 
     let mut made = 1;
     let first = run_attempt(
@@ -75,7 +79,7 @@ pub async fn run_step<E: HttpExecutor, T: Timer>(
         session,
         request.clone(),
         policy.timeout,
-        policy.redirects,
+        redirects,
     )
     .await;
     let mut record = StepRecord::new(first.record);
@@ -87,7 +91,7 @@ pub async fn run_step<E: HttpExecutor, T: Timer>(
             session,
             request.clone(),
             policy.timeout,
-            policy.redirects,
+            redirects,
         )
         .await;
         record.push(next.record);
