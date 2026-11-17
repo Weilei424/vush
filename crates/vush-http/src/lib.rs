@@ -26,8 +26,9 @@
 //! runtime, but `send` must run inside a Tokio runtime.
 //!
 //! A [`Session`] belongs to the executor that made it. Under `pool: vu` it
-//! holds the user's own connections, and `send` refuses a session from another
-//! executor, as `invalid_request` in `prepare`, before sending anything.
+//! holds the user's own connections and TLS session cache. Under every pool,
+//! `send` refuses a session from another executor, as `invalid_request` in
+//! `prepare`, before sending anything.
 //!
 //! ```no_run
 //! use std::path::Path;
