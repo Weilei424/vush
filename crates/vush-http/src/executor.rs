@@ -12,16 +12,17 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{CaptureConnection, Connected, capture_connection};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::RootCertStore;
-use vush_core::plan::{HttpSettings, HttpVersion, PoolScope};
+use vush_core::plan::{HttpSettings, HttpVersion};
 use vush_core::protocol::http::{HttpExecutor, HttpHop, HttpRequest, HttpResponse, WireVersion};
 use vush_core::protocol::{BodySizes, Failure, FailureKind, FailureStage, HopTiming};
 
 use crate::body::CountingBody;
 use crate::classify::{classify, failure, timeout};
 use crate::connector::{ConnInfo, Connector};
+use crate::executors::{SystemRoots, build};
+use crate::pool::ScopeView;
 use crate::prepare::{Prepared, prepare};
 use crate::stage::StageMarker;
-use crate::tls::{Trust, Verification, add_ca_file, client_config, system_roots};
 
 /// Why an executor couldn't be built. Each text is fixed: it names a
 /// setting's key, never the path it holds, the file's content or a library's
@@ -117,7 +118,9 @@ pub(crate) fn client(
         .build(connector)
 }
 
-/// Where an executor's connections live.
+/// Where an executor's connections live. A clone of a pooled transport
+/// shares its pool.
+#[derive(Clone)]
 pub(crate) enum Transport {
     /// One pool for every session of the executor.
     /// Boxed, because a client is much larger than a connector.
@@ -130,7 +133,8 @@ pub(crate) enum Transport {
 }
 
 /// Sends HTTP/1.1 and HTTP/2 requests, in plaintext or over TLS, through one
-/// pooled client.
+/// pooled client. [`Executors`] builds a plan's executors, whose pools it
+/// may share. [`Executor::new`] builds a lone one, whose pool is its own.
 ///
 /// `send` must run inside a Tokio runtime, of either kind, because the client
 /// spawns its connection tasks on it. Building needs no runtime.
@@ -142,9 +146,10 @@ pub(crate) enum Transport {
 /// - `max_response_size` is the body limit. A longer body is cut at it and
 ///   marked `truncated`.
 /// - `pool` says where connections live. Under `shared` and `scenario`, all
-///   the sessions of an executor use its one pool, so a lone executor's pool
-///   is its own. Under `vu`, each session holds its own pool, which its clones
-///   share. Every pool closes a connection that has been idle for 90 s.
+///   the sessions of an executor use its one pool, which [`Executors`] shares
+///   with other executors under `shared`. Under `vu`, each session holds its
+///   own pool, which its clones share. Every pool closes a connection that
+///   has been idle for 90 s.
 /// - `cookies` has no effect until P2.4, because the session keeps nothing.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
 ///   `send`, and follows redirects itself.
@@ -153,6 +158,8 @@ pub(crate) enum Transport {
 ///   roots. It is read once, while building. `tls.insecure` accepts any
 ///   certificate for any name, though the handshake's signatures are still
 ///   checked, and `tls.ca_file` is then not read.
+///
+/// [`Executors`]: crate::Executors
 pub struct Executor {
     id: u64,
     transport: Transport,
@@ -160,22 +167,18 @@ pub struct Executor {
 }
 
 impl Executor {
-    /// An executor that trusts the system's root certificates, plus those in
-    /// `tls.ca_file`, which is resolved against `test_dir`, the test file's
-    /// directory. System roots that don't parse are skipped.
+    /// A lone executor with a pool of its own, shared with no other. It
+    /// trusts the system's root certificates, plus those in `tls.ca_file`,
+    /// which is resolved against `test_dir`, the test file's directory.
+    /// System roots that don't parse are skipped. Its background connects
+    /// are bounded by `timeout`.
     ///
-    /// Building fails with [`BuildError::CaFile`] when `tls.ca_file` can't be
-    /// used, and with [`BuildError::NoTrustedRoots`] when no root is left.
-    /// Under `tls.insecure`, neither the system's roots nor `tls.ca_file` are
-    /// read.
+    /// Building fails with [`BuildError::CaFile`] at [`Scope::File`] when
+    /// `tls.ca_file` can't be used, and with [`BuildError::NoTrustedRoots`]
+    /// when no root is left. Under `tls.insecure`, neither the system's roots
+    /// nor `tls.ca_file` are read.
     pub fn new(settings: &HttpSettings, test_dir: &Path) -> Result<Self, BuildError> {
-        let verification = verification(settings, test_dir, system_roots)?;
-        if let Verification::Roots(roots) = &verification
-            && roots.is_empty()
-        {
-            return Err(BuildError::NoTrustedRoots);
-        }
-        Ok(Self::build(settings, verification))
+        Self::lone(settings, test_dir, SystemRoots::Load)
     }
 
     /// Like [`Executor::new`], with `system` standing in for the system's
@@ -186,24 +189,24 @@ impl Executor {
         test_dir: &Path,
         system: RootCertStore,
     ) -> Result<Self, BuildError> {
-        let verification = verification(settings, test_dir, || system)?;
-        Ok(Self::build(settings, verification))
+        Self::lone(settings, test_dir, SystemRoots::StandIn(system))
     }
 
-    fn build(settings: &HttpSettings, verification: Verification) -> Self {
-        let version = settings.version;
-        let connector = Connector::new(
-            client_config(verification, version),
-            version,
-            settings.timeout,
-        );
-        let transport = match settings.pool {
-            PoolScope::Shared | PoolScope::Scenario => {
-                Transport::Pooled(Box::new(client(connector, version)))
-            }
-            PoolScope::Vu => Transport::PerSession { connector, version },
+    /// Runs a plan's build steps for one scope at [`Scope::File`], because a
+    /// lone executor's settings are file-shaped. It has no step lists, so
+    /// its connect limit is `timeout`.
+    fn lone(
+        settings: &HttpSettings,
+        test_dir: &Path,
+        system: SystemRoots,
+    ) -> Result<Self, BuildError> {
+        let view = ScopeView {
+            at: Scope::File,
+            settings,
+            lists: Vec::new(),
         };
-        Self::from_parts(transport, settings.max_response_size.0)
+        let mut built = build(&[view], test_dir, system)?;
+        Ok(built.pop().expect("one scope builds one executor"))
     }
 
     /// An executor over `transport`, with the body limit `max_response_size`.
@@ -444,30 +447,6 @@ impl Progress {
             error_connection: None,
         }
     }
-}
-
-/// How a lone executor checks certificates. `system` gives the system's
-/// roots, and is called only when the settings verify. A `tls.ca_file`
-/// problem is reported at [`Scope::File`], because a lone executor's
-/// settings are file-shaped.
-fn verification(
-    settings: &HttpSettings,
-    test_dir: &Path,
-    system: impl FnOnce() -> RootCertStore,
-) -> Result<Verification, BuildError> {
-    let roots = match Trust::of(settings, test_dir) {
-        Trust::Insecure => return Ok(Verification::Insecure),
-        Trust::System => system(),
-        Trust::SystemPlus(path) => {
-            let mut roots = system();
-            add_ca_file(&mut roots, &path).map_err(|problem| BuildError::CaFile {
-                at: Scope::File,
-                problem,
-            })?;
-            roots
-        }
-    };
-    Ok(Verification::Roots(roots))
 }
 
 fn wire_request(prepared: Prepared, sent: Arc<AtomicU64>) -> Request<CountingBody> {
