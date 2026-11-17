@@ -1,4 +1,5 @@
-//! The executor: one pooled hyper-util client over Vush's own connector.
+//! The executor: hyper-util clients over Vush's own connector. It sends
+//! through its pool, or under `pool: vu` through the session's.
 
 use std::fmt;
 use std::path::Path;
@@ -50,7 +51,8 @@ pub enum Scope {
 pub enum CaFileProblem {
     /// The file doesn't exist.
     NotFound,
-    /// The file can't be read, for any other reason. A directory is one.
+    /// The file can't be read, for any other reason. A path that isn't a
+    /// regular file, such as a directory or a named pipe, is one.
     Unreadable,
     /// The file is larger than 1 MiB.
     TooLarge,
@@ -96,9 +98,9 @@ pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 static NEXT_EXECUTOR: AtomicU64 = AtomicU64::new(0);
 
 /// One user's protocol state. It holds the ID of the executor that made it,
-/// which `send` checks, and under `pool: vu` the user's own pool, so users
-/// never share connections. A clone shares that pool. P2.4 adds the cookie
-/// jar.
+/// which `send` checks, and under `pool: vu` the user's own pool, with its
+/// own TLS session cache, so users never share connections or resume each
+/// other's sessions. A clone shares both. P2.4 adds the cookie jar.
 #[derive(Clone)]
 pub struct Session {
     owner: u64,
@@ -132,9 +134,10 @@ pub(crate) enum Transport {
     },
 }
 
-/// Sends HTTP/1.1 and HTTP/2 requests, in plaintext or over TLS, through one
-/// pooled client. [`Executors`] builds a plan's executors, whose pools it
-/// may share. [`Executor::new`] builds a lone one, whose pool is its own.
+/// Sends HTTP/1.1 and HTTP/2 requests, in plaintext or over TLS, through its
+/// pool, or under `pool: vu` through the session's. [`Executors`] builds a
+/// plan's executors, whose pools it may share. [`Executor::new`] builds a
+/// lone one, whose pool is its own.
 ///
 /// `send` must run inside a Tokio runtime, of either kind, because the client
 /// spawns its connection tasks on it. Building needs no runtime.
@@ -148,8 +151,9 @@ pub(crate) enum Transport {
 /// - `pool` says where connections live. Under `shared` and `scenario`, all
 ///   the sessions of an executor use its one pool, which [`Executors`] shares
 ///   with other executors under `shared`. Under `vu`, each session holds its
-///   own pool, which its clones share. Every pool closes a connection that
-///   has been idle for 90 s.
+///   own pool, with its own TLS session cache so users never resume each
+///   other's sessions, and its clones share both. Every pool closes a
+///   connection that has been idle for 90 s.
 /// - `cookies` has no effect until P2.4, because the session keeps nothing.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
 ///   `send`, and follows redirects itself.
@@ -342,7 +346,7 @@ impl HttpExecutor for Executor {
         let client = match &self.transport {
             Transport::Pooled(_) => None,
             Transport::PerSession { connector, version } => {
-                Some(client(connector.clone(), *version))
+                Some(client(connector.for_user(), *version))
             }
         };
         Session {
@@ -477,5 +481,188 @@ fn wire_version(version: Version) -> Option<WireVersion> {
         Version::HTTP_11 => Some(WireVersion::Http11),
         Version::HTTP_2 => Some(WireVersion::Http2),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use bytes::Bytes;
+    use http::Response;
+    use http_body_util::Full;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use rcgen::{CertificateParams, KeyPair, SanType};
+    use rustls::HandshakeKind;
+    use rustls::pki_types::PrivatePkcs8KeyDer;
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+    use vush_core::plan::PoolScope;
+    use vush_core::protocol::http::RequestUrl;
+
+    use super::*;
+
+    const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    /// A TLS server for 127.0.0.1, and a root store that trusts it. It
+    /// speaks HTTP/1.1, answers each request with `x-handshake: resumed` when
+    /// its connection resumed a session and `x-handshake: full` otherwise,
+    /// then closes the connection, so each request needs a new one. Like any
+    /// rustls server, it sends resumption tickets after each handshake.
+    async fn handshake_server() -> (SocketAddr, RootCertStore) {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::default();
+        params.subject_alt_names = vec![SanType::IpAddress(LOCALHOST)];
+        let cert = params.self_signed(&key).unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(cert.der().clone()).unwrap();
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+            )
+            .unwrap();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind((LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let kind = match tls.get_ref().1.handshake_kind() {
+                        Some(HandshakeKind::Resumed) => "resumed",
+                        _ => "full",
+                    };
+                    let service = service_fn(move |_| async move {
+                        let response = Response::builder()
+                            .header("x-handshake", kind)
+                            .body(Full::new(Bytes::new()))
+                            .unwrap();
+                        Ok::<_, Infallible>(response)
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .keep_alive(false)
+                        .serve_connection(TokioIo::new(tls), service)
+                        .await;
+                });
+            }
+        });
+        (addr, roots)
+    }
+
+    /// Sends `request` on `session` and gives the handshake its connection
+    /// had, as the server saw it.
+    async fn handshake(
+        executor: &Executor,
+        session: &mut Session,
+        request: &HttpRequest,
+    ) -> String {
+        let hop = executor
+            .send(session, request, Duration::from_secs(5))
+            .await;
+        let response = hop.outcome.expect("the hop should succeed");
+        let (_, value) = response
+            .headers
+            .iter()
+            .find(|(name, _)| name == "x-handshake")
+            .expect("the server names the handshake");
+        String::from_utf8(value.clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn vu_users_never_resume_each_others_tls_sessions() {
+        let (addr, roots) = handshake_server().await;
+        let settings = HttpSettings {
+            pool: PoolScope::Vu,
+            ..HttpSettings::default()
+        };
+        let executor = Executor::with_roots(&settings, Path::new("."), roots).unwrap();
+        let request = HttpRequest {
+            method: "GET".parse().unwrap(),
+            url: RequestUrl::Absolute(format!("https://{addr}/")),
+            query: vec![],
+            headers: vec![],
+            body: None,
+        };
+        let mut one = executor.new_session();
+        let mut two = executor.new_session();
+        assert_eq!(handshake(&executor, &mut one, &request).await, "full");
+        assert_eq!(handshake(&executor, &mut one, &request).await, "resumed");
+        assert_eq!(handshake(&executor, &mut two, &request).await, "full");
+    }
+
+    #[test]
+    fn ca_file_texts_name_the_key_path() {
+        let cases = [
+            (
+                Scope::File,
+                CaFileProblem::NotFound,
+                "`http.tls.ca_file` can't be used: the file doesn't exist",
+            ),
+            (
+                Scope::File,
+                CaFileProblem::Unreadable,
+                "`http.tls.ca_file` can't be used: the file can't be read",
+            ),
+            (
+                Scope::File,
+                CaFileProblem::TooLarge,
+                "`http.tls.ca_file` can't be used: the file is larger than 1 MiB",
+            ),
+            (
+                Scope::File,
+                CaFileProblem::NoCertificates,
+                "`http.tls.ca_file` can't be used: the file holds no PEM certificate",
+            ),
+            (
+                Scope::File,
+                CaFileProblem::BadCertificate,
+                "`http.tls.ca_file` can't be used: the file holds a certificate that can't be used",
+            ),
+            (
+                Scope::Scenario(3),
+                CaFileProblem::NotFound,
+                "`scenarios[3].http.tls.ca_file` can't be used: the file doesn't exist",
+            ),
+            (
+                Scope::Scenario(3),
+                CaFileProblem::Unreadable,
+                "`scenarios[3].http.tls.ca_file` can't be used: the file can't be read",
+            ),
+            (
+                Scope::Scenario(3),
+                CaFileProblem::TooLarge,
+                "`scenarios[3].http.tls.ca_file` can't be used: the file is larger than 1 MiB",
+            ),
+            (
+                Scope::Scenario(3),
+                CaFileProblem::NoCertificates,
+                "`scenarios[3].http.tls.ca_file` can't be used: the file holds no PEM certificate",
+            ),
+            (
+                Scope::Scenario(3),
+                CaFileProblem::BadCertificate,
+                "`scenarios[3].http.tls.ca_file` can't be used: the file holds a certificate that can't be used",
+            ),
+        ];
+        for (at, problem, text) in cases {
+            let error = BuildError::CaFile { at, problem };
+            assert_eq!(error.to_string(), text, "{at:?} {problem:?}");
+        }
+        assert_eq!(
+            BuildError::NoTrustedRoots.to_string(),
+            "no trusted root certificates could be loaded from the system"
+        );
     }
 }
