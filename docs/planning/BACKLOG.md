@@ -213,7 +213,7 @@
   - [x] `tls.ca_file` and `tls.insecure` on the lone executor (plan Task 3).
   - [x] The connector's connect limit (plan Task 4).
   - [x] Sessions that belong to their executor, and `pool: vu` (plan Task 5).
-  - [ ] `Executors`, with pools shared by profile across a plan (plan Task 6).
+  - [x] `Executors`, with pools shared by profile across a plan (plan Task 6).
   - [ ] Retries end to end, and the architecture notes (plan Task 7).
   - [ ] CI green on all four runners after the user pushes (plan Task 7).
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
