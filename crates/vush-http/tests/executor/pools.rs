@@ -203,7 +203,8 @@ async fn shared_pools_keep_trust_apart() {
             assert_eq!(response(&hop).status, 200, "scenario {index} of {order:?}");
             connections.push(hop.connection);
         }
-        assert!(connections[0].is_some());
+        assert!(connections[0].is_some(), "{order:?}");
+        assert!(connections[1].is_some(), "{order:?}");
         assert_ne!(connections[0], connections[1], "{order:?}");
     }
 }
@@ -321,6 +322,40 @@ async fn background_connects_stop_at_the_pool_limit() {
     )
     .await;
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
+    assert!(
+        hop.timing.total < Duration::from_secs(5),
+        "{:?}",
+        hop.timing
+    );
+}
+
+/// Scopes that share a pool share one connect limit, the longest of theirs:
+/// here 2 s, not the 200 ms of the file level and scenario 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_pool_takes_the_longest_limit() {
+    let listener = CountingListener::bind().await;
+    let quick = HttpSettings {
+        timeout: Duration::from_millis(200),
+        ..HttpSettings::default()
+    };
+    let slow = HttpSettings {
+        timeout: Duration::from_secs(2),
+        ..HttpSettings::default()
+    };
+    let executors = built(&plan(quick.clone(), vec![quick, slow]));
+    // The kernel completes the TCP connect and nobody answers the handshake.
+    let hop = send_within(
+        executors.scenario(0).unwrap(),
+        &get(format!("https://{}/", listener.addr)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
+    assert!(
+        hop.timing.total >= Duration::from_secs(1),
+        "{:?}",
+        hop.timing
+    );
     assert!(
         hop.timing.total < Duration::from_secs(5),
         "{:?}",
