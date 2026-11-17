@@ -1,5 +1,5 @@
 //! Fixture servers inside the test process, on 127.0.0.1 only, and helpers
-//! to build executors and requests.
+//! to build executors, plans and requests.
 //!
 //! Servers stay up until the test's runtime ends. A server that stalls awaits
 //! `std::future::pending()`, so no test races a sleep.
@@ -9,6 +9,7 @@ use std::error::Error as StdError;
 use std::future::{Future, pending};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,7 +32,11 @@ use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
-use vush_core::plan::{ByteSize, HttpMethod, HttpSettings, HttpVersion, JsonNumber};
+use vush_core::plan::{
+    ByteSize, ClosedStop, ClosedVusLoad, Expect, HttpMethod, HttpSettings, HttpVersion, JsonNumber,
+    LoadModel, PlanDraft, RequestStep, RequestTarget, ResourceLimits, Scenario, StatePolicy, Step,
+    WorkloadPlan,
+};
 use vush_core::protocol::JsonValue;
 use vush_core::protocol::http::{
     HttpBody, HttpExecutor, HttpHop, HttpRequest, HttpResponse, RequestUrl,
@@ -55,7 +60,7 @@ pub type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 type Handler = Arc<dyn Fn(Request<Incoming>) -> ReplyFuture + Send + Sync>;
 
-// ---- Executors, requests and hops ----
+// ---- Executors, plans, requests and hops ----
 
 pub fn settings(version: HttpVersion, limit: u64) -> HttpSettings {
     HttpSettings {
@@ -74,6 +79,60 @@ pub fn executor(version: HttpVersion) -> Executor {
 /// An executor that trusts only `ca`.
 pub fn trusting(ca: &TestCa, version: HttpVersion) -> Executor {
     Executor::with_roots(&settings(version, MIB), Path::new(NO_DIR), ca.roots()).unwrap()
+}
+
+/// A plan whose file level has the settings `file` and no hooks. Scenario
+/// `i` is named `s<i>`, has `scenarios[i]` as its merged settings, and runs
+/// one user once through one `GET` to `http://127.0.0.1/` with its
+/// `http.timeout`.
+pub fn plan(file: HttpSettings, scenarios: Vec<HttpSettings>) -> WorkloadPlan {
+    let scenarios = scenarios
+        .into_iter()
+        .enumerate()
+        .map(|(index, http)| {
+            let request = RequestStep {
+                name: None,
+                method: method("GET"),
+                target: RequestTarget::Url("http://127.0.0.1/".parse().unwrap()),
+                query: vec![],
+                headers: vec![],
+                body: None,
+                timeout: http.timeout,
+                required: true,
+                retry: None,
+                expect: Expect::default(),
+                extract: vec![],
+            };
+            Scenario {
+                name: format!("s{index}"),
+                load: LoadModel::ClosedVus(ClosedVusLoad::Fixed {
+                    vus: NonZeroU32::MIN,
+                    stop: ClosedStop::IterationsPerVu(NonZeroU64::MIN),
+                }),
+                http,
+                limits: ResourceLimits::default(),
+                max_request_rate: None,
+                state: StatePolicy::Persist,
+                setup: vec![],
+                teardown: vec![],
+                vu_setup: vec![],
+                vu_teardown: vec![],
+                steps: vec![Step::Request(Box::new(request))],
+            }
+        })
+        .collect();
+    let draft = PlanDraft {
+        name: "pools".to_owned(),
+        base_url: None,
+        http: file,
+        limits: ResourceLimits::default(),
+        max_request_rate: None,
+        setup: vec![],
+        teardown: vec![],
+        thresholds: vec![],
+        scenarios,
+    };
+    WorkloadPlan::new(draft).unwrap()
 }
 
 pub fn method(name: &str) -> HttpMethod {
