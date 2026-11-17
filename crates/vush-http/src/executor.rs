@@ -152,7 +152,11 @@ impl Executor {
 
     fn build(settings: &HttpSettings, verification: Verification) -> Self {
         let version = settings.version;
-        let connector = Connector::new(client_config(verification, version), version);
+        let connector = Connector::new(
+            client_config(verification, version),
+            version,
+            settings.timeout,
+        );
         let client = Client::builder(TokioExecutor::new())
             .http2_only(version == HttpVersion::Http2)
             .build(connector);
