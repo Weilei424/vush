@@ -3,12 +3,15 @@
 //!
 //! Trust is the system's roots, the system's roots plus the certificates in
 //! a `tls.ca_file`, or, under `tls.insecure`, any certificate for any name.
+//! Under `pool: vu`, each user gets a copy of the config with a TLS session
+//! cache of its own.
 
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rustls::client::Resumption;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::pem::PemObject;
@@ -20,6 +23,14 @@ use crate::executor::CaFileProblem;
 
 /// The largest `tls.ca_file` that is read: 1 MiB.
 pub(crate) const MAX_CA_FILE_BYTES: u64 = 1_048_576;
+
+/// The servers one user's TLS session cache remembers. A user talks to few
+/// origins, and the cache is preallocated per user, so it stays small.
+pub(crate) const USER_SESSION_CACHE: usize = 8;
+
+/// The sessions rustls keeps for each server it remembers: up to 8 TLS 1.3
+/// tickets. Its cache is sized in sessions, not servers.
+const SESSIONS_PER_SERVER: usize = 8;
 
 /// Whom a scope's connections trust.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +89,15 @@ pub(crate) fn client_config(verification: Verification, version: HttpVersion) ->
     Arc::new(config)
 }
 
+/// A copy of `scope`, a `pool: vu` scope's config, with a TLS session cache
+/// of its own that remembers [`USER_SESSION_CACHE`] servers. Each user gets
+/// one, so users never resume each other's sessions.
+pub(crate) fn user_config(scope: &ClientConfig) -> Arc<ClientConfig> {
+    let mut config = scope.clone();
+    config.resumption = Resumption::in_memory_sessions(USER_SESSION_CACHE * SESSIONS_PER_SERVER);
+    Arc::new(config)
+}
+
 /// The system's root certificates. Those that don't parse are skipped,
 /// because nobody chose them.
 pub(crate) fn system_roots() -> RootCertStore {
@@ -87,10 +107,10 @@ pub(crate) fn system_roots() -> RootCertStore {
 }
 
 /// Adds every certificate in the PEM file at `path` to `roots`. Sections
-/// other than certificates, such as a key, are skipped. The file must be at
-/// most [`MAX_CA_FILE_BYTES`] long and hold at least one certificate, and
-/// each of its certificates must be usable as a root. `roots` changes only
-/// when the whole file is.
+/// other than certificates, such as a key, are skipped. The path must name a
+/// regular file, which must be at most [`MAX_CA_FILE_BYTES`] long and hold
+/// at least one certificate, and each of its certificates must be usable as
+/// a root. `roots` changes only when the whole file is.
 pub(crate) fn add_ca_file(roots: &mut RootCertStore, path: &Path) -> Result<(), CaFileProblem> {
     let pem = read_ca_file(path)?;
     let mut added = RootCertStore::empty();
@@ -105,19 +125,29 @@ pub(crate) fn add_ca_file(roots: &mut RootCertStore, path: &Path) -> Result<(), 
     Ok(())
 }
 
-/// The file's bytes. No more than one byte past the bound is read.
+/// The file's bytes. No more than one byte past the bound is read. A path
+/// that isn't a regular file, such as a directory or a named pipe, is
+/// `Unreadable` and never opened, so it can't block the build.
 fn read_ca_file(path: &Path) -> Result<Vec<u8>, CaFileProblem> {
+    if !std::fs::metadata(path).map_err(problem)?.is_file() {
+        return Err(CaFileProblem::Unreadable);
+    }
     let mut pem = Vec::new();
     File::open(path)
         .and_then(|file| file.take(MAX_CA_FILE_BYTES + 1).read_to_end(&mut pem))
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => CaFileProblem::NotFound,
-            _ => CaFileProblem::Unreadable,
-        })?;
+        .map_err(problem)?;
     if pem.len() as u64 > MAX_CA_FILE_BYTES {
         return Err(CaFileProblem::TooLarge);
     }
     Ok(pem)
+}
+
+/// A missing file is `NotFound`. Any other error is `Unreadable`.
+fn problem(error: io::Error) -> CaFileProblem {
+    match error.kind() {
+        io::ErrorKind::NotFound => CaFileProblem::NotFound,
+        _ => CaFileProblem::Unreadable,
+    }
 }
 
 /// The verifier under `tls.insecure`. It accepts any certificate chain for
