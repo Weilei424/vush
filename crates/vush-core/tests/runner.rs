@@ -587,6 +587,34 @@ fn the_largest_step_records_210_hops() {
     assert_eq!(timer.sleeps().len(), 9);
 }
 
+/// The plan's checks keep these out of a plan, but a policy built by hand is
+/// held to the caps too.
+#[test]
+fn a_hand_built_policy_is_held_to_the_caps() {
+    let fake = ScriptedExecutor::new(vec![answered(503, 0); 11], vec![Ok(None); 11]);
+    let timer = RecordingTimer::new();
+    let result = step(&fake, &timer, request(), &retrying(11, 0, false));
+    assert_eq!(outcomes(&result), [status(503); 10]);
+    assert_eq!(timer.sleeps().len(), 9);
+
+    let fake = ScriptedExecutor::new(
+        vec![answered(302, 0); 21],
+        (0..21).map(|_| next()).collect(),
+    );
+    let mut policy = once();
+    policy.redirects = 21;
+    let result = step(&fake, &timer, request(), &policy);
+    assert_eq!(
+        outcomes(&result),
+        [Outcome::Failed {
+            kind: FailureKind::TooManyRedirects,
+            stage: FailureStage::Prepare
+        }]
+    );
+    assert_eq!(result.record.attempts()[0].hops().len(), 21);
+    assert_eq!(fake.follow_calls(), 21);
+}
+
 #[test]
 fn a_step_future_is_send() {
     let fake = ScriptedExecutor::new(vec![], vec![]);
