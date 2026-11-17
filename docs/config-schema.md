@@ -117,7 +117,7 @@ File-level `setup` runs once, before any scenario. File-level `teardown` runs on
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `version` | `auto`, `http1` or `http2` | `auto` | `auto` negotiates the version with the server |
-| `pool` | `shared`, `scenario` or `vu` | `shared` | One connection pool for the whole run, one per scenario, or one per user. Sharing a pool never shares cookies or credentials |
+| `pool` | `shared`, `scenario` or `vu` | `shared` | Where connections are kept. `shared`: one pool for every part of the file with the same `version` and TLS trust (the system's roots, the same `tls.ca_file`, or `tls.insecure`); parts that differ never share a connection. `scenario`: one pool per scenario, used by its steps and hooks, and one for the file-level hooks. `vu`: one pool per user and per hook run. Idle connections close after 90 s. Sharing a pool never shares cookies or credentials |
 | `timeout` | duration | `30s` | For one physical attempt, including every redirect it follows and the time spent preparing each request. Longer than zero |
 | `redirects` | integer, 0 to 20 | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
 | `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user |
