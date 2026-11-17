@@ -1,15 +1,17 @@
 //! Hops that fail, each from a real cause, with the exact kind and stage.
 //! None of them may land on `other`.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use vush_core::plan::HttpVersion;
+use vush_core::plan::{HttpSettings, HttpVersion};
 use vush_core::protocol::http::{HttpBody, HttpRequest};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
+use vush_http::Executor;
 
 use crate::common::{
-    CountingListener, LOCALHOST, MIB, TestCa, close_after_head, echo, executor, failure,
+    CountingListener, LOCALHOST, MIB, NO_DIR, TestCa, close_after_head, echo, executor, failure,
     garbage_status, get, h2_reset_after_one_frame, hold, malformed_chunk, pairs, refused_port,
     send, send_within, silent_after_head, spawn_auto, spawn_raw, spawn_tls, stalled_body, trusting,
 };
@@ -40,6 +42,32 @@ async fn a_handshake_that_never_finishes_times_out_in_connect() {
     .await;
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
     assert_eq!(hop.connection, None);
+}
+
+/// The lone executor's connect limit is `settings.timeout`, which is shorter
+/// than the hop's time here, so the connect's own limit ends the hop.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lone_executor_bounds_connects_by_its_timeout() {
+    let listener = CountingListener::bind().await;
+    let settings = HttpSettings {
+        timeout: Duration::from_millis(200),
+        ..HttpSettings::default()
+    };
+    let executor =
+        Executor::with_roots(&settings, Path::new(NO_DIR), TestCa::generate().roots()).unwrap();
+    // The kernel completes the TCP connect and nobody answers the handshake.
+    let hop = send_within(
+        &executor,
+        &get(format!("https://{}/", listener.addr)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
+    assert!(
+        hop.timing.total < Duration::from_secs(5),
+        "{:?}",
+        hop.timing
+    );
 }
 
 /// Under `http2`, hyper-util opens one connection per origin at a time. The
