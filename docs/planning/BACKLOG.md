@@ -208,6 +208,7 @@
     - **Retries** run in `vush_core::runner::run_step`, which sleeps through a `Timer` trait that core defines. A `5xx`, or any failure except `invalid_request`, `invalid_redirect` and `too_many_redirects`, is retried. Each attempt gets the full `timeout`, starts again from the original request, and uses the same session. There is no backoff after the last attempt.
     - **Caps:** `retry.attempts` is at most 10 and `redirects` at most 20, checked by `vush validate`. A step records at most 210 hops.
     - **Deferred:** the waiting hops' real kind after a failed shared connect (P2.6), retry accounting against `rate` (P5.1), and any backoff other than a fixed one.
+    - Final review (2026-11-17): under `pool: vu` each user also has its own TLS session cache (8 servers), so users never resume each other's sessions.
   - [x] The caps on `retry.attempts` and `redirects`, and `HttpMethod::is_idempotent` (plan Task 1).
   - [x] Core's attempt loop, `run_step`, with an injected timer (plan Task 2).
   - [x] `tls.ca_file` and `tls.insecure` on the lone executor (plan Task 3).
