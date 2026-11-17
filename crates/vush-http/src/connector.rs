@@ -34,6 +34,8 @@ use tokio_rustls::client::TlsStream;
 use vush_core::plan::HttpVersion;
 use vush_core::protocol::{ConnectionId, ConnectionSetup, FailureKind};
 
+use crate::tls::user_config;
+
 /// The next connection ID. Every connector in the process shares it, so IDs
 /// never repeat across executors.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -173,6 +175,17 @@ impl Connector {
             version,
             limit,
             resolver: Arc::new(lookup),
+        }
+    }
+
+    /// A copy for one user under `pool: vu`, whose TLS session cache is its
+    /// own. Its other settings are this connector's.
+    pub(crate) fn for_user(&self) -> Self {
+        Self {
+            tls: TlsConnector::from(user_config(self.tls.config())),
+            version: self.version,
+            limit: self.limit,
+            resolver: self.resolver.clone(),
         }
     }
 
