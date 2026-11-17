@@ -214,7 +214,7 @@
   - [x] The connector's connect limit (plan Task 4).
   - [x] Sessions that belong to their executor, and `pool: vu` (plan Task 5).
   - [x] `Executors`, with pools shared by profile across a plan (plan Task 6).
-  - [ ] Retries end to end, and the architecture notes (plan Task 7).
+  - [x] Retries end to end, and the architecture notes (plan Task 7).
   - [ ] CI green on all four runners after the user pushes (plan Task 7).
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
   - From P2.3: the session already holds its executor's ID and, under `pool: vu`, the user's pool. The jar joins them there.
@@ -306,7 +306,7 @@
 - [x] Phase 0: minimal Cargo workspace/crate boundaries and actual repository conventions. Decided 2026-11-01: `crates/vush` (bin), `crates/vush-core`, `crates/vush-http`; toolchain pinned in `rust-toolchain.toml`; CI on Linux x86_64/arm64 and macOS arm64/x86_64.
 - [x] Phase 1: exact source-location validation behavior. Schema names and provisional default limits decided 2026-11-02 (P1.1). Decided 2026-11-03 (P1.2): every error carries a key path and a line and column in both formats, and never quotes a value from the file.
 - [x] Phase 2: where the protocol-neutral executor trait lives. Decided 2026-11-11 (P2.1): `HttpExecutor` in `vush_core::protocol::http`, implemented by `vush-http`, so crate dependencies stay acyclic and `vush-core` has none. The plan compiler's home is decided: `crates/vush-config` (2026-11-02, P1.1), so `crates/vush` doesn't need a library target for it.
-- [ ] Phase 2: maintained HTTP/TLS dependencies and retry/pooling implementation. The YAML library is decided: `saphyr-parser` (2026-11-03, P1.2). Retries run in core's attempt loop (decided in P2.1). Decided 2026-11-12 (P2.2 design): hyper + hyper-util with Vush's own connector, rustls with `ring`, and the system's trusted roots. Pooling and retries remain for P2.3.
+- [x] Phase 2: maintained HTTP/TLS dependencies and retry/pooling implementation. The YAML library is decided: `saphyr-parser` (2026-11-03, P1.2). Retries run in core's attempt loop (decided in P2.1). Decided 2026-11-12 (P2.2 design): hyper + hyper-util with Vush's own connector, rustls with `ring`, and the system's trusted roots. Pooling and retries decided 2026-11-15 (P2.3).
 - [ ] Phases 3–4: hook failure/cleanup precedence, state reset semantics, VU worker ownership. Also whether `all` and `any` stop at the first decisive condition (the schema example relies on it), whether `vu.id` and `vu.iteration` start at 0 or 1, what exceeding `max_response_size` or `deadline` does, and how `exists` treats JSON `null`.
 - [ ] Whichever phase adds `vush run`: a `--dry-run` that makes every check a run makes before traffic, such as `${env.NAME}` being set and `tls.ca_file` being readable. It never prints the plan's `Debug` output, which holds literal header and body text. Moved from Phase 1 on 2026-11-08.
 - [ ] Phase 5: hard cap vs target request-rate, burst/fairness policy, retry attempt rate, scheduling tick precision, emergency signals.
