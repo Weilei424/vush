@@ -9,15 +9,21 @@
 //! work or own global counters: scheduling belongs to `vush-core`, and
 //! aggregation to the metrics layer.
 //!
-//! # Building an executor
+//! # Building executors
 //!
-//! [`Executor::new`] builds one from a plan's [`HttpSettings`] and the test
-//! file's directory. It trusts the system's root certificates plus those in
-//! `tls.ca_file`, which is resolved against that directory.
-//! [`Executor::with_roots`] takes a stand-in for the system's roots. Either
-//! fails with a [`BuildError`] when `tls.ca_file` can't be used, and `new`
-//! also when no root is trusted. An executor needs no runtime to be built,
-//! but `send` must run inside a Tokio runtime.
+//! [`Executors::new(&plan, test_dir)`](Executors::new) builds a run's
+//! executors from a [`WorkloadPlan`] and the test file's directory: one for
+//! the file-level hooks, and one per scenario. Under `pool: shared`, scopes
+//! with the same version and TLS trust share a pool, and scopes whose
+//! version or trust differ never share a connection. [`Executor::new`]
+//! builds a lone executor from one [`HttpSettings`], with a pool of its own.
+//!
+//! Both trust the system's root certificates plus those in `tls.ca_file`,
+//! which is resolved against the test file's directory, and both have a
+//! `with_roots` that takes a stand-in for the system's roots. Building fails
+//! with a [`BuildError`] when a `tls.ca_file` can't be used, and `new` also
+//! when settings that verify have no trusted root. Building needs no
+//! runtime, but `send` must run inside a Tokio runtime.
 //!
 //! A [`Session`] belongs to the executor that made it. Under `pool: vu` it
 //! holds the user's own connections, and `send` refuses a session from another
@@ -52,15 +58,19 @@
 //! ```
 //!
 //! [`HttpSettings`]: vush_core::plan::HttpSettings
+//! [`WorkloadPlan`]: vush_core::plan::WorkloadPlan
 
 mod body;
 mod classify;
 mod connector;
 mod executor;
+mod executors;
 mod follow;
 mod json;
+mod pool;
 mod prepare;
 mod stage;
 mod tls;
 
 pub use executor::{BuildError, CaFileProblem, Executor, Scope, Session};
+pub use executors::Executors;
