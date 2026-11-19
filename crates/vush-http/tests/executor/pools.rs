@@ -303,6 +303,37 @@ fn ca_file_errors_name_the_first_scope_that_reads_it() {
     }
 }
 
+/// `ca.pem/` names no file, even though `Path` compares it equal to
+/// `ca.pem`, which reads fine. It fails the build in either order.
+#[test]
+fn every_spelling_of_a_ca_file_is_read() {
+    let ca = TestCa::generate();
+    let dir = TempDir::new();
+    dir.write("ca.pem", ca.pem().as_bytes());
+    let file = tls(Some("ca.pem"), false);
+    let not_a_dir = tls(Some("ca.pem/"), false);
+    let cases = [
+        (vec![file.clone(), not_a_dir.clone()], Scope::Scenario(1)),
+        (vec![not_a_dir, file], Scope::Scenario(0)),
+    ];
+    for (scenarios, at) in cases {
+        let plan = plan(HttpSettings::default(), scenarios);
+        let error = Executors::with_roots(&plan, dir.path(), RootCertStore::empty())
+            .err()
+            .expect("`ca.pem/` names no file");
+        assert!(
+            matches!(
+                error,
+                BuildError::CaFile {
+                    at: found,
+                    problem: CaFileProblem::Unreadable
+                } if found == at
+            ),
+            "{at:?}: {error:?}"
+        );
+    }
+}
+
 /// A pool's connect limit is the longest attempt timeout it serves, here
 /// 200 ms, which is shorter than the hop's time, so the connect's own limit
 /// ends the hop.
