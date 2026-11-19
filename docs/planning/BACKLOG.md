@@ -216,6 +216,10 @@
   - [x] Sessions that belong to their executor, and `pool: vu` (plan Task 5).
   - [x] `Executors`, with pools shared by profile across a plan (plan Task 6).
   - [x] Retries end to end, and the architecture notes (plan Task 7).
+  - [x] Fixes from Codex's review (2026-11-18):
+    - A `tls.ca_file` is compared as the text of the path it resolves to. Before, `ca.pem` and `ca.pem/`, which `Path` compares as equal, shared one trust, so the second spelling was never read and the build passed even though `ca.pem/` names no file.
+    - Building a plan's executors finds pools and roots by hash, so it takes time linear in the number of scopes. 50,000 `pool: scenario` scenarios built in 0.29 s, down from 1.31 s (release build, local).
+    - `PoolScope`'s docs say what each scope shares, as the schema does.
   - [ ] CI green on all four runners after the user pushes (plan Task 7).
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
   - From P2.3: the session already holds its executor's ID and, under `pool: vu`, the user's pool. The jar joins them there.
