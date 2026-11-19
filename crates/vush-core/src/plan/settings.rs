@@ -18,11 +18,15 @@ pub enum HttpVersion {
 /// Sharing a pool never shares cookies or credentials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolScope {
-    /// One pool for the whole run.
+    /// One pool for every part of the file with the same `version` and TLS
+    /// trust: the system's roots, the same `tls.ca_file`, or
+    /// `tls.insecure`. Parts that differ never share a connection.
     Shared,
-    /// One pool per scenario.
+    /// One pool per scenario, used by its steps and hooks, and one for the
+    /// file-level hooks.
     Scenario,
-    /// One pool per virtual user.
+    /// One pool per virtual user and per hook run, each with its own TLS
+    /// session cache.
     Vu,
 }
 
