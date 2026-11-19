@@ -50,7 +50,7 @@ pub(crate) fn scopes(plan: &WorkloadPlan) -> Vec<ScopeView<'_>> {
 }
 
 /// Which pool a scope uses. Scopes with equal keys share one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum PoolKey {
     /// The pool of every `shared` scope that speaks `version` and trusts
     /// `trust`.
