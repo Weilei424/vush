@@ -177,6 +177,17 @@ mod tests {
         let other_ca_file = with(|s| s.tls.ca_file = Some("b.pem".to_owned()));
         assert_ne!(key(a, &differ[2].1), key(b, &other_ca_file));
 
+        // Each spelling of one file is a key of its own, even those that
+        // `Path` compares as equal.
+        let spellings = ["a.pem", "./a.pem", "a.pem/", ".//a.pem"];
+        for (i, one) in spellings.iter().enumerate() {
+            for other in &spellings[i + 1..] {
+                let one_key = key(a, &with(|s| s.tls.ca_file = Some((*one).to_owned())));
+                let other_key = key(b, &with(|s| s.tls.ca_file = Some((*other).to_owned())));
+                assert_ne!(one_key, other_key, "{one} and {other}");
+            }
+        }
+
         let same = [
             ("timeout", with(|s| s.timeout = Duration::from_secs(1))),
             ("redirects", with(|s| s.redirects = 0)),
