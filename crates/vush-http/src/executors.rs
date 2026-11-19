@@ -18,8 +18,8 @@ use crate::tls::{Trust, Verification, add_ca_file, client_config, system_roots};
 /// - `shared`: one pool for every scope, the file level included, with the
 ///   same `version` and the same trust. Trust is the system's roots, the
 ///   system's roots plus one `tls.ca_file`, or `tls.insecure`. A `ca_file`
-///   is compared as the path it resolves to, so two spellings of one file
-///   don't share. Scopes whose version or trust differ never share a
+///   is compared as the text of the path it resolves to, so two spellings
+///   of one file don't share, and each is read. Scopes whose version or trust differ never share a
 ///   connection, so one made without verification never serves settings
 ///   that verify.
 /// - `scenario`: a pool of the scope's own. The file level is one more
@@ -206,7 +206,8 @@ fn roots_by_trust(
         }
         let mut roots = system.clone();
         if let Trust::SystemPlus(path) = &trust {
-            add_ca_file(&mut roots, path).map_err(|problem| BuildError::CaFile { at, problem })?;
+            add_ca_file(&mut roots, Path::new(path))
+                .map_err(|problem| BuildError::CaFile { at, problem })?;
         }
         if required && roots.is_empty() {
             return Err(BuildError::NoTrustedRoots);
