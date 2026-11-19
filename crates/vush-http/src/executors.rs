@@ -1,5 +1,6 @@
 //! A plan's executors, and the build steps they share with a lone executor.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -101,7 +102,6 @@ pub(crate) enum SystemRoots {
 
 /// One pool, before it is built.
 struct PoolSpec {
-    key: PoolKey,
     version: HttpVersion,
     trust: Trust,
     /// Whether each session builds its own pool, under `vu`.
@@ -120,25 +120,22 @@ pub(crate) fn build(
     let roots = roots_by_trust(views, test_dir, system)?;
 
     let mut specs: Vec<PoolSpec> = Vec::new();
+    // Where each key's pool is in `specs`, so that a plan of many scopes
+    // builds in time linear in their number.
+    let mut index_of: HashMap<PoolKey, usize> = HashMap::new();
     let mut pool_of = Vec::with_capacity(views.len());
     for view in views {
-        let key = pool_key(view, test_dir);
-        let index = match specs.iter().position(|spec| spec.key == key) {
-            Some(index) => {
-                specs[index].limit = specs[index].limit.max(limit(view));
-                index
-            }
-            None => {
-                specs.push(PoolSpec {
-                    key,
-                    version: view.settings.version,
-                    trust: Trust::of(view.settings, test_dir),
-                    per_session: view.settings.pool == PoolScope::Vu,
-                    limit: limit(view),
-                });
-                specs.len() - 1
-            }
-        };
+        let index = *index_of.entry(pool_key(view, test_dir)).or_insert_with(|| {
+            specs.push(PoolSpec {
+                version: view.settings.version,
+                trust: Trust::of(view.settings, test_dir),
+                per_session: view.settings.pool == PoolScope::Vu,
+                limit: Duration::ZERO,
+            });
+            specs.len() - 1
+        });
+        let spec = &mut specs[index];
+        spec.limit = spec.limit.max(limit(view));
         pool_of.push(index);
     }
 
@@ -149,9 +146,8 @@ pub(crate) fn build(
                 Trust::Insecure => Verification::Insecure,
                 trust => Verification::Roots(
                     roots
-                        .iter()
-                        .find(|(found, _)| found == trust)
-                        .map(|(_, roots)| roots.clone())
+                        .get(trust)
+                        .cloned()
                         .expect("every trust that verifies has its roots"),
                 ),
             };
@@ -178,30 +174,30 @@ pub(crate) fn build(
         .collect())
 }
 
-/// The roots of each distinct trust of `views` that verifies, in view
-/// order. The system's roots are read once, and only when some view
-/// verifies. Each `tls.ca_file` is read once and added to a copy of them,
-/// and its problem names the first view that reads it.
+/// The roots of each distinct trust of `views` that verifies. The system's
+/// roots are read once, and only when some view verifies. Each
+/// `tls.ca_file` is read once and added to a copy of them, and its problem
+/// names the first view, in view order, that reads it.
 fn roots_by_trust(
     views: &[ScopeView<'_>],
     test_dir: &Path,
     system: SystemRoots,
-) -> Result<Vec<(Trust, RootCertStore)>, BuildError> {
+) -> Result<HashMap<Trust, RootCertStore>, BuildError> {
     let verifying: Vec<(Scope, Trust)> = views
         .iter()
         .map(|view| (view.at, Trust::of(view.settings, test_dir)))
         .filter(|(_, trust)| *trust != Trust::Insecure)
         .collect();
     if verifying.is_empty() {
-        return Ok(Vec::new());
+        return Ok(HashMap::new());
     }
     let (system, required) = match system {
         SystemRoots::Load => (system_roots(), true),
         SystemRoots::StandIn(roots) => (roots, false),
     };
-    let mut found: Vec<(Trust, RootCertStore)> = Vec::new();
+    let mut found: HashMap<Trust, RootCertStore> = HashMap::new();
     for (at, trust) in verifying {
-        if found.iter().any(|(seen, _)| *seen == trust) {
+        if found.contains_key(&trust) {
             continue;
         }
         let mut roots = system.clone();
@@ -212,7 +208,7 @@ fn roots_by_trust(
         if required && roots.is_empty() {
             return Err(BuildError::NoTrustedRoots);
         }
-        found.push((trust, roots));
+        found.insert(trust, roots);
     }
     Ok(found)
 }
