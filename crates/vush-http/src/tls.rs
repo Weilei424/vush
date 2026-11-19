@@ -34,7 +34,7 @@ pub(crate) const USER_SESSION_CACHE: usize = 8;
 const SESSIONS_PER_SERVER: usize = 8;
 
 /// Whom a scope's connections trust.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Trust {
     /// The system's roots.
     System,
