@@ -196,7 +196,7 @@
     - The whole hop, preparing included, runs against one deadline. The `HttpExecutor` contract says only preparing can run past `timeout`.
     - The refused-port test fixtures hold a loopback connection open, so a connect is refused on macOS too instead of timing out.
   - [x] CI green on all four runners after the user pushes (plan Task 8). Run 43666322885 on `77a1eed`, 2026-11-14.
-- [ ] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on (design approved 2026-11-15).
+- [x] P2.3 Support pooling configurations, TLS, explicit timeouts and opt-in retries. Define `pool: shared` when scenarios differ in TLS or HTTP version; a connection opened with verification off must never serve a scenario that kept it on (design approved 2026-11-15).
   - Spec: `docs/superpowers/specs/2026-11-15-phase-2-3-pools-tls-retries-design.md` · Plan: `docs/superpowers/plans/2026-11-15-phase-2-3-pools-tls-retries.md` (local only).
   - Decided 2026-11-15:
     - **`tls.ca_file` adds to the system's roots.** `SSL_CERT_FILE` and `SSL_CERT_DIR` already replace the system store. The file is read once, is at most 1 MiB, and must hold only usable certificates. `insecure` wins over `ca_file`, which is then not read.
@@ -220,7 +220,8 @@
     - A `tls.ca_file` is compared as the text of the path it resolves to. Before, `ca.pem` and `ca.pem/`, which `Path` compares as equal, shared one trust, so the second spelling was never read and the build passed even though `ca.pem/` names no file.
     - Building a plan's executors finds pools and roots by hash instead of scanning the ones already built, so the work grows linearly with the number of scopes, not with its square.
     - `PoolScope`'s docs say what each scope shares, as the schema does.
-  - [ ] CI green on all four runners after the user pushes (plan Task 7).
+  - [x] Fix from Codex's third review (2026-11-19): the crate docs no longer say the session holds cookies, which arrive in P2.4.
+  - [x] CI green on all four runners after the user pushes (plan Task 7). Run 44455632651 on `41f03b6`, 2026-11-19. The crate-doc fix above came after this run.
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
   - From P2.3: the session already holds its executor's ID and, under `pool: vu`, the user's pool. The jar joins them there.
   - From P2.1:
