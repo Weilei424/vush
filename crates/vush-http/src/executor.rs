@@ -38,7 +38,7 @@ pub enum BuildError {
 }
 
 /// Where in the test file a setting comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// The file-level `http` block.
     File,
