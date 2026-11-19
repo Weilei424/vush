@@ -5,7 +5,7 @@ use std::time::Duration;
 use super::value::ByteSize;
 
 /// Which HTTP version a connection may use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HttpVersion {
     /// Negotiate the version with the server.
     Auto,
