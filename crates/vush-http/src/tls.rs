@@ -6,9 +6,10 @@
 //! Under `pool: vu`, each user gets a copy of the config with a TLS session
 //! cache of its own.
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use rustls::client::Resumption;
@@ -37,8 +38,11 @@ const SESSIONS_PER_SERVER: usize = 8;
 pub(crate) enum Trust {
     /// The system's roots.
     System,
-    /// The system's roots plus the certificates in this file.
-    SystemPlus(PathBuf),
+    /// The system's roots plus the certificates in the file at this path.
+    /// The path is kept as text, so two spellings of one file are two
+    /// trusts, even those that `Path` compares as equal, such as `ca.pem`
+    /// and `ca.pem/`. Each spelling is read on its own.
+    SystemPlus(OsString),
     /// Any certificate, for any name.
     Insecure,
 }
@@ -52,7 +56,7 @@ impl Trust {
             return Self::Insecure;
         }
         match &settings.tls.ca_file {
-            Some(ca_file) => Self::SystemPlus(test_dir.join(ca_file)),
+            Some(ca_file) => Self::SystemPlus(test_dir.join(ca_file).into_os_string()),
             None => Self::System,
         }
     }
@@ -196,6 +200,7 @@ impl ServerCertVerifier for AcceptAnyCertificate {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rcgen::{BasicConstraints, Certificate, CertificateParams, DnType, IsCa, KeyPair};
@@ -374,7 +379,7 @@ mod tests {
         settings.tls.ca_file = Some("ca.pem".to_owned());
         assert_eq!(
             Trust::of(&settings, test_dir),
-            Trust::SystemPlus(PathBuf::from("/t/ca.pem"))
+            Trust::SystemPlus("/t/ca.pem".into())
         );
         settings.tls.insecure = true;
         assert_eq!(Trust::of(&settings, test_dir), Trust::Insecure);
