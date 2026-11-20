@@ -222,7 +222,7 @@
     - `PoolScope`'s docs say what each scope shares, as the schema does.
   - [x] Fixes from Codex's third and fourth reviews (2026-11-19): the crate and executor docs no longer say the session holds cookies or keeps nothing. It holds its executor's ID and, under `pool: vu`, the user's pool, and its cookie jar arrives in P2.4.
   - [x] CI green on all four runners after the user pushes (plan Task 7). Run 44455632651 on `41f03b6`, 2026-11-19. The doc fixes above came after this run.
-- [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport (design approved 2026-11-20).
+- [x] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport (design approved 2026-11-20).
   - Spec: `docs/superpowers/specs/2026-11-20-phase-2-4-cookies-credentials-design.md` · Plan: `docs/superpowers/plans/2026-11-20-phase-2-4-cookies-credentials.md` (local only).
   - Decided 2026-11-20:
     - **The jar lives in the session**, beside its executor's ID and the `pool: vu` pool. A clone copies it. The executor holds only the scope's `cookies` and `max_cookies`.
@@ -245,7 +245,8 @@
   - [x] The jar: storing, sending and eviction (plan Task 4).
   - [x] Sessions with jars, wired into `send` (plan Task 5).
   - [x] The guarantee end to end, and the docs (plan Task 6).
-  - [ ] CI green on all four runners after the user pushes (plan Task 6).
+  - [x] Final-review fixes (2026-11-20): the jar ignores a cookie whose stored path or domain is over 1024 bytes, the eviction tests now tell least recently used from oldest, and the schema's cookie rules are corrected.
+  - [x] CI green on all four runners after the user pushes (plan Task 6). Run 44788773613 on `b2fd04b`, 2026-11-20.
 - [ ] P2.5 Implement bounded body capture and safe error diagnostics.
   - From P2.1:
     - Whether to drain or close the connection after a cut body. The spike found that dropping the rest of the body closes an HTTP/1.1 connection.
