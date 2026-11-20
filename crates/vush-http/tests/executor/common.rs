@@ -781,6 +781,26 @@ pub fn raw_headers(stream: TcpStream) -> BoxFuture {
     )
 }
 
+/// Sets a cookie, promises 10 body bytes, sends 3, then closes.
+pub fn cookie_then_cut_body(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        read_head(&stream).await;
+        write_all(
+            &stream,
+            b"HTTP/1.1 200 OK\r\nset-cookie: late=1\r\ncontent-length: 10\r\n\r\nabc",
+        )
+        .await;
+    })
+}
+
+/// A `set-cookie` value that isn't UTF-8.
+pub fn raw_cookie(stream: TcpStream) -> BoxFuture {
+    answer(
+        stream,
+        b"HTTP/1.1 200 OK\r\nset-cookie: raw=\xff\xfe\r\ncontent-length: 0\r\n\r\n",
+    )
+}
+
 /// A head with `content-length: 100` and no body, as a `HEAD` gets.
 pub fn head_with_length(stream: TcpStream) -> BoxFuture {
     answer(stream, b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n")
