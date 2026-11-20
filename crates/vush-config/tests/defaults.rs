@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use vush_config::{Format, MAX_DEPTH, MAX_FILE_BYTES, MAX_TEXT_BYTES, MAX_VALUES, parse};
 use vush_core::plan::{
-    Expect, HttpSettings, MAX_DURATION, MAX_REDIRECTS, MAX_RETRY_ATTEMPTS, RequestStep,
-    ResourceLimits, StatusMatch, Step, WorkloadPlan, parse_duration,
+    Expect, HttpSettings, MAX_COOKIES, MAX_DURATION, MAX_REDIRECTS, MAX_RETRY_ATTEMPTS,
+    RequestStep, ResourceLimits, StatusMatch, Step, WorkloadPlan, parse_duration,
 };
 
 use Check::{Holds, Same};
@@ -821,7 +821,7 @@ fn duration_cap_matches_max_duration() {
 }
 
 #[test]
-fn retry_and_redirect_caps_match_the_constants() {
+fn caps_match_the_constants() {
     let tables = doc_tables();
     let type_cell = |heading: &str, key: &str| -> String {
         let table = tables
@@ -838,6 +838,10 @@ fn retry_and_redirect_caps_match_the_constants() {
     assert_eq!(
         type_cell("`http`", "`redirects`"),
         format!("integer, 0 to {MAX_REDIRECTS}")
+    );
+    assert_eq!(
+        type_cell("`limits`", "`max_cookies`"),
+        format!("integer, 0 to {MAX_COOKIES}")
     );
     let attempts = type_cell("`retry`", "`attempts`");
     assert!(
