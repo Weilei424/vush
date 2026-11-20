@@ -120,6 +120,13 @@ fn rows() -> Vec<Row> {
             "at most 20",
         ),
         row(
+            "TooManyCookies",
+            file(&top("limits: {max_cookies: 3001}\n"), LOAD, &get("")),
+            "limits.max_cookies",
+            "max_cookies: 3001",
+            "at most 3000",
+        ),
+        row(
             "TooFewAttempts",
             file(
                 BASE,
