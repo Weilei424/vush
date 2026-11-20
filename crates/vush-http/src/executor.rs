@@ -154,7 +154,8 @@ pub(crate) enum Transport {
 ///   own pool, with its own TLS session cache so users never resume each
 ///   other's sessions, and its clones share both. Every pool closes a
 ///   connection that has been idle for 90 s.
-/// - `cookies` has no effect until P2.4, because the session keeps nothing.
+/// - `cookies` has no effect, because the session has no cookie jar until
+///   P2.4.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
 ///   `send`, and follows redirects itself.
 /// - `tls.ca_file` names a PEM file, resolved against the test file's
