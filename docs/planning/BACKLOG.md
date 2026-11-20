@@ -309,6 +309,7 @@
 - [ ] P7.3 Measure generator throughput, per-VU CPU/RSS, startup, latency accuracy and queue lag under saturation.
 - [ ] P7.4 Benchmark sleeping VUs at multiple scales, with 100K as aspirational if hardware allows.
 - [ ] P7.5 Profile and optimize measured hotspots with correctness/performance regression checks.
+  - From P2.4: the jar's `mark_used` compares every picked ID with every stored cookie (about 9M compares at the 3000 cap when all match). `self.cookies` is sorted by creation number, so sorting the IDs and using `binary_search` would make it near-linear. Measure first.
 - [ ] P7.6 Publish baseline conditions, numerical budgets and known limits, without unsupported superiority claims.
 
 ## Phase 8 Execution Checklist — MVP release
