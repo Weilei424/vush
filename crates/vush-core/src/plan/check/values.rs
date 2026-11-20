@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::super::error::{PlanError, PlanErrorKind};
 use super::super::load::{ClosedStop, ClosedVusLoad, LoadModel, RateSchedule, Stage};
-use super::super::settings::MAX_REDIRECTS;
+use super::super::settings::{MAX_COOKIES, MAX_REDIRECTS};
 use super::super::step::{
     Condition, HttpMethod, MAX_RETRY_ATTEMPTS, RequestTarget, RetryPolicy, StatusMatch,
 };
@@ -40,6 +40,13 @@ pub(super) fn inherited(
 pub(super) fn redirects(value: u32, at: &At<'_>, errors: &mut Vec<PlanError>) {
     if value > MAX_REDIRECTS {
         push(errors, at, PlanErrorKind::RedirectsTooHigh);
+    }
+}
+
+/// Checks a cookie limit. `at` is the `max_cookies` place.
+pub(super) fn max_cookies(value: u32, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if value > MAX_COOKIES {
+        push(errors, at, PlanErrorKind::TooManyCookies);
     }
 }
 
