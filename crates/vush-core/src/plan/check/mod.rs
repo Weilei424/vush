@@ -131,6 +131,11 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
         &mut errors,
     );
     let limits = root.key("limits");
+    values::max_cookies(
+        draft.limits.max_cookies,
+        &limits.key("max_cookies"),
+        &mut errors,
+    );
     values::duration(
         draft.limits.hook_timeout,
         true,
@@ -233,6 +238,13 @@ fn check_scenario<'a>(
         );
     }
     let limits = at.key("limits");
+    if scenario.limits.max_cookies != draft.limits.max_cookies {
+        values::max_cookies(
+            scenario.limits.max_cookies,
+            &limits.key("max_cookies"),
+            errors,
+        );
+    }
     values::inherited(
         scenario.limits.hook_timeout,
         draft.limits.hook_timeout,
@@ -1079,9 +1091,64 @@ mod tests {
         );
     }
 
+    fn with_max_cookies(file: u32, scenarios: &[u32]) -> PlanDraft {
+        let mut d = draft(
+            scenarios
+                .iter()
+                .enumerate()
+                .map(|(i, &max_cookies)| {
+                    let mut s = scenario(&format!("s{i}"));
+                    s.limits.max_cookies = max_cookies;
+                    s
+                })
+                .collect(),
+        );
+        d.limits.max_cookies = file;
+        d
+    }
+
+    #[test]
+    fn max_cookies_are_capped_at_3000() {
+        assert!(errors(&with_max_cookies(3000, &[3000])).is_empty());
+        assert!(errors(&with_max_cookies(0, &[0])).is_empty());
+        assert_eq!(
+            errors(&with_max_cookies(3001, &[3001])),
+            [at("limits.max_cookies", PlanErrorKind::TooManyCookies)]
+        );
+        assert_eq!(
+            errors(&with_max_cookies(64, &[3001])),
+            [at(
+                "scenarios[0].limits.max_cookies",
+                PlanErrorKind::TooManyCookies
+            )]
+        );
+        assert_eq!(
+            errors(&with_max_cookies(u32::MAX, &[u32::MAX])),
+            [at("limits.max_cookies", PlanErrorKind::TooManyCookies)]
+        );
+    }
+
+    #[test]
+    fn an_inherited_cookie_cap_is_reported_once() {
+        assert_eq!(
+            errors(&with_max_cookies(3001, &[3001, 3001])),
+            [at("limits.max_cookies", PlanErrorKind::TooManyCookies)]
+        );
+        assert_eq!(
+            errors(&with_max_cookies(3001, &[3001, 3002])),
+            [
+                at("limits.max_cookies", PlanErrorKind::TooManyCookies),
+                at(
+                    "scenarios[1].limits.max_cookies",
+                    PlanErrorKind::TooManyCookies
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn cap_texts_state_the_constants() {
-        use super::super::{MAX_REDIRECTS, MAX_RETRY_ATTEMPTS};
+        use super::super::{MAX_COOKIES, MAX_REDIRECTS, MAX_RETRY_ATTEMPTS};
         assert_eq!(
             PlanErrorKind::TooManyAttempts.to_string(),
             format!("`attempts` must be at most {MAX_RETRY_ATTEMPTS}")
@@ -1089,6 +1156,10 @@ mod tests {
         assert_eq!(
             PlanErrorKind::RedirectsTooHigh.to_string(),
             format!("`redirects` must be at most {MAX_REDIRECTS}")
+        );
+        assert_eq!(
+            PlanErrorKind::TooManyCookies.to_string(),
+            format!("`max_cookies` must be at most {MAX_COOKIES}")
         );
     }
 
