@@ -2,27 +2,30 @@
 //! through its pool, or under `pool: vu` through the session's.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use http::{Extensions, Request, Version};
+use http::header::{COOKIE, SET_COOKIE};
+use http::{Extensions, HeaderValue, Request, Version};
 use http_body_util::BodyExt;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{CaptureConnection, Connected, capture_connection};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::RootCertStore;
-use vush_core::plan::{HttpSettings, HttpVersion};
+use vush_core::plan::{HttpSettings, HttpVersion, ResourceLimits};
 use vush_core::protocol::http::{HttpExecutor, HttpHop, HttpRequest, HttpResponse, WireVersion};
 use vush_core::protocol::{BodySizes, Failure, FailureKind, FailureStage, HopTiming};
 
 use crate::body::CountingBody;
 use crate::classify::{classify, failure, timeout};
 use crate::connector::{ConnInfo, Connector};
+use crate::cookie::{Jar, Target};
 use crate::executors::{SystemRoots, build};
 use crate::pool::ScopeView;
-use crate::prepare::{Prepared, prepare};
+use crate::prepare::{Prepared, add_cookies, prepare};
 use crate::stage::StageMarker;
 
 /// Why an executor couldn't be built. Each text is fixed: it names a
@@ -98,13 +101,16 @@ pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 static NEXT_EXECUTOR: AtomicU64 = AtomicU64::new(0);
 
 /// One user's protocol state. It holds the ID of the executor that made it,
-/// which `send` checks, and under `pool: vu` the user's own pool, with its
-/// own TLS session cache, so users never share connections or resume each
-/// other's sessions. A clone shares both. P2.4 adds the cookie jar.
+/// which `send` checks; under `pool: vu` the user's own pool, with its own
+/// TLS session cache, so users never share connections or resume each
+/// other's sessions; and the user's cookie jar, unless the executor keeps
+/// no cookies. A clone shares the pool and copies the jar, so the copy's
+/// cookies change on their own.
 #[derive(Clone)]
 pub struct Session {
     owner: u64,
     client: Option<Client<Connector, CountingBody>>,
+    jar: Option<Jar>,
 }
 
 /// Builds a pool. Every pool, pooled or per user, is built here, so each
@@ -154,8 +160,12 @@ pub(crate) enum Transport {
 ///   own pool, with its own TLS session cache so users never resume each
 ///   other's sessions, and its clones share both. Every pool closes a
 ///   connection that has been idle for 90 s.
-/// - `cookies` has no effect, because the session has no cookie jar until
-///   P2.4.
+/// - `cookies`, with the limits' `max_cookies`, sets whether each session
+///   has a cookie jar and its size: none under `cookies: false` or
+///   `max_cookies: 0`. A session stores every `Set-Cookie` of a response
+///   when its head arrives, on every status, and sends its cookies with each
+///   request they match. `cookies` and `max_cookies` don't change pool
+///   sharing, because sharing a pool never shares cookies.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
 ///   `send`, and follows redirects itself.
 /// - `tls.ca_file` names a PEM file, resolved against the test file's
@@ -169,6 +179,19 @@ pub struct Executor {
     id: u64,
     transport: Transport,
     limit: u64,
+    /// The size of each session's jar, or `None` for no jar.
+    pub(crate) cookies: Option<NonZeroU32>,
+}
+
+/// The size of each session's jar under `settings` and `limits`, or `None`
+/// when sessions keep no cookies: under `cookies: false` or
+/// `max_cookies: 0`.
+pub(crate) fn jar_limit(settings: &HttpSettings, limits: &ResourceLimits) -> Option<NonZeroU32> {
+    if settings.cookies {
+        NonZeroU32::new(limits.max_cookies)
+    } else {
+        None
+    }
 }
 
 impl Executor {
@@ -176,14 +199,19 @@ impl Executor {
     /// trusts the system's root certificates, plus those in `tls.ca_file`,
     /// which is resolved against `test_dir`, the test file's directory.
     /// System roots that don't parse are skipped. Its background connects
-    /// are bounded by `timeout`.
+    /// are bounded by `timeout`. Its jar limit is `limits.max_cookies`, and
+    /// nothing else in `limits` is read.
     ///
     /// Building fails with [`BuildError::CaFile`] at [`Scope::File`] when
     /// `tls.ca_file` can't be used, and with [`BuildError::NoTrustedRoots`]
     /// when no root is left. Under `tls.insecure`, neither the system's roots
     /// nor `tls.ca_file` are read.
-    pub fn new(settings: &HttpSettings, test_dir: &Path) -> Result<Self, BuildError> {
-        Self::lone(settings, test_dir, SystemRoots::Load)
+    pub fn new(
+        settings: &HttpSettings,
+        limits: &ResourceLimits,
+        test_dir: &Path,
+    ) -> Result<Self, BuildError> {
+        Self::lone(settings, limits, test_dir, SystemRoots::Load)
     }
 
     /// Like [`Executor::new`], with `system` standing in for the system's
@@ -191,10 +219,11 @@ impl Executor {
     /// `RootCertStore::empty()` serves plaintext servers.
     pub fn with_roots(
         settings: &HttpSettings,
+        limits: &ResourceLimits,
         test_dir: &Path,
         system: RootCertStore,
     ) -> Result<Self, BuildError> {
-        Self::lone(settings, test_dir, SystemRoots::StandIn(system))
+        Self::lone(settings, limits, test_dir, SystemRoots::StandIn(system))
     }
 
     /// Runs a plan's build steps for one scope at [`Scope::File`], because a
@@ -202,36 +231,47 @@ impl Executor {
     /// its connect limit is `timeout`.
     fn lone(
         settings: &HttpSettings,
+        limits: &ResourceLimits,
         test_dir: &Path,
         system: SystemRoots,
     ) -> Result<Self, BuildError> {
         let view = ScopeView {
             at: Scope::File,
             settings,
+            limits,
             lists: Vec::new(),
         };
         let mut built = build(&[view], test_dir, system)?;
         Ok(built.pop().expect("one scope builds one executor"))
     }
 
-    /// An executor over `transport`, with the body limit `max_response_size`.
-    /// It gets an ID of its own.
-    pub(crate) fn from_parts(transport: Transport, max_response_size: u64) -> Self {
+    /// An executor over `transport`, with the body limit `max_response_size`
+    /// and jars of `cookies` cookies, or none. It gets an ID of its own.
+    pub(crate) fn from_parts(
+        transport: Transport,
+        max_response_size: u64,
+        cookies: Option<NonZeroU32>,
+    ) -> Self {
         Self {
             id: NEXT_EXECUTOR.fetch_add(1, Ordering::Relaxed),
             transport,
             limit: max_response_size,
+            cookies,
         }
     }
 
-    /// The pool a session's requests go through: its own under `pool: vu`,
-    /// the executor's otherwise.
-    fn client_of<'a>(&'a self, session: &'a Session) -> &'a Client<Connector, CountingBody> {
+    /// The pool a session's requests go through: its own, `own`, under
+    /// `pool: vu`, the executor's otherwise. It takes the session's pool
+    /// alone, so the session's jar can be borrowed beside it.
+    fn client_of<'a>(
+        &'a self,
+        own: Option<&'a Client<Connector, CountingBody>>,
+    ) -> &'a Client<Connector, CountingBody> {
         match &self.transport {
             Transport::Pooled(client) => client,
             // The owner check passed, so this executor made the session, and
             // it gave the session a client.
-            Transport::PerSession { .. } => session.client.as_ref().unwrap_or_else(|| {
+            Transport::PerSession { .. } => own.unwrap_or_else(|| {
                 unreachable!("a session of a per-session executor holds a client")
             }),
         }
@@ -247,13 +287,14 @@ impl Executor {
         capture: &mut CaptureConnection,
         deadline: Option<Instant>,
         progress: &mut Progress,
+        jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
         // `prepare` is done, so the hop is waiting for a connection: its own
         // connect, a pooled one, or, under `http2`, another hop's connect,
         // which hyper-util shares without running the connector for this hop.
         let marker = StageMarker::new();
         marker.set(FailureStage::Connect);
-        let hop = self.drive(client, request, capture, &marker, progress);
+        let hop = self.drive(client, request, capture, &marker, progress, jar);
         let Some(deadline) = deadline else {
             return hop.await;
         };
@@ -264,7 +305,8 @@ impl Executor {
     }
 
     /// Sends the request, waits for its head, and reads its body up to the
-    /// limit.
+    /// limit. `jar` is the session's jar, if it has one, with the target the
+    /// head's `Set-Cookie` values are stored against.
     async fn drive(
         &self,
         client: &Client<Connector, CountingBody>,
@@ -272,6 +314,7 @@ impl Executor {
         capture: &mut CaptureConnection,
         marker: &StageMarker,
         progress: &mut Progress,
+        jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
         let mut response = client.request(request);
         // The hop is in `connect` until hyper-util assigns it a connection,
@@ -303,6 +346,15 @@ impl Executor {
         };
         progress.to_headers = Some(progress.start.elapsed());
         marker.set(FailureStage::Body);
+        // Stored before the body is read, on every status, so a hop whose
+        // body fails or runs out of time keeps them. The response keeps its
+        // `Set-Cookie` headers.
+        if let Some((jar, target)) = jar {
+            let now = SystemTime::now();
+            for value in head.headers().get_all(SET_COOKIE) {
+                jar.store(value.as_bytes(), target, now);
+            }
+        }
 
         let (parts, mut body) = head.into_parts();
         let version = wire_version(parts.version)
@@ -353,6 +405,7 @@ impl HttpExecutor for Executor {
         Session {
             owner: self.id,
             client,
+            jar: self.cookies.map(Jar::new),
         }
     }
 
@@ -376,22 +429,20 @@ impl HttpExecutor for Executor {
         } else if timeout_after.is_zero() {
             Err(timeout(FailureStage::Prepare))
         } else {
-            match prepare(request) {
+            // The pool is borrowed apart from the jar, which the hop changes.
+            let Session { client, jar, .. } = session;
+            match ready(request, jar.as_mut(), deadline) {
                 Err(failure) => Err(failure),
-                // `prepare` can't be cut short, so the deadline is checked
-                // once it is done.
-                Ok(_) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
-                    Err(timeout(FailureStage::Prepare))
-                }
                 Ok(prepared) => {
-                    let mut request = wire_request(prepared, sent.clone());
+                    let (mut request, target) = wire_request(prepared, sent.clone());
                     let capture = capture.insert(capture_connection(&mut request));
                     self.exchange(
-                        self.client_of(session),
+                        self.client_of(client.as_ref()),
                         request,
                         capture,
                         deadline,
                         &mut progress,
+                        jar.as_mut().map(|jar| (jar, &target)),
                     )
                     .await
                 }
@@ -454,12 +505,47 @@ impl Progress {
     }
 }
 
-fn wire_request(prepared: Prepared, sent: Arc<AtomicU64>) -> Request<CountingBody> {
+/// Everything a hop does before the wire, in order: `prepare`, adding the
+/// jar's cookies, the deadline check, and counting those cookies as used. A
+/// failure in any step is in `prepare`, and changes nothing in the jar but
+/// the expired cookies that picking removes.
+fn ready(
+    request: &HttpRequest,
+    mut jar: Option<&mut Jar>,
+    deadline: Option<Instant>,
+) -> Result<Prepared, Failure> {
+    let mut prepared = prepare(request)?;
+    let picked = jar.as_deref_mut().and_then(|jar| {
+        let own: Vec<&[u8]> = prepared
+            .headers
+            .get_all(COOKIE)
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect();
+        jar.pick(&prepared.target, &own, SystemTime::now())
+    });
+    if let Some(picked) = &picked {
+        add_cookies(&mut prepared, picked.pairs())?;
+    }
+    // Preparing can't be cut short, so the deadline is checked once it is
+    // done.
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(timeout(FailureStage::Prepare));
+    }
+    if let (Some(jar), Some(picked)) = (jar, &picked) {
+        jar.mark_used(picked);
+    }
+    Ok(prepared)
+}
+
+/// The request for the wire, and the target its response's cookies are
+/// stored against.
+fn wire_request(prepared: Prepared, sent: Arc<AtomicU64>) -> (Request<CountingBody>, Target) {
     let mut request = Request::new(CountingBody::new(prepared.body, sent));
     *request.method_mut() = prepared.method;
     *request.uri_mut() = prepared.uri;
     *request.headers_mut() = prepared.headers;
-    request
+    (request, prepared.target)
 }
 
 /// Resolves once hyper-util assigns a connection to the request, new or
@@ -489,10 +575,13 @@ fn wire_version(version: Version) -> Option<WireVersion> {
 mod tests {
     use std::convert::Infallible;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Mutex;
 
     use bytes::Bytes;
     use http::Response;
+    use http::header::AUTHORIZATION;
     use http_body_util::Full;
+    use hyper::body::Incoming;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
     use rcgen::{CertificateParams, KeyPair, SanType};
@@ -502,10 +591,239 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
     use vush_core::plan::PoolScope;
     use vush_core::protocol::http::RequestUrl;
+    use vush_core::runner::run_attempt;
 
     use super::*;
+    use crate::connector::Resolver;
+    use crate::tls::{Verification, client_config};
 
     const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    const NAMED_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// A pooled `auto` executor with a jar of 64 cookies. Its resolver maps
+    /// every name to 127.0.0.1 on the asked port, so no real resolver is
+    /// asked.
+    fn named() -> Executor {
+        let resolver: Resolver =
+            Arc::new(|_, port| Box::pin(async move { Ok(vec![SocketAddr::new(LOCALHOST, port)]) }));
+        let tls = client_config(
+            Verification::Roots(RootCertStore::empty()),
+            HttpVersion::Auto,
+        );
+        let connector = Connector::with_resolver(tls, HttpVersion::Auto, NAMED_TIMEOUT, resolver);
+        Executor::from_parts(
+            Transport::Pooled(Box::new(client(connector, HttpVersion::Auto))),
+            1_048_576,
+            NonZeroU32::new(64),
+        )
+    }
+
+    /// The values of `name` in `headers`, joined with `, `, or empty.
+    fn joined(headers: &http::HeaderMap, name: http::HeaderName) -> Vec<u8> {
+        let values: Vec<&[u8]> = headers.get_all(name).iter().map(|v| v.as_bytes()).collect();
+        values.join(b", ".as_slice())
+    }
+
+    /// An HTTP/1.1 server on 127.0.0.1 that answers every host name. It
+    /// binds first and passes its port to `routes`, so a `Location` can name
+    /// it under another name, and gives the port. A listed path gets its
+    /// route's status and headers, and any other path `200` with no extra
+    /// headers. Every response carries `x-seen-cookie` and
+    /// `x-seen-authorization`: the request's values of those headers, or
+    /// empty.
+    async fn cookie_server(
+        routes: impl FnOnce(u16) -> Vec<(&'static str, u16, Vec<(&'static str, String)>)>,
+    ) -> u16 {
+        let listener = TcpListener::bind((LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let routes = Arc::new(routes(port));
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let routes = routes.clone();
+                        async move {
+                            let mut response = Response::builder()
+                                .header("x-seen-cookie", joined(request.headers(), COOKIE))
+                                .header(
+                                    "x-seen-authorization",
+                                    joined(request.headers(), AUTHORIZATION),
+                                );
+                            let path = request.uri().path();
+                            if let Some((_, status, headers)) =
+                                routes.iter().find(|(listed, ..)| *listed == path)
+                            {
+                                response = response.status(*status);
+                                for (name, value) in headers {
+                                    response = response.header(*name, value.as_str());
+                                }
+                            }
+                            let response = response.body(Full::new(Bytes::new())).unwrap();
+                            Ok::<_, Infallible>(response)
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(tcp), service)
+                        .await;
+                });
+            }
+        });
+        port
+    }
+
+    fn get(url: String, headers: &[(&str, &str)]) -> HttpRequest {
+        HttpRequest {
+            method: "GET".parse().unwrap(),
+            url: RequestUrl::Absolute(url),
+            query: vec![],
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            body: None,
+        }
+    }
+
+    /// The value of the response header `name`.
+    fn header(response: &HttpResponse, name: &str) -> String {
+        let (_, value) = response
+            .headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("the response has no {name}"));
+        String::from_utf8(value.clone()).unwrap()
+    }
+
+    /// The `Cookie` and `Authorization` the server saw.
+    fn seen(response: &HttpResponse) -> (String, String) {
+        (
+            header(response, "x-seen-cookie"),
+            header(response, "x-seen-authorization"),
+        )
+    }
+
+    /// Sends a `GET` to `url` on `session` and gives the `Cookie` the server
+    /// saw.
+    async fn cookie_seen(executor: &Executor, session: &mut Session, url: String) -> String {
+        let hop = executor.send(session, &get(url, &[]), NAMED_TIMEOUT).await;
+        seen(&hop.outcome.expect("the hop should succeed")).0
+    }
+
+    #[tokio::test]
+    async fn domain_cookies_reach_hosts_under_the_domain() {
+        let port = cookie_server(|_| {
+            vec![(
+                "/set",
+                200,
+                vec![
+                    ("set-cookie", "h=1".to_owned()),
+                    ("set-cookie", "d=1; Domain=vush.test".to_owned()),
+                ],
+            )]
+        })
+        .await;
+        let executor = named();
+        let mut session = executor.new_session();
+        let url = |host: &str, path: &str| format!("http://{host}:{port}{path}");
+        assert_eq!(
+            cookie_seen(&executor, &mut session, url("a.vush.test", "/set")).await,
+            ""
+        );
+        assert_eq!(
+            cookie_seen(&executor, &mut session, url("b.vush.test", "/")).await,
+            "d=1"
+        );
+        assert_eq!(
+            cookie_seen(&executor, &mut session, url("other.test", "/")).await,
+            ""
+        );
+        assert_eq!(
+            cookie_seen(&executor, &mut session, url("a.vush.test", "/")).await,
+            "h=1; d=1"
+        );
+    }
+
+    /// Keeps every response its executor gets, so a test sees the hops that
+    /// `run_attempt` drops.
+    struct Recording {
+        inner: Executor,
+        responses: Mutex<Vec<HttpResponse>>,
+    }
+
+    impl HttpExecutor for Recording {
+        type Session = Session;
+
+        fn new_session(&self) -> Session {
+            self.inner.new_session()
+        }
+
+        async fn send(
+            &self,
+            session: &mut Session,
+            request: &HttpRequest,
+            timeout: Duration,
+        ) -> HttpHop {
+            let hop = self.inner.send(session, request, timeout).await;
+            if let Ok(response) = &hop.outcome {
+                self.responses.lock().unwrap().push(response.clone());
+            }
+            hop
+        }
+
+        fn follow(
+            &self,
+            request: &HttpRequest,
+            response: &HttpResponse,
+        ) -> Result<Option<HttpRequest>, Failure> {
+            self.inner.follow(request, response)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cross_host_redirect_carries_only_the_new_hosts_cookies() {
+        let port = cookie_server(|port| {
+            vec![
+                (
+                    "/start",
+                    302,
+                    vec![
+                        ("set-cookie", "jar=1".to_owned()),
+                        ("location", format!("http://other.test:{port}/back")),
+                    ],
+                ),
+                (
+                    "/back",
+                    302,
+                    vec![("location", format!("http://a.vush.test:{port}/end"))],
+                ),
+            ]
+        })
+        .await;
+        let executor = Recording {
+            inner: named(),
+            responses: Mutex::new(Vec::new()),
+        };
+        let mut session = executor.new_session();
+        let request = get(
+            format!("http://a.vush.test:{port}/start"),
+            &[("Cookie", "mine=1"), ("Authorization", "Bearer t")],
+        );
+        let attempt = run_attempt(&executor, &mut session, request, NAMED_TIMEOUT, 5).await;
+        assert_eq!(
+            attempt.response.expect("the chain ends at /end").status,
+            200
+        );
+
+        let responses = executor.responses.into_inner().unwrap();
+        let statuses: Vec<u16> = responses.iter().map(|r| r.status).collect();
+        assert_eq!(statuses, [302, 302, 200]);
+        let want =
+            |cookie: &str, authorization: &str| (cookie.to_owned(), authorization.to_owned());
+        assert_eq!(seen(&responses[0]), want("mine=1", "Bearer t"), "/start");
+        assert_eq!(seen(&responses[1]), want("", ""), "other.test/back");
+        assert_eq!(seen(&responses[2]), want("jar=1", ""), "/end");
+    }
 
     /// A TLS server for 127.0.0.1, and a root store that trusts it. It
     /// speaks HTTP/1.1, answers each request with `x-handshake: resumed` when
@@ -588,7 +906,9 @@ mod tests {
             pool: PoolScope::Vu,
             ..HttpSettings::default()
         };
-        let executor = Executor::with_roots(&settings, Path::new("."), roots).unwrap();
+        let executor =
+            Executor::with_roots(&settings, &ResourceLimits::default(), Path::new("."), roots)
+                .unwrap();
         let request = HttpRequest {
             method: "GET".parse().unwrap(),
             url: RequestUrl::Absolute(format!("https://{addr}/")),
