@@ -1,0 +1,5 @@
+error: `max_cookies` must be at most 3000
+  --> too-many-cookies.yaml:4:24
+   = at limits.max_cookies
+
+too-many-cookies.yaml: not valid, 1 problem
