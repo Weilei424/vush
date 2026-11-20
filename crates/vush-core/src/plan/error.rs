@@ -181,6 +181,8 @@ pub enum PlanErrorKind {
     TooManyAttempts,
     /// `http.redirects` is above `MAX_REDIRECTS`.
     RedirectsTooHigh,
+    /// `limits.max_cookies` is above `MAX_COOKIES`.
+    TooManyCookies,
     /// A non-idempotent method is retried without `allow_non_idempotent`.
     RetryNeedsOptIn,
     /// A status code is outside 100 to 599.
@@ -278,6 +280,9 @@ impl fmt::Display for PlanErrorKind {
             ),
             Self::RedirectsTooHigh => {
                 write!(f, "`redirects` must be at most {}", super::MAX_REDIRECTS)
+            }
+            Self::TooManyCookies => {
+                write!(f, "`max_cookies` must be at most {}", super::MAX_COOKIES)
             }
             Self::RetryNeedsOptIn => f.write_str(
                 "retrying a method other than GET, HEAD, PUT, DELETE, OPTIONS or TRACE needs `allow_non_idempotent: true`",
