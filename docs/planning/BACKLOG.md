@@ -244,7 +244,7 @@
   - [x] Reading `Set-Cookie` (plan Task 3).
   - [x] The jar: storing, sending and eviction (plan Task 4).
   - [x] Sessions with jars, wired into `send` (plan Task 5).
-  - [ ] The guarantee end to end, and the docs (plan Task 6).
+  - [x] The guarantee end to end, and the docs (plan Task 6).
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P2.5 Implement bounded body capture and safe error diagnostics.
   - From P2.1:
