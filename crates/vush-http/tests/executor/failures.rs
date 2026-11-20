@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use vush_core::plan::{HttpSettings, HttpVersion};
+use vush_core::plan::{HttpSettings, HttpVersion, ResourceLimits};
 use vush_core::protocol::http::{HttpBody, HttpRequest};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 use vush_http::Executor;
@@ -53,8 +53,13 @@ async fn a_lone_executor_bounds_connects_by_its_timeout() {
         timeout: Duration::from_millis(200),
         ..HttpSettings::default()
     };
-    let executor =
-        Executor::with_roots(&settings, Path::new(NO_DIR), TestCa::generate().roots()).unwrap();
+    let executor = Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        TestCa::generate().roots(),
+    )
+    .unwrap();
     // The kernel completes the TCP connect and nobody answers the handshake.
     let hop = send_within(
         &executor,
