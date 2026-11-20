@@ -64,6 +64,9 @@
 mod body;
 mod classify;
 mod connector;
+// Task 5's wiring drops the attribute, when the executor first calls the jar.
+#[cfg(test)]
+mod cookie;
 mod executor;
 mod executors;
 mod follow;
