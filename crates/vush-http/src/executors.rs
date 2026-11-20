@@ -8,7 +8,7 @@ use rustls::RootCertStore;
 use vush_core::plan::{HttpVersion, PoolScope, WorkloadPlan};
 
 use crate::connector::Connector;
-use crate::executor::{BuildError, Executor, Scope, Transport, client};
+use crate::executor::{BuildError, Executor, Scope, Transport, client, jar_limit};
 use crate::pool::{PoolKey, ScopeView, limit, pool_key, scopes};
 use crate::tls::{Trust, Verification, add_ca_file, client_config, system_roots};
 
@@ -169,7 +169,11 @@ pub(crate) fn build(
         .iter()
         .zip(pool_of)
         .map(|(view, index)| {
-            Executor::from_parts(pools[index].clone(), view.settings.max_response_size.0)
+            Executor::from_parts(
+                pools[index].clone(),
+                view.settings.max_response_size.0,
+                jar_limit(view.settings, view.limits),
+            )
         })
         .collect())
 }
@@ -211,4 +215,73 @@ fn roots_by_trust(
         found.insert(trust, roots);
     }
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::{NonZeroU32, NonZeroU64};
+
+    use vush_core::plan::{
+        ClosedStop, ClosedVusLoad, HttpSettings, LoadModel, PlanDraft, ResourceLimits, Scenario,
+        StatePolicy, Step,
+    };
+
+    use super::*;
+
+    fn limits(max_cookies: u32) -> ResourceLimits {
+        ResourceLimits {
+            max_cookies,
+            ..ResourceLimits::default()
+        }
+    }
+
+    /// A scenario named `s<index>` that waits once, with these jar settings.
+    fn scenario(index: usize, cookies: bool, max_cookies: u32) -> Scenario {
+        Scenario {
+            name: format!("s{index}"),
+            load: LoadModel::ClosedVus(ClosedVusLoad::Fixed {
+                vus: NonZeroU32::MIN,
+                stop: ClosedStop::IterationsPerVu(NonZeroU64::MIN),
+            }),
+            http: HttpSettings {
+                cookies,
+                ..HttpSettings::default()
+            },
+            limits: limits(max_cookies),
+            max_request_rate: None,
+            state: StatePolicy::Persist,
+            setup: vec![],
+            teardown: vec![],
+            vu_setup: vec![],
+            vu_teardown: vec![],
+            steps: vec![Step::Wait(Duration::from_secs(1))],
+        }
+    }
+
+    #[test]
+    fn each_scope_gets_its_own_jar_limit() {
+        let plan = WorkloadPlan::new(PlanDraft {
+            name: "test".to_owned(),
+            base_url: None,
+            http: HttpSettings::default(),
+            limits: limits(64),
+            max_request_rate: None,
+            setup: vec![],
+            teardown: vec![],
+            thresholds: vec![],
+            scenarios: vec![
+                scenario(0, true, 1),
+                scenario(1, true, 0),
+                scenario(2, false, 64),
+            ],
+        })
+        .unwrap();
+        let executors =
+            Executors::with_roots(&plan, Path::new("."), RootCertStore::empty()).unwrap();
+        assert_eq!(executors.file().cookies, NonZeroU32::new(64));
+        let scenarios: Vec<Option<NonZeroU32>> = (0..3)
+            .map(|index| executors.scenario(index).unwrap().cookies)
+            .collect();
+        assert_eq!(scenarios, [NonZeroU32::new(1), None, None]);
+    }
 }
