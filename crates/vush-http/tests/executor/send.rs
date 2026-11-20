@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use rustls::RootCertStore;
-use vush_core::plan::HttpVersion;
+use vush_core::plan::{HttpVersion, ResourceLimits};
 use vush_core::protocol::http::{HttpBody, HttpExecutor, HttpRequest, RequestUrl, WireVersion};
 use vush_core::protocol::{FailureKind, FailureStage};
 use vush_http::Executor;
@@ -173,8 +173,13 @@ async fn tls_trust_is_checked() {
 async fn bodies_over_the_limit_are_cut() {
     let addr = spawn_h1(sized).await;
     let settings = settings(HttpVersion::Auto, MIB);
-    let executor =
-        Executor::with_roots(&settings, Path::new(NO_DIR), RootCertStore::empty()).unwrap();
+    let executor = Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        RootCertStore::empty(),
+    )
+    .unwrap();
     for (path, truncated) in [
         ("/fixed/2097152", true),
         ("/chunked/2097152", true),
