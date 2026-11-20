@@ -222,12 +222,30 @@
     - `PoolScope`'s docs say what each scope shares, as the schema does.
   - [x] Fixes from Codex's third and fourth reviews (2026-11-19): the crate and executor docs no longer say the session holds cookies or keeps nothing. It holds its executor's ID and, under `pool: vu`, the user's pool, and its cookie jar arrives in P2.4.
   - [x] CI green on all four runners after the user pushes (plan Task 7). Run 44455632651 on `41f03b6`, 2026-11-19. The doc fixes above came after this run.
-- [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
-  - From P2.3: the session already holds its executor's ID and, under `pool: vu`, the user's pool. The jar joins them there.
-  - From P2.1:
-    - The session's cookie jar, with `max_cookies` and `cookies: false`.
-    - What happens when a request carries its own `Cookie` header.
-    - `follow` dropping `Authorization` and that header when the origin changes. From P2.2: `follow` already drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` on an origin change. Test it against the jar.
+- [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport (design approved 2026-11-20).
+  - Spec: `docs/superpowers/specs/2026-11-20-phase-2-4-cookies-credentials-design.md` · Plan: `docs/superpowers/plans/2026-11-20-phase-2-4-cookies-credentials.md` (local only).
+  - Decided 2026-11-20:
+    - **The jar lives in the session**, beside its executor's ID and the `pool: vu` pool. A clone copies it. The executor holds only the scope's `cookies` and `max_cookies`.
+    - **A request's own `Cookie` header merges with the jar:** one header, with the request's cookies first and then the jar's cookies whose names the request doesn't set. Names are compared exactly. When the jar adds nothing, the request's headers go out as written.
+    - **A full jar makes room:** it drops expired cookies first, then the least recently sent or set. `cookies: false` and `max_cookies: 0` mean no jar.
+    - **`max_cookies` is at most 3000**, checked by `vush validate`.
+    - **The jar is our own**, using only the standard library and following RFC 6265 §5. No new dependency.
+    - **The rules:**
+      - `Set-Cookie` is stored when the response head arrives, on every status, even if the body then fails.
+      - Name plus value is at most 4096 bytes, and `Domain` and `Path` values at most 1024. A larger cookie is ignored.
+      - There is no public-suffix list, but a one-label `Domain` is refused unless it is the host. IP hosts get only exact cookies.
+      - Cookies don't separate by port.
+      - `Secure` cookies are sent only over `https`, and one set over `http` is ignored.
+      - `Max-Age` beats `Expires`, and a zero or past expiry deletes the cookie.
+      - `HttpOnly`, `SameSite` and the cookie prefixes are ignored.
+    - **Deferred:** counting evicted or refused cookies (P6.2), and whether the connector's resolver seam becomes public (P2.6). The name tests use it in-crate.
+  - [ ] The `max_cookies` cap (plan Task 1).
+  - [ ] Cookie dates (plan Task 2).
+  - [ ] Reading `Set-Cookie` (plan Task 3).
+  - [ ] The jar: storing, sending and eviction (plan Task 4).
+  - [ ] Sessions with jars, wired into `send` (plan Task 5).
+  - [ ] The guarantee end to end, and the docs (plan Task 6).
+  - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P2.5 Implement bounded body capture and safe error diagnostics.
   - From P2.1:
     - Whether to drain or close the connection after a cut body. The spike found that dropping the rest of the body closes an HTTP/1.1 connection.
@@ -245,6 +263,7 @@
 
 - [ ] P3.1 Implement ordered step execution and fail-fast per-iteration policy.
 - [ ] P3.2 Add per-VU state, JSON/header extraction, interpolation and cookie/token propagation.
+  - From P2.4: cookies already carry over through the session's jar, and the response keeps its `Set-Cookie` headers for `extract`. P3.2 only needs to propagate tokens.
 - [ ] P3.3 Add status/content/JSON assertions and distinct failure categories.
 - [ ] P3.4 Add think time, structured `if/else` and bounded loops.
 - [ ] P3.5 Implement global/per-scenario declarative setup/teardown and define their failure policies.
@@ -257,6 +276,7 @@
 - [ ] P4.2 Implement fixed and ramping VU schedules; avoid one OS thread per VU.
   - Decide a ceiling on VU counts from measurements. P1.3 sets none.
 - [ ] P4.3 Add configurable per-iteration state reset and shared/scenario/VU connection scope.
+  - From P2.4: `reset_each_iteration` restores a clone of the session taken after `vu_setup`. A clone has its own cookie jar.
 - [ ] P4.4 Implement per-VU setup/teardown and cleanup on retirement/scale-down.
 - [ ] P4.5 Verify isolation under concurrency, memory bounds and closed-loop semantics.
 
@@ -276,6 +296,7 @@
 - [ ] P6.1 Document metric names/units/windows; bounded histograms and label cardinality.
 - [ ] P6.2 Aggregate request/iteration time, scheduler/queue delay, achieved rates, errors, drop reasons and in-flight counts.
   - From P2.2: `setup` goes to the first hop that asks for the connection's setup times. Under a shared pool, that may not be the hop that waited for the connection.
+  - From P2.4: decide whether to count the cookies a full jar evicts and the `Set-Cookie` values it ignores. Today nothing counts them.
 - [ ] P6.3 Add optional sampled detailed events with redaction and finite capacity.
 - [ ] P6.4 Add assertions, performance thresholds, dropped-work thresholds and pass/fail policy.
 - [ ] P6.5 Add human-readable summary, versioned JSON output and deterministic exit-code mapping.
