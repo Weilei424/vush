@@ -222,8 +222,8 @@ async fn no_jar_under_cookies_false_or_zero_max_cookies() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_full_jar_drops_the_least_recently_used() {
     let addr = spawn_h1(cookie_routes(&[
-        ("/x/set-a", 200, &[("set-cookie", "a=1; Path=/x")]),
-        ("/set-b", 200, &[("set-cookie", "b=1")]),
+        ("/set-a", 200, &[("set-cookie", "a=1")]),
+        ("/x/set-b", 200, &[("set-cookie", "b=1; Path=/x")]),
         ("/set-c", 200, &[("set-cookie", "c=1")]),
     ]))
     .await;
@@ -233,14 +233,15 @@ async fn a_full_jar_drops_the_least_recently_used() {
     };
     let executor = lone(&settings(HttpVersion::Auto, MIB), &limits);
     let mut session = executor.new_session();
-    go(&executor, &mut session, format!("http://{addr}/x/set-a")).await;
-    go(&executor, &mut session, format!("http://{addr}/set-b")).await;
-    // Sends only `b`, so `a` is now the least recently used.
+    go(&executor, &mut session, format!("http://{addr}/set-a")).await;
+    go(&executor, &mut session, format!("http://{addr}/x/set-b")).await;
+    // Sends only `a` (`b` is for `/x`), so `b` is now the least recently used
+    // though `a` is the oldest.
     let first = go(&executor, &mut session, format!("http://{addr}/echo")).await;
-    assert_eq!(seen(&first), ["b=1"]);
+    assert_eq!(seen(&first), ["a=1"]);
     go(&executor, &mut session, format!("http://{addr}/set-c")).await;
     let last = go(&executor, &mut session, format!("http://{addr}/x/echo")).await;
-    assert_eq!(seen(&last), ["b=1; c=1"]);
+    assert_eq!(seen(&last), ["a=1; c=1"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
