@@ -7,7 +7,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use rustls::RootCertStore;
-use vush_core::plan::{HttpSettings, HttpVersion, PoolScope, TlsSettings, WorkloadPlan};
+use vush_core::plan::{
+    HttpSettings, HttpVersion, PoolScope, ResourceLimits, TlsSettings, WorkloadPlan,
+};
 use vush_core::protocol::http::{HttpExecutor, HttpHop, HttpRequest};
 use vush_core::protocol::{FailureKind, FailureStage};
 use vush_http::{BuildError, CaFileProblem, Executor, Executors, Scope, Session};
@@ -25,7 +27,13 @@ fn pooled(pool: PoolScope) -> Executor {
         pool,
         ..crate::common::settings(vush_core::plan::HttpVersion::Auto, MIB)
     };
-    Executor::with_roots(&settings, Path::new(NO_DIR), RootCertStore::empty()).unwrap()
+    Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        RootCertStore::empty(),
+    )
+    .unwrap()
 }
 
 async fn send_on(
