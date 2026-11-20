@@ -120,7 +120,7 @@ File-level `setup` runs once, before any scenario. File-level `teardown` runs on
 | `pool` | `shared`, `scenario` or `vu` | `shared` | Where connections are kept. `shared`: one pool for every part of the file with the same `version` and TLS trust (the system's roots, the same `tls.ca_file`, or `tls.insecure`); parts that differ never share a connection. `scenario`: one pool per scenario, used by its steps and hooks, and one for the file-level hooks. `vu`: one pool per user and per hook run, each with its own TLS session cache. Idle connections close after 90 s. Sharing a pool never shares cookies or credentials |
 | `timeout` | duration | `30s` | For one physical attempt, including every redirect it follows and the time spent preparing each request. Longer than zero |
 | `redirects` | integer, 0 to 20 | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
-| `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user |
+| `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user and per hook run. See [Cookies](#cookies) |
 | `max_response_size` | size | `1MiB` | Upper bound on the size of a response body. A longer body is cut at the limit and marked `truncated`, and it still counts as a response |
 | `tls.ca_file` | path | none | PEM certificates to trust as well as the system's roots. Relative to the test file's directory. Read once when the run starts. At most 1 MiB, with at least one certificate, and every certificate in it must be usable. Not read when `tls.insecure` is `true` |
 | `tls.insecure` | boolean | `false` | Accepts any certificate for any name. The connection is still encrypted. Connections made this way are never shared with settings that verify |
@@ -135,6 +135,30 @@ http:
     ca_file: certs/ca.pem
 ```
 
+### Cookies
+
+Each user, and each hook run, has its own cookie jar. A jar is never shared, and a copy of a user's state gets its own copy of the jar. Pools and connections hold no cookies, so two users on one connection never see each other's. `cookies: false`, or `max_cookies: 0`, means no jar: `Set-Cookie` is ignored and nothing is added to requests.
+
+What is stored:
+
+- A `Set-Cookie` header is read when the response head arrives. That includes a `3xx` the attempt follows, and a response whose body then fails. The response keeps its `Set-Cookie` headers.
+- A cookie is stored for the host in the request's URL. Without `Domain`, only that host gets it back. With `Domain`, that host and every host under it do. `Domain` must match the host, and a one-label domain such as `com` is refused unless it is the host itself. There is no public-suffix list.
+- For an IP host, `Domain` must equal the host, and the cookie is for that host only. A domain cookie is never sent to an IP host.
+- A cookie without `Path` gets the default path: the request path up to its last `/`.
+- `Secure` cookies are stored and sent only over `https`. A `Secure` cookie set over `http` is ignored.
+- `Max-Age` beats `Expires`. A server deletes a cookie by sending the same name, `Domain` and `Path` with `Max-Age=0`, a negative `Max-Age`, or a past `Expires`.
+- A cookie is ignored when its name is empty, its name or value holds a control character, or its name and value together are over 4096 bytes. A `Domain` or `Path` over 1024 bytes ignores the cookie too.
+- Cookies don't separate by port, as in browsers. `HttpOnly`, `SameSite` and `Partitioned`, and the `__Secure-` and `__Host-` prefixes, are ignored.
+
+What is sent:
+
+- Before each hop, expired cookies are removed. The cookies that match the host, the path and the scheme are sent in one `Cookie` header: longest path first, then oldest first.
+- A request's own `Cookie` header names win. A jar cookie with the same name as one the request sets is left out. The request's own values stay as written, first, and the jar's follow.
+- The jar's header counts toward the 4096 header names a request may hold. A request that already holds 4096 names of its own and no `Cookie` fails in `prepare` with `invalid_request`.
+- Cookie values are bytes. A value that isn't UTF-8 is sent back as it came.
+
+A redirect to another origin drops the request's own `Cookie` and `Authorization` headers. The jar then adds only what it holds for the new host. `Authorization` is never kept in the jar.
+
 ## `limits`
 
 `limits` is allowed at file level and on a scenario.
@@ -144,7 +168,7 @@ http:
 | `max_request_rate` | rate | none | At file level, a budget across all scenarios. On a scenario, that scenario's own budget. Both can apply at once. A scenario does not inherit the file-level value as its own. Above zero | 5 |
 | `max_variables` | integer | `256` | Per user. A scenario's value overrides the file's | 3 |
 | `max_variable_size` | size | `64KiB` | Per variable value. A scenario's value overrides the file's | 3 |
-| `max_cookies` | integer, 0 to 3000 | `64` | Per user. A scenario's value overrides the file's | 2 |
+| `max_cookies` | integer, 0 to 3000 | `64` | Per user and per hook run. A scenario's value overrides the file's. `0` keeps none. A full jar drops expired cookies first, then the one least recently sent or set | 2 |
 | `hook_timeout` | duration | `60s` | For one whole hook run. Longer than zero. A scenario's value overrides the file's | 3 |
 
 These defaults are provisional. They can change as measurements come in.
