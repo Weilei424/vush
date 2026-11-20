@@ -41,6 +41,8 @@ pub struct TlsSettings {
 
 /// The most redirects one attempt may follow.
 pub const MAX_REDIRECTS: u32 = 20;
+/// The most cookies one user may hold.
+pub const MAX_COOKIES: u32 = 3000;
 
 /// HTTP settings, after file-level and scenario-level values are merged.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +83,7 @@ pub struct ResourceLimits {
     pub max_variables: u32,
     /// The largest size of one variable value.
     pub max_variable_size: ByteSize,
-    /// The most cookies one user may hold.
+    /// The most cookies one user may hold, at most `MAX_COOKIES`.
     pub max_cookies: u32,
     /// The timeout of one whole hook run.
     pub hook_timeout: Duration,
