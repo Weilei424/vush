@@ -1,0 +1,9 @@
+# more than 3000 cookies
+schema_version: 1
+name: broken
+limits: { max_cookies: 3001 }
+scenarios:
+  - name: ping
+    load: { model: closed_vus, vus: 1, iterations: 1 }
+    steps:
+      - request: { method: GET, url: "http://localhost:8080/" }
