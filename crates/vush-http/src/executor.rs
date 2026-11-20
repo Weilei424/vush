@@ -162,8 +162,9 @@ pub(crate) enum Transport {
 ///   connection that has been idle for 90 s.
 /// - `cookies`, with the limits' `max_cookies`, sets whether each session
 ///   has a cookie jar and its size: none under `cookies: false` or
-///   `max_cookies: 0`. A session stores every `Set-Cookie` of a response
-///   when its head arrives, on every status, and sends its cookies with each
+///   `max_cookies: 0`. A session reads every `Set-Cookie` of a response
+///   when its head arrives, on every status, and stores those the cookie
+///   rules accept. It sends its cookies with each
 ///   request they match. `cookies` and `max_cookies` don't change pool
 ///   sharing, because sharing a pool never shares cookies.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
@@ -985,5 +986,22 @@ mod tests {
             BuildError::NoTrustedRoots.to_string(),
             "no trusted root certificates could be loaded from the system"
         );
+    }
+
+    #[test]
+    fn an_empty_jar_leaves_the_requests_own_cookies_as_written() {
+        let mut jar = Jar::new(NonZeroU32::new(8).unwrap());
+        let request = get(
+            "http://h.test/".to_owned(),
+            &[("Cookie", "a=1"), ("Cookie", "b=2")],
+        );
+        let prepared = ready(&request, Some(&mut jar), None).unwrap();
+        let values: Vec<&[u8]> = prepared
+            .headers
+            .get_all(COOKIE)
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect();
+        assert_eq!(values, [b"a=1".as_slice(), b"b=2".as_slice()]);
     }
 }
