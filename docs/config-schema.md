@@ -142,18 +142,18 @@ Each user, and each hook run, has its own cookie jar. A jar is never shared, and
 What is stored:
 
 - A `Set-Cookie` header is read when the response head arrives. That includes a `3xx` the attempt follows, and a response whose body then fails. The response keeps its `Set-Cookie` headers.
-- A cookie is stored for the host in the request's URL. Without `Domain`, only that host gets it back. With `Domain`, that host and every host under it do. `Domain` must match the host, and a one-label domain such as `com` is refused unless it is the host itself. There is no public-suffix list.
-- For an IP host, `Domain` must equal the host, and the cookie is for that host only. A domain cookie is never sent to an IP host.
-- A cookie without `Path` gets the default path: the request path up to its last `/`.
-- `Secure` cookies are stored and sent only over `https`. A `Secure` cookie set over `http` is ignored.
+- A cookie is stored for the host in the request's URL. Without `Domain`, only that host gets it back. With `Domain`, the domain and every host under it do, so `Domain=vush.test` from `a.vush.test` also reaches `vush.test` and `b.vush.test`. `Domain` must match the host, a `Domain` with a trailing `.` or one that isn't ASCII makes the cookie ignored, and a one-label domain such as `com` is refused unless it is the host itself. There is no public-suffix list.
+- For an IP host, `Domain` must equal the host, and the cookie is for that host only. For an IPv6 host, `Domain` must be written with brackets, as in `Domain=[::1]`. A domain cookie is never sent to an IP host.
+- A cookie without `Path` gets the default path: the request path up to its last `/`, without that `/`, and `/` when the request path has only one `/`.
+- `Secure` cookies are stored and sent only over `https`. A `Secure` cookie set over `http` is ignored. A cookie without `Secure` set over `http` can replace or delete a `Secure` one with the same name, domain and path.
 - `Max-Age` beats `Expires`. A server deletes a cookie by sending the same name, `Domain` and `Path` with `Max-Age=0`, a negative `Max-Age`, or a past `Expires`.
-- A cookie is ignored when its name is empty, its name or value holds a control character, or its name and value together are over 4096 bytes. A `Domain` or `Path` over 1024 bytes ignores the cookie too.
+- A cookie is ignored when its name is empty, its name or value holds a control character, or its name and value together are over 4096 bytes. A `Domain` or `Path` over 1024 bytes ignores the cookie too, and so does a stored path or domain over 1024 bytes, whether it comes from `Path` or `Domain` or from the request.
 - Cookies don't separate by port, as in browsers. `HttpOnly`, `SameSite` and `Partitioned`, and the `__Secure-` and `__Host-` prefixes, are ignored.
 
 What is sent:
 
 - Before each hop, expired cookies are removed. The cookies that match the host, the path and the scheme are sent in one `Cookie` header: longest path first, then oldest first.
-- A request's own `Cookie` header names win. A jar cookie with the same name as one the request sets is left out. The request's own values stay as written, first, and the jar's follow.
+- A request's own `Cookie` header names win. A jar cookie with the same name as one the request sets is left out. Names are compared exactly, letter case included. The request's own values stay as written, first, and the jar's follow.
 - The jar's header counts toward the 4096 header names a request may hold. A request that already holds 4096 names of its own and no `Cookie` fails in `prepare` with `invalid_request`.
 - Cookie values are bytes. A value that isn't UTF-8 is sent back as it came.
 
