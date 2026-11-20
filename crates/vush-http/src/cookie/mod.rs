@@ -151,6 +151,9 @@ impl Jar {
             .path
             .map_or_else(|| default_path(&target.path), |p| p)
             .to_vec();
+        if path.len() > parse::MAX_ATTRIBUTE_BYTES || domain.len() > parse::MAX_ATTRIBUTE_BYTES {
+            return;
+        }
         let existing = self
             .cookies
             .iter()
@@ -197,7 +200,9 @@ impl Jar {
     }
 
     /// Removes expired cookies, then picks those that go to `target`: longest
-    /// path first, then oldest first, without any name in `own`. Marks nothing.
+    /// path first, then oldest first. `own` holds the request's own `Cookie`
+    /// header values; a jar cookie is left out when its name is in any of them.
+    /// Marks nothing.
     pub(crate) fn pick(
         &mut self,
         target: &Target,
@@ -447,8 +452,8 @@ mod tests {
     #[test]
     fn eviction_takes_expired_then_least_recently_used() {
         let mut j = jar(2);
-        put(&mut j, "http://h.test/", "a=1; Max-Age=5");
         put(&mut j, "http://h.test/", "b=1");
+        put(&mut j, "http://h.test/", "a=1; Max-Age=5");
         j.store(b"c=1", &target("http://h.test/"), later(6));
         assert_eq!(sent_at(&mut j, "http://h.test/", later(6)), "b=1; c=1");
         let mut j = jar(2);
@@ -492,6 +497,59 @@ mod tests {
         assert_eq!(j.cookies.len(), 3000);
         assert!(j.cookies.iter().all(|c| c.name != b"n0"));
         assert!(j.cookies.iter().any(|c| c.name == b"n1"));
+        let all = sent(&mut j, "http://h.test/");
+        assert_eq!(all.split("; ").count(), 3000);
+        assert!(!all.split("; ").any(|p| p == "n0=1"));
+    }
+
+    #[test]
+    fn the_stored_path_and_domain_are_capped() {
+        let long = format!("http://h.test/{}/x", "a".repeat(2048));
+        let mut j = jar(64);
+        put(&mut j, &long, "a=1");
+        assert!(j.cookies.is_empty());
+        put(&mut j, &long, "a=1; Path=/");
+        assert_eq!(j.cookies.len(), 1);
+        let exact = format!("http://h.test/{}/x", "a".repeat(1023));
+        let mut j = jar(64);
+        put(&mut j, &exact, "a=1");
+        assert_eq!(j.cookies[0].path.len(), 1024);
+        let over = format!("http://h.test/{}/x", "a".repeat(1024));
+        let mut j = jar(64);
+        put(&mut j, &over, "a=1");
+        assert!(j.cookies.is_empty());
+    }
+
+    #[test]
+    fn the_limit_holds_one() {
+        let mut j = jar(1);
+        put(&mut j, "http://h.test/", "a=1");
+        put(&mut j, "http://h.test/", "b=1");
+        assert_eq!(sent(&mut j, "http://h.test/"), "b=1");
+        put(&mut j, "http://h.test/", "b=2");
+        assert_eq!(sent(&mut j, "http://h.test/"), "b=2");
+    }
+
+    #[test]
+    fn replacing_counts_as_use() {
+        let mut j = jar(2);
+        put(&mut j, "http://h.test/", "a=1");
+        put(&mut j, "http://h.test/", "b=1");
+        put(&mut j, "http://h.test/", "a=2");
+        put(&mut j, "http://h.test/", "c=1");
+        assert_eq!(sent(&mut j, "http://h.test/"), "a=2; c=1");
+    }
+
+    #[test]
+    fn a_replacement_can_change_reach() {
+        let mut j = jar(64);
+        put(&mut j, "http://a.vush.test/", "a=1");
+        assert_eq!(sent(&mut j, "http://b.a.vush.test/"), "");
+        put(&mut j, "http://a.vush.test/", "a=2; Domain=a.vush.test");
+        assert_eq!(sent(&mut j, "http://b.a.vush.test/"), "a=2");
+        put(&mut j, "http://a.vush.test/", "a=3");
+        assert_eq!(sent(&mut j, "http://b.a.vush.test/"), "");
+        assert_eq!(j.cookies.len(), 1);
     }
 
     #[test]
