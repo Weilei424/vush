@@ -22,7 +22,7 @@ pub use error::{
 pub use json_path::{JsonPath, JsonPathSegment};
 pub use load::{ClosedStop, ClosedVusLoad, LoadModel, QueuePolicy, RateSchedule, Stage};
 pub use settings::{
-    HttpSettings, HttpVersion, MAX_REDIRECTS, PoolScope, ResourceLimits, TlsSettings,
+    HttpSettings, HttpVersion, MAX_COOKIES, MAX_REDIRECTS, PoolScope, ResourceLimits, TlsSettings,
 };
 pub use step::{
     Body, Comparison, Condition, DEFAULT_REPEAT_DEADLINE, DEFAULT_RETRY_BACKOFF, Expect,
