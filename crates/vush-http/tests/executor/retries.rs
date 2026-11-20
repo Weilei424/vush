@@ -10,7 +10,9 @@ use vush_core::protocol::http::HttpExecutor;
 use vush_core::protocol::{FailureKind, FailureStage, Outcome};
 use vush_core::runner::{StepPolicy, Timer, run_step};
 
-use crate::common::{TIMEOUT, executor, get, refused_port, reply, spawn_h1};
+use crate::common::{
+    Echo, ReplyFuture, TIMEOUT, echo, executor, get, refused_port, reply, spawn_h1,
+};
 
 /// The real clock for `run_step`'s backoff.
 struct TokioSleep;
@@ -102,4 +104,37 @@ async fn a_refused_port_is_tried_twice() {
         );
     }
     assert!(result.response.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_sees_cookies_from_the_failed_attempt() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counter = seen.clone();
+    let addr = spawn_h1(move |request| -> ReplyFuture {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Box::pin(std::future::ready(reply(
+                503,
+                &[("set-cookie", "tried=1")],
+                "",
+            )))
+        } else {
+            echo(request)
+        }
+    })
+    .await;
+    let executor = executor(HttpVersion::Auto);
+    let mut session = executor.new_session();
+
+    let result = run_step(
+        &executor,
+        &TokioSleep,
+        &mut session,
+        get(format!("http://{addr}/")),
+        &policy(Duration::ZERO),
+    )
+    .await;
+
+    assert_eq!(result.record.attempts().len(), 2);
+    let echoed = Echo::of_response(result.response.as_ref().expect("a response"));
+    assert_eq!(echoed.values("cookie"), ["tried=1"]);
 }
