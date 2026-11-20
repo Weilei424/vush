@@ -425,7 +425,7 @@ fn every_plan_field_has_an_owner() {
         pool: _,              // executor construction (P2.3); `vu` puts a pool in each session
         timeout: _,           // vush-config: already copied into each request step's `timeout`
         redirects: _,         // driver (P2.2): the hop loop's limit
-        cookies: _,           // session (P2.4)
+        cookies: _,           // session (P2.4): false gives no jar
         max_response_size: _, // executor construction (P2.5): caps the body, sets `truncated`
         tls:
             TlsSettings {
@@ -436,7 +436,7 @@ fn every_plan_field_has_an_owner() {
     let ResourceLimits {
         max_variables: _,     // runner (Phase 3)
         max_variable_size: _, // runner (Phase 3)
-        max_cookies: _,       // session (P2.4)
+        max_cookies: _,       // session (P2.4): the jar's size
         hook_timeout: _,      // runner (Phase 3)
     } = ResourceLimits::default();
 }
