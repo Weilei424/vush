@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use rustls::RootCertStore;
-use vush_core::plan::{HttpSettings, HttpVersion};
+use vush_core::plan::{HttpSettings, HttpVersion, ResourceLimits};
 use vush_http::{BuildError, CaFileProblem, Executor, Scope};
 
 use crate::common::{
@@ -26,7 +26,13 @@ async fn ca_file_adds_to_the_system_roots() {
     let signed_by_b = spawn_tls(echo, H2_AND_H1, None, b.leaf_for_ip(LOCALHOST)).await;
     let dir = TempDir::new();
     dir.write("b.pem", b.pem().as_bytes());
-    let executor = Executor::with_roots(&with_ca_file("b.pem"), dir.path(), a.roots()).unwrap();
+    let executor = Executor::with_roots(
+        &with_ca_file("b.pem"),
+        &ResourceLimits::default(),
+        dir.path(),
+        a.roots(),
+    )
+    .unwrap();
     for addr in [signed_by_a, signed_by_b] {
         let hop = send(&executor, &get(format!("https://{addr}/"))).await;
         assert_eq!(response(&hop).status, 200, "{addr}");
@@ -42,7 +48,13 @@ async fn an_absolute_ca_file_ignores_the_test_dir() {
     assert!(path.is_absolute(), "{path:?}");
     let other = TempDir::new();
     let settings = with_ca_file(path.to_str().unwrap());
-    let executor = Executor::with_roots(&settings, other.path(), a.roots()).unwrap();
+    let executor = Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        other.path(),
+        a.roots(),
+    )
+    .unwrap();
     let hop = send(&executor, &get(format!("https://{signed_by_b}/"))).await;
     assert_eq!(response(&hop).status, 200);
 }
@@ -59,8 +71,13 @@ async fn insecure_reaches_any_certificate_for_any_name() {
     .await;
     let mut settings = settings(HttpVersion::Auto, MIB);
     settings.tls.insecure = true;
-    let executor =
-        Executor::with_roots(&settings, Path::new(NO_DIR), RootCertStore::empty()).unwrap();
+    let executor = Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        RootCertStore::empty(),
+    )
+    .unwrap();
     let hop = send(&executor, &get(format!("https://{addr}/"))).await;
     assert_eq!(response(&hop).status, 200);
 }
@@ -71,8 +88,13 @@ fn insecure_never_reads_the_ca_file() {
     let mut settings = with_ca_file("missing.pem");
     settings.tls.insecure = true;
     for built in [
-        Executor::new(&settings, dir.path()),
-        Executor::with_roots(&settings, dir.path(), RootCertStore::empty()),
+        Executor::new(&settings, &ResourceLimits::default(), dir.path()),
+        Executor::with_roots(
+            &settings,
+            &ResourceLimits::default(),
+            dir.path(),
+            RootCertStore::empty(),
+        ),
     ] {
         if let Err(error) = built {
             panic!("an insecure executor should build, but got {error:?}");
@@ -86,8 +108,13 @@ fn ca_file_problems_fail_the_build_without_the_path() {
     let settings = with_ca_file("missing.pem");
     let dir_text = dir.path().to_str().unwrap();
     for built in [
-        Executor::new(&settings, dir.path()),
-        Executor::with_roots(&settings, dir.path(), RootCertStore::empty()),
+        Executor::new(&settings, &ResourceLimits::default(), dir.path()),
+        Executor::with_roots(
+            &settings,
+            &ResourceLimits::default(),
+            dir.path(),
+            RootCertStore::empty(),
+        ),
     ] {
         let error = built.err().expect("the ca_file is missing");
         assert!(
