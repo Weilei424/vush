@@ -73,12 +73,24 @@ pub fn settings(version: HttpVersion, limit: u64) -> HttpSettings {
 /// An executor that trusts no certificate, for plaintext servers.
 pub fn executor(version: HttpVersion) -> Executor {
     let settings = settings(version, MIB);
-    Executor::with_roots(&settings, Path::new(NO_DIR), RootCertStore::empty()).unwrap()
+    Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        RootCertStore::empty(),
+    )
+    .unwrap()
 }
 
 /// An executor that trusts only `ca`.
 pub fn trusting(ca: &TestCa, version: HttpVersion) -> Executor {
-    Executor::with_roots(&settings(version, MIB), Path::new(NO_DIR), ca.roots()).unwrap()
+    Executor::with_roots(
+        &settings(version, MIB),
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        ca.roots(),
+    )
+    .unwrap()
 }
 
 /// A plan whose file level has the settings `file` and no hooks. Scenario
