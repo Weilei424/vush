@@ -34,7 +34,7 @@ use crate::protocol::http::{HttpHop, HttpRequest, HttpResponse};
 /// 5. **No per-user state in the executor.** Cookies and anything else per
 ///    user live in the session. `send` stores every `Set-Cookie` from the
 ///    response in the session, including on a `3xx`. Under `cookies: false`,
-///    the session keeps none.
+///    the session keeps none, and it never holds more than `max_cookies`.
 /// 6. **Sessions.** `new_session` makes the state for one user or one hook
 ///    run. A copy made with `clone` has its own cookies, while a pool held for
 ///    `pool: vu` may be shared between copies. Core relies on this for
