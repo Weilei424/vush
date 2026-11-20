@@ -220,8 +220,8 @@
     - A `tls.ca_file` is compared as the text of the path it resolves to. Before, `ca.pem` and `ca.pem/`, which `Path` compares as equal, shared one trust, so the second spelling was never read and the build passed even though `ca.pem/` names no file.
     - Building a plan's executors finds pools and roots by hash instead of scanning the ones already built, so the work grows linearly with the number of scopes, not with its square.
     - `PoolScope`'s docs say what each scope shares, as the schema does.
-  - [x] Fix from Codex's third review (2026-11-19): the crate docs no longer say the session holds cookies, which arrive in P2.4.
-  - [x] CI green on all four runners after the user pushes (plan Task 7). Run 44455632651 on `41f03b6`, 2026-11-19. The crate-doc fix above came after this run.
+  - [x] Fixes from Codex's third and fourth reviews (2026-11-19): the crate and executor docs no longer say the session holds cookies or keeps nothing. It holds its executor's ID and, under `pool: vu`, the user's pool, and its cookie jar arrives in P2.4.
+  - [x] CI green on all four runners after the user pushes (plan Task 7). Run 44455632651 on `41f03b6`, 2026-11-19. The doc fixes above came after this run.
 - [ ] P2.4 Guarantee credentials/cookies cannot leak through shared pooled transport.
   - From P2.3: the session already holds its executor's ID and, under `pool: vu`, the user's pool. The jar joins them there.
   - From P2.1:
