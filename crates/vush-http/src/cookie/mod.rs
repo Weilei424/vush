@@ -457,6 +457,12 @@ mod tests {
         assert_eq!(sent(&mut j, "http://h.test/"), "b=1");
         put(&mut j, "http://h.test/", "c=1");
         assert_eq!(sent(&mut j, "http://h.test/x"), "b=1; c=1");
+        let mut j = jar(2);
+        put(&mut j, "http://h.test/", "a=1; Path=/");
+        put(&mut j, "http://h.test/", "b=1; Path=/x");
+        assert_eq!(sent(&mut j, "http://h.test/"), "a=1");
+        put(&mut j, "http://h.test/", "c=1");
+        assert_eq!(sent(&mut j, "http://h.test/x"), "a=1; c=1");
     }
 
     #[test]
