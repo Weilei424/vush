@@ -144,7 +144,7 @@ http:
 | `max_request_rate` | rate | none | At file level, a budget across all scenarios. On a scenario, that scenario's own budget. Both can apply at once. A scenario does not inherit the file-level value as its own. Above zero | 5 |
 | `max_variables` | integer | `256` | Per user. A scenario's value overrides the file's | 3 |
 | `max_variable_size` | size | `64KiB` | Per variable value. A scenario's value overrides the file's | 3 |
-| `max_cookies` | integer | `64` | Per user. A scenario's value overrides the file's | 3 |
+| `max_cookies` | integer, 0 to 3000 | `64` | Per user. A scenario's value overrides the file's | 2 |
 | `hook_timeout` | duration | `60s` | For one whole hook run. Longer than zero. A scenario's value overrides the file's | 3 |
 
 These defaults are provisional. They can change as measurements come in.
