@@ -7,6 +7,8 @@ use url::Url;
 use vush_core::protocol::http::{HttpBody, HttpRequest, RequestUrl};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 
+use crate::cookie::Target;
+
 /// The `User-Agent` sent unless the request sets its own.
 pub(crate) const USER_AGENT: &str = concat!("vush/", env!("CARGO_PKG_VERSION"));
 
@@ -34,6 +36,11 @@ pub(crate) struct Prepared {
     pub uri: Uri,
     pub headers: HeaderMap,
     pub body: Bytes,
+    /// What the jar matches against: the URL that is sent.
+    pub target: Target,
+    /// The header names the request set itself, counted before `prepare`
+    /// adds `Content-Type` and `User-Agent`.
+    pub own_names: usize,
 }
 
 fn invalid(message: &'static str) -> Failure {
@@ -134,6 +141,7 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
         }
         headers.try_append(name, value).map_err(|_| too_many())?;
     }
+    let own_names = headers.keys_len();
 
     let (body, content_type) = match &request.body {
         None => (Vec::new(), None),
@@ -179,7 +187,35 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
         uri,
         headers,
         body: Bytes::from(body),
+        target: Target::of(&url),
+        own_names,
     })
+}
+
+/// Adds the jar's `pairs` to `prepared` as one `Cookie` header: the
+/// request's own values in their order, then `pairs`, joined with `; `. The
+/// jar's header counts toward the request's header names, so a request that
+/// already holds [`MAX_HEADER_NAMES`] names of its own, none of them
+/// `Cookie`, fails as too many headers.
+pub(crate) fn add_cookies(prepared: &mut Prepared, pairs: &[u8]) -> Result<(), Failure> {
+    let headers = &mut prepared.headers;
+    if !headers.contains_key(http::header::COOKIE) && prepared.own_names == MAX_HEADER_NAMES {
+        return Err(too_many());
+    }
+    let mut merged = Vec::new();
+    for own in headers.get_all(http::header::COOKIE) {
+        merged.extend_from_slice(own.as_bytes());
+        merged.extend_from_slice(b"; ");
+    }
+    merged.extend_from_slice(pairs);
+    // Both halves are valid header bytes, since the jar keeps no control
+    // character, so this can't fail on any input that reaches it.
+    let merged = HeaderValue::from_bytes(&merged)
+        .map_err(|_| invalid("a header value holds a control character"))?;
+    headers
+        .try_insert(http::header::COOKIE, merged)
+        .map_err(|_| too_many())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -534,6 +570,70 @@ mod tests {
         // Only the danger state grows a map that still had room.
         assert!(p.headers.capacity() > before);
         assert_eq!(p.headers.keys_len(), MAX_HEADER_NAMES + 2);
+    }
+
+    #[test]
+    fn prepared_requests_carry_the_jar_target() {
+        let mut r = absolute("https://A.test/p?q");
+        r.headers = pairs(&[("X-A", "1"), ("x-a", "2"), ("X-B", "3")]);
+        let p = prepare(&r).unwrap();
+        assert!(p.target.secure && !p.target.ip);
+        assert_eq!(
+            (p.target.host.as_str(), p.target.path.as_str()),
+            ("a.test", "/p")
+        );
+        assert_eq!(p.own_names, 2);
+    }
+
+    fn cookie_values(p: &Prepared) -> Vec<&[u8]> {
+        p.headers
+            .get_all(http::header::COOKIE)
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect()
+    }
+
+    /// `p`'s headers other than `Cookie`.
+    fn without_cookie(p: &Prepared) -> HeaderMap {
+        let mut headers = p.headers.clone();
+        headers.remove(http::header::COOKIE);
+        headers
+    }
+
+    #[test]
+    fn add_cookies_merges_into_one_header() {
+        let mut p = prepare(&with_headers(&[
+            ("Cookie", "a=1"),
+            ("x-a", "x"),
+            ("cookie", "b=2"),
+        ]))
+        .unwrap();
+        let others = without_cookie(&p);
+        add_cookies(&mut p, b"c=3").unwrap();
+        assert_eq!(cookie_values(&p), [b"a=1; b=2; c=3".as_slice()]);
+        assert_eq!(without_cookie(&p), others);
+
+        let mut p = prepare(&with_headers(&[("x-a", "x")])).unwrap();
+        let others = without_cookie(&p);
+        add_cookies(&mut p, b"c=3").unwrap();
+        assert_eq!(cookie_values(&p), [b"c=3".as_slice()]);
+        assert_eq!(without_cookie(&p), others);
+    }
+
+    #[test]
+    fn the_jars_header_counts_toward_the_cap() {
+        let mut p = prepare(&with_names(&distinct_names(MAX_HEADER_NAMES))).unwrap();
+        assert_eq!(
+            add_cookies(&mut p, b"c=3").unwrap_err(),
+            invalid("the request has too many headers")
+        );
+        assert!(cookie_values(&p).is_empty());
+
+        let mut names = distinct_names(MAX_HEADER_NAMES - 1);
+        names.push("Cookie".to_owned());
+        let mut p = prepare(&with_names(&names)).unwrap();
+        assert_eq!(add_cookies(&mut p, b"c=3"), Ok(()));
+        assert_eq!(cookie_values(&p), [b"v; c=3".as_slice()]);
     }
 
     #[test]
