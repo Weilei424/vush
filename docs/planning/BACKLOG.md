@@ -240,7 +240,7 @@
       - `HttpOnly`, `SameSite` and the cookie prefixes are ignored.
     - **Deferred:** counting evicted or refused cookies (P6.2), and whether the connector's resolver seam becomes public (P2.6). The name tests use it in-crate.
   - [x] The `max_cookies` cap (plan Task 1).
-  - [ ] Cookie dates (plan Task 2).
+  - [x] Cookie dates (plan Task 2).
   - [ ] Reading `Set-Cookie` (plan Task 3).
   - [ ] The jar: storing, sending and eviction (plan Task 4).
   - [ ] Sessions with jars, wired into `send` (plan Task 5).
