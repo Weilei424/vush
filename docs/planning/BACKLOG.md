@@ -239,7 +239,7 @@
       - `Max-Age` beats `Expires`, and a zero or past expiry deletes the cookie.
       - `HttpOnly`, `SameSite` and the cookie prefixes are ignored.
     - **Deferred:** counting evicted or refused cookies (P6.2), and whether the connector's resolver seam becomes public (P2.6). The name tests use it in-crate.
-  - [ ] The `max_cookies` cap (plan Task 1).
+  - [x] The `max_cookies` cap (plan Task 1).
   - [ ] Cookie dates (plan Task 2).
   - [ ] Reading `Set-Cookie` (plan Task 3).
   - [ ] The jar: storing, sending and eviction (plan Task 4).
