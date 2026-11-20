@@ -2,3 +2,5 @@
 //! parser; the parser for `Set-Cookie`, the jar and its matching rules follow.
 
 mod date;
+
+mod parse;
