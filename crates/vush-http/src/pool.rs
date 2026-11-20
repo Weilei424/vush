@@ -9,16 +9,17 @@
 use std::path::Path;
 use std::time::Duration;
 
-use vush_core::plan::{HttpSettings, HttpVersion, PoolScope, Step, WorkloadPlan};
+use vush_core::plan::{HttpSettings, HttpVersion, PoolScope, ResourceLimits, Step, WorkloadPlan};
 
 use crate::executor::Scope;
 use crate::tls::Trust;
 
-/// A scope of a plan: where it is, its merged settings, and every step list
-/// whose requests its executor sends.
+/// A scope of a plan: where it is, its merged settings and limits, and
+/// every step list whose requests its executor sends.
 pub(crate) struct ScopeView<'a> {
     pub at: Scope,
     pub settings: &'a HttpSettings,
+    pub limits: &'a ResourceLimits,
     pub lists: Vec<&'a [Step]>,
 }
 
@@ -29,6 +30,7 @@ pub(crate) fn scopes(plan: &WorkloadPlan) -> Vec<ScopeView<'_>> {
     let file = ScopeView {
         at: Scope::File,
         settings: plan.http(),
+        limits: plan.limits(),
         lists: vec![plan.setup(), plan.teardown()],
     };
     let scenarios = plan
@@ -38,6 +40,7 @@ pub(crate) fn scopes(plan: &WorkloadPlan) -> Vec<ScopeView<'_>> {
         .map(|(index, scenario)| ScopeView {
             at: Scope::Scenario(index),
             settings: &scenario.http,
+            limits: &scenario.limits,
             lists: vec![
                 &scenario.setup,
                 &scenario.teardown,
@@ -96,11 +99,11 @@ pub(crate) fn limit(view: &ScopeView<'_>) -> Duration {
 #[cfg(test)]
 mod tests {
     use std::num::{NonZeroU32, NonZeroU64};
+    use std::sync::LazyLock;
 
     use vush_core::plan::{
         ByteSize, ClosedStop, ClosedVusLoad, Comparison, Condition, Expect, IfStep, LoadModel,
-        PlanDraft, RepeatStep, RequestStep, RequestTarget, ResourceLimits, Scenario, StatePolicy,
-        VarRef,
+        PlanDraft, RepeatStep, RequestStep, RequestTarget, Scenario, StatePolicy, VarRef,
     };
 
     use super::*;
@@ -137,10 +140,14 @@ mod tests {
         }
     }
 
+    /// The default limits, which no test here reads.
+    static LIMITS: LazyLock<ResourceLimits> = LazyLock::new(ResourceLimits::default);
+
     fn view<'a>(at: Scope, settings: &'a HttpSettings, lists: Vec<&'a [Step]>) -> ScopeView<'a> {
         ScopeView {
             at,
             settings,
+            limits: &LIMITS,
             lists,
         }
     }
