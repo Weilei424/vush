@@ -4,6 +4,7 @@
 //! One test crate, so every fixture in `common` is used by some test.
 
 mod common;
+mod compression;
 mod cookies;
 mod failures;
 mod pools;
