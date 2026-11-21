@@ -20,8 +20,9 @@ use crate::protocol::http::{HttpHop, HttpRequest, HttpResponse};
 ///    none when it fails in `prepare`. It never follows a redirect and never
 ///    retries.
 /// 2. **Finite time.** `timeout` covers the whole hop: preparing the request,
-///    connecting, sending, the response head and the body. A hop that runs out
-///    of time ends with a `timeout` failure. Only preparing can run past
+///    connecting, sending, the response head and the body. The body is read to
+///    the end within `timeout`, whatever its length. A hop that runs out of
+///    time ends with a `timeout` failure. Only preparing can run past
 ///    `timeout`, because it is synchronous and can't be cut short: a hop whose
 ///    preparation used up the time fails with `timeout` in `prepare` as soon
 ///    as it is done, without sending anything. A zero `timeout` fails the same
