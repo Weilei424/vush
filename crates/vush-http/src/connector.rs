@@ -34,6 +34,7 @@ use tokio_rustls::client::TlsStream;
 use vush_core::plan::HttpVersion;
 use vush_core::protocol::{ConnectionId, ConnectionSetup, FailureKind};
 
+use crate::text;
 use crate::tls::user_config;
 
 /// The next connection ID. Every connector in the process shares it, so IDs
@@ -75,22 +76,17 @@ const fn error(kind: FailureKind, message: &'static str) -> ConnectError {
     ConnectError { kind, message }
 }
 
-const UNSUPPORTED_SCHEME: ConnectError = error(
-    FailureKind::InvalidRequest,
-    "only http and https URLs are supported",
-);
+const UNSUPPORTED_SCHEME: ConnectError =
+    error(FailureKind::InvalidRequest, text::URL_UNSUPPORTED_SCHEME);
 // `prepare` refuses these URLs first, so the connector should never see one.
 // The texts are `prepare`'s.
-const NO_HOST: ConnectError = error(FailureKind::InvalidRequest, "the URL has no host");
-const UNPARSABLE: ConnectError = error(FailureKind::InvalidRequest, "the URL can't be parsed");
-const UNRESOLVED: ConnectError = error(FailureKind::Dns, "the host name didn't resolve");
-const UNREACHABLE: ConnectError = error(
-    FailureKind::Connect,
-    "the connection was refused or unreachable",
-);
-const HANDSHAKE_FAILED: ConnectError = error(FailureKind::Tls, "the TLS handshake failed");
-const NO_HTTP2: ConnectError = error(FailureKind::Tls, "the server didn't agree to HTTP/2");
-const TOO_LONG: ConnectError = error(FailureKind::Timeout, "the connection took too long");
+const NO_HOST: ConnectError = error(FailureKind::InvalidRequest, text::URL_NO_HOST);
+const UNPARSABLE: ConnectError = error(FailureKind::InvalidRequest, text::URL_UNPARSABLE);
+const UNRESOLVED: ConnectError = error(FailureKind::Dns, text::HOST_UNRESOLVED);
+const UNREACHABLE: ConnectError = error(FailureKind::Connect, text::CONNECTION_UNREACHABLE);
+const HANDSHAKE_FAILED: ConnectError = error(FailureKind::Tls, text::HANDSHAKE_FAILED);
+const NO_HTTP2: ConnectError = error(FailureKind::Tls, text::NO_HTTP2);
+const TOO_LONG: ConnectError = error(FailureKind::Timeout, text::CONNECTION_TOOK_TOO_LONG);
 
 /// Looks up a host name's addresses for a port. A seam, so a test can fail a
 /// lookup without asking a real resolver.
