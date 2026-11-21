@@ -8,6 +8,7 @@ use vush_core::protocol::http::{HttpBody, HttpRequest, RequestUrl};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 
 use crate::cookie::Target;
+use crate::text;
 
 /// The `User-Agent` sent unless the request sets its own.
 pub(crate) const USER_AGENT: &str = concat!("vush/", env!("CARGO_PKG_VERSION"));
@@ -63,11 +64,11 @@ fn invalid(message: &'static str) -> Failure {
 pub(crate) const MAX_HEADER_NAMES: usize = 4096;
 
 fn too_many() -> Failure {
-    invalid("the request has too many headers")
+    invalid(text::TOO_MANY_HEADERS)
 }
 
 fn parse(text: &str) -> Result<Url, Failure> {
-    Url::parse(text).map_err(|_| invalid("the URL can't be parsed"))
+    Url::parse(text).map_err(|_| invalid(text::URL_UNPARSABLE))
 }
 
 /// The URL that is sent: joined or parsed, checked, without its fragment, and
@@ -78,7 +79,7 @@ pub(crate) fn request_url(request: &HttpRequest) -> Result<Url, Failure> {
         RequestUrl::Joined { base, path } => {
             let base = parse(base)?;
             if base.query().is_some() || base.fragment().is_some() {
-                return Err(invalid("the base_url has a query or a fragment"));
+                return Err(invalid(text::BASE_URL_QUERY_OR_FRAGMENT));
             }
             if path.is_empty() {
                 base
@@ -93,13 +94,13 @@ pub(crate) fn request_url(request: &HttpRequest) -> Result<Url, Failure> {
         }
     };
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(invalid("only http and https URLs are supported"));
+        return Err(invalid(text::URL_UNSUPPORTED_SCHEME));
     }
     if url.host_str().is_none_or(str::is_empty) {
-        return Err(invalid("the URL has no host"));
+        return Err(invalid(text::URL_NO_HOST));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(invalid("the URL holds a user name or password"));
+        return Err(invalid(text::URL_CREDENTIALS));
     }
     url.set_fragment(None);
     if !request.query.is_empty() {
@@ -121,21 +122,21 @@ pub(crate) fn request_url(request: &HttpRequest) -> Result<Url, Failure> {
 pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
     let url = request_url(request)?;
     if request.method.as_str() == "CONNECT" {
-        return Err(invalid("CONNECT isn't supported"));
+        return Err(invalid(text::CONNECT_METHOD));
     }
     let method = Method::from_bytes(request.method.as_str().as_bytes())
-        .map_err(|_| invalid("the method is invalid"))?;
+        .map_err(|_| invalid(text::METHOD_INVALID))?;
 
     let mut headers = HeaderMap::new();
     for (name, value) in &request.headers {
         let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| invalid("a header name is invalid"))?;
+            .map_err(|_| invalid(text::HEADER_NAME_INVALID))?;
         if FORBIDDEN.contains(&name.as_str()) {
-            return Err(invalid("this header can't be set by a request"));
+            return Err(invalid(text::HEADER_FORBIDDEN));
         }
         // `from_bytes` refuses 0x00-0x1F except tab, and 0x7F.
         let value = HeaderValue::from_bytes(value.as_bytes())
-            .map_err(|_| invalid("a header value holds a control character"))?;
+            .map_err(|_| invalid(text::HEADER_VALUE_CONTROL))?;
         if headers.keys_len() == MAX_HEADER_NAMES && !headers.contains_key(&name) {
             return Err(too_many());
         }
@@ -181,7 +182,7 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
     let uri = url
         .as_str()
         .parse()
-        .map_err(|_| invalid("the URL can't be parsed"))?;
+        .map_err(|_| invalid(text::URL_UNPARSABLE))?;
     Ok(Prepared {
         method,
         uri,
@@ -210,8 +211,8 @@ pub(crate) fn add_cookies(prepared: &mut Prepared, pairs: &[u8]) -> Result<(), F
     merged.extend_from_slice(pairs);
     // Both halves are valid header bytes, since the jar keeps no control
     // character, so this can't fail on any input that reaches it.
-    let merged = HeaderValue::from_bytes(&merged)
-        .map_err(|_| invalid("a header value holds a control character"))?;
+    let merged =
+        HeaderValue::from_bytes(&merged).map_err(|_| invalid(text::HEADER_VALUE_CONTROL))?;
     headers
         .try_insert(http::header::COOKIE, merged)
         .map_err(|_| too_many())?;
