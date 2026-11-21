@@ -4,6 +4,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use url::Url;
+use vush_core::plan::MAX_REQUEST_HEADERS;
 use vush_core::protocol::http::{HttpBody, HttpRequest, RequestUrl};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 
@@ -39,9 +40,6 @@ pub(crate) struct Prepared {
     pub body: Bytes,
     /// What the jar matches against: the URL that is sent.
     pub target: Target,
-    /// The header names the request set itself, counted before `prepare`
-    /// adds `Content-Type` and `User-Agent`.
-    pub own_names: usize,
 }
 
 fn invalid(message: &'static str) -> Failure {
@@ -51,17 +49,6 @@ fn invalid(message: &'static str) -> Failure {
         message,
     }
 }
-
-/// The most header names a request holds of its own, until P2.5 sets the
-/// real limit. Repeats of one name count once, and the `Content-Type` and
-/// `User-Agent` that `prepare` adds don't count.
-///
-/// hyper and hyper-util add `Host` and `Content-Length` with calls that
-/// panic if `http::HeaderMap` would have to grow past its largest size,
-/// 32,768 slots. Names that collide in its hash make it grow early, but past
-/// that size only once it holds 6,554 names, a fifth of its slots. This
-/// limit keeps every request far below that.
-pub(crate) const MAX_HEADER_NAMES: usize = 4096;
 
 fn too_many() -> Failure {
     invalid(text::TOO_MANY_HEADERS)
@@ -137,13 +124,15 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
         // `from_bytes` refuses 0x00-0x1F except tab, and 0x7F.
         let value = HeaderValue::from_bytes(value.as_bytes())
             .map_err(|_| invalid(text::HEADER_VALUE_CONTROL))?;
-        if headers.keys_len() == MAX_HEADER_NAMES && !headers.contains_key(&name) {
+        // hyper and hyper-util add `Host` and `Content-Length` with calls
+        // that panic if the map would have to grow past its largest size.
+        // The cap keeps every request far below that, even when names
+        // collide in the map's hash.
+        if headers.keys_len() == MAX_REQUEST_HEADERS && !headers.contains_key(&name) {
             return Err(too_many());
         }
         headers.try_append(name, value).map_err(|_| too_many())?;
     }
-    let own_names = headers.keys_len();
-
     let (body, content_type) = match &request.body {
         None => (Vec::new(), None),
         Some(HttpBody::Json(value)) => {
@@ -189,20 +178,15 @@ pub(crate) fn prepare(request: &HttpRequest) -> Result<Prepared, Failure> {
         headers,
         body: Bytes::from(body),
         target: Target::of(&url),
-        own_names,
     })
 }
 
 /// Adds the jar's `pairs` to `prepared` as one `Cookie` header: the
 /// request's own values in their order, then `pairs`, joined with `; `. The
-/// jar's header counts toward the request's header names, so a request that
-/// already holds [`MAX_HEADER_NAMES`] names of its own, none of them
-/// `Cookie`, fails as too many headers.
+/// jar's header is added by Vush, so it never counts toward the cap on the
+/// request's own header names.
 pub(crate) fn add_cookies(prepared: &mut Prepared, pairs: &[u8]) -> Result<(), Failure> {
     let headers = &mut prepared.headers;
-    if !headers.contains_key(http::header::COOKIE) && prepared.own_names == MAX_HEADER_NAMES {
-        return Err(too_many());
-    }
     let mut merged = Vec::new();
     for own in headers.get_all(http::header::COOKIE) {
         merged.extend_from_slice(own.as_bytes());
@@ -539,38 +523,45 @@ mod tests {
     }
 
     #[test]
-    fn a_request_holds_at_most_the_header_name_limit() {
+    fn own_header_names_are_capped_at_256() {
         let too_many = invalid("the request has too many headers");
-        let most = MAX_HEADER_NAMES;
+        let most = MAX_REQUEST_HEADERS;
+        assert_eq!(most, 256);
 
-        // The content type and the user agent don't count, and neither do
-        // repeats of one name.
+        let p = prepare(&with_names(&distinct_names(most))).unwrap();
+        assert_eq!(p.headers.keys_len(), most + 1); // and `User-Agent`
+
+        let over = distinct_names(most + 1);
+        assert_eq!(prepare(&with_names(&over)).err().unwrap(), too_many);
+
+        // A repeat of one name in other letter case counts once.
         let mut r = with_names(&distinct_names(most));
-        r.headers.push(("x-0".into(), "again".into()));
-        r.body = Some(HttpBody::Text("t".into()));
-        let p = prepare(&r).unwrap();
-        assert_eq!(p.headers.keys_len(), most + 2);
-        assert_eq!(p.headers.len(), most + 3);
+        r.headers.push(("X-0".into(), "again".into()));
+        assert_eq!(prepare(&r).unwrap().headers.keys_len(), most + 1);
+    }
 
-        let mut over = distinct_names(most + 1);
-        assert_eq!(prepare(&with_names(&over)).err().unwrap(), too_many);
-        // The name past the limit is refused even after a repeat.
-        over.insert(most, "x-0".into());
-        assert_eq!(prepare(&with_names(&over)).err().unwrap(), too_many);
+    #[test]
+    fn vush_added_headers_never_count_toward_the_cap() {
+        let mut r = with_names(&distinct_names(MAX_REQUEST_HEADERS));
+        r.body = Some(HttpBody::Json(JsonValue::Null));
+        let mut p = prepare(&r).unwrap();
+        assert_eq!(add_cookies(&mut p, b"c=1"), Ok(()));
+        // Content-Type, User-Agent and Cookie.
+        assert_eq!(p.headers.keys_len(), MAX_REQUEST_HEADERS + 3);
     }
 
     /// Hyper's calls panic when the map would grow past its largest size.
     /// The map grows early once its names collide, but even then only at
     /// 6,554 names or more, and the limit stays far below that.
     #[test]
-    fn colliding_header_names_leave_hyper_room() {
-        let mut p = prepare(&with_names(&names_that_shift_a_run(MAX_HEADER_NAMES))).unwrap();
+    fn names_that_collide_in_the_map_stay_below_its_limit() {
+        let mut p = prepare(&with_names(&names_that_shift_a_run(MAX_REQUEST_HEADERS))).unwrap();
         let before = p.headers.capacity();
         assert!(p.headers.keys_len() < before);
         add_like_hyper(&mut p.headers);
         // Only the danger state grows a map that still had room.
         assert!(p.headers.capacity() > before);
-        assert_eq!(p.headers.keys_len(), MAX_HEADER_NAMES + 2);
+        assert_eq!(p.headers.keys_len(), MAX_REQUEST_HEADERS + 2);
     }
 
     #[test]
@@ -583,7 +574,8 @@ mod tests {
             (p.target.host.as_str(), p.target.path.as_str()),
             ("a.test", "/p")
         );
-        assert_eq!(p.own_names, 2);
+        // `X-A`, `X-B` and `User-Agent`.
+        assert_eq!(p.headers.keys_len(), 3);
     }
 
     fn cookie_values(p: &Prepared) -> Vec<&[u8]> {
@@ -619,22 +611,6 @@ mod tests {
         add_cookies(&mut p, b"c=3").unwrap();
         assert_eq!(cookie_values(&p), [b"c=3".as_slice()]);
         assert_eq!(without_cookie(&p), others);
-    }
-
-    #[test]
-    fn the_jars_header_counts_toward_the_cap() {
-        let mut p = prepare(&with_names(&distinct_names(MAX_HEADER_NAMES))).unwrap();
-        assert_eq!(
-            add_cookies(&mut p, b"c=3").unwrap_err(),
-            invalid("the request has too many headers")
-        );
-        assert!(cookie_values(&p).is_empty());
-
-        let mut names = distinct_names(MAX_HEADER_NAMES - 1);
-        names.push("Cookie".to_owned());
-        let mut p = prepare(&with_names(&names)).unwrap();
-        assert_eq!(add_cookies(&mut p, b"c=3"), Ok(()));
-        assert_eq!(cookie_values(&p), [b"v; c=3".as_slice()]);
     }
 
     #[test]
