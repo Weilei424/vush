@@ -121,7 +121,7 @@ File-level `setup` runs once, before any scenario. File-level `teardown` runs on
 | `timeout` | duration | `30s` | For one physical attempt, including every redirect it follows and the time spent preparing each request. Longer than zero |
 | `redirects` | integer, 0 to 20 | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
 | `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user and per hook run. See [Cookies](#cookies) |
-| `max_response_size` | size | `1MiB` | Upper bound on the size of a response body. A longer body is cut at the limit and marked `truncated`, and it still counts as a response |
+| `max_response_size` | size, at most 64MiB | `1MiB` | Upper bound on the size of a response body. A longer body is cut at the limit and marked `truncated`, and it still counts as a response |
 | `tls.ca_file` | path | none | PEM certificates to trust as well as the system's roots. Relative to the test file's directory. Read once when the run starts. At most 1 MiB, with at least one certificate, and every certificate in it must be usable. Not read when `tls.insecure` is `true` |
 | `tls.insecure` | boolean | `false` | Accepts any certificate for any name. The connection is still encrypted. Connections made this way are never shared with settings that verify |
 
@@ -484,7 +484,7 @@ A test file holds one YAML or JSON document. These rules apply however the file 
 | Values | At most 250,000, counting copies made by YAML anchors and aliases |
 | Text | At most 64 MiB of keys and strings, counting copies made by YAML anchors and aliases |
 
-The request rules above (header names and values, the URL scheme, credentials in a URL, a query in `base_url`, and `CONNECT`) are checked here only where the text is literal. They are checked again when the request is sent, for values that come from variables.
+The request rules above (header names and values, the URL scheme, credentials in a URL, a query in `base_url`, and `CONNECT`) and the number of header names a request sets (at most 256, counted ignoring case; every name in a file is literal, so this check is complete) are checked here only where the text is literal. They are checked again when the request is sent, for values that come from variables.
 
 Most errors give a key path, a line and a column. Syntax errors give a line and a column, and errors about the whole file, such as its size, give neither. Some rules are checked only after the file has no other errors, so fixing one round of errors can reveal more. An error never quotes a value from the file, so a token in a test file can't reach a log through an error message. Key names can appear, escaped and cut to 64 characters, so don't put secrets in key names.
 
