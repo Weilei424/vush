@@ -781,6 +781,31 @@ pub fn raw_headers(stream: TcpStream) -> BoxFuture {
     )
 }
 
+/// A `200` whose head has exactly `count` header lines, `content-length: 0`
+/// among them, then holds the connection open.
+fn head_with_headers(stream: TcpStream, count: usize) -> BoxFuture {
+    Box::pin(async move {
+        read_head(&stream).await;
+        let mut head = String::from("HTTP/1.1 200 OK\r\n");
+        for n in 0..count - 1 {
+            head.push_str(&format!("x-{n}: v\r\n"));
+        }
+        head.push_str("content-length: 0\r\n\r\n");
+        write_all(&stream, head.as_bytes()).await;
+        pending::<()>().await;
+    })
+}
+
+/// A `200` with exactly 100 header lines, hyper's default limit.
+pub fn hundred_headers(stream: TcpStream) -> BoxFuture {
+    head_with_headers(stream, 100)
+}
+
+/// A `200` with 101 header lines, one past hyper's default limit.
+pub fn hundred_and_one_headers(stream: TcpStream) -> BoxFuture {
+    head_with_headers(stream, 101)
+}
+
 /// Sets a cookie, promises 10 body bytes, sends 3, then closes.
 pub fn cookie_then_cut_body(stream: TcpStream) -> BoxFuture {
     Box::pin(async move {
