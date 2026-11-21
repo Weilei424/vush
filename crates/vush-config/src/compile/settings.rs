@@ -56,6 +56,11 @@ pub(super) fn http(
     {
         out.cookies = v;
     }
+    if let Some(n) = map.optional("decompress")
+        && let Some(v) = boolean(n, &child(path, "decompress"), errors)
+    {
+        out.decompress = v;
+    }
     if let Some(n) = map.optional("max_response_size")
         && let Some(v) = parsed(
             n,
@@ -148,7 +153,8 @@ mod tests {
     #[test]
     fn http_block_sets_every_key() {
         let yaml = "{version: http2, pool: vu, timeout: 10s, redirects: 0, cookies: false, \
-                    max_response_size: 2MiB, tls: {ca_file: a.pem, insecure: true}}";
+                    max_response_size: 2MiB, decompress: true, \
+                    tls: {ca_file: a.pem, insecure: true}}";
         let (got, errors) = run(yaml, |n, e| http(n, "http", &HttpSettings::default(), e));
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(
@@ -160,6 +166,7 @@ mod tests {
                 redirects: 0,
                 cookies: false,
                 max_response_size: ByteSize(2 * 1024 * 1024),
+                decompress: true,
                 tls: TlsSettings {
                     ca_file: Some("a.pem".to_owned()),
                     insecure: true
@@ -183,6 +190,7 @@ mod tests {
         assert_eq!(got.timeout, Duration::from_secs(10));
         assert_eq!(got.tls.ca_file.as_deref(), Some("a.pem"));
         assert!(got.tls.insecure);
+        assert!(!got.decompress);
     }
 
     #[test]
@@ -261,6 +269,7 @@ mod tests {
                 "expected an integer from 0 to 4294967295",
             ),
             ("{cookies: yes}", "http.cookies", "expected a boolean"),
+            ("{decompress: yes}", "http.decompress", "expected a boolean"),
             (
                 "{max_response_size: 1024}",
                 "http.max_response_size",
