@@ -269,7 +269,7 @@
       - A canary test proves that no URL, header, body or cookie value reaches a failure text or `Debug` output.
   - [x] The response-size and header caps in `vush validate` (plan Task 1).
   - [x] One module for every failure text (plan Task 2).
-  - [ ] Header limits on requests and responses (plan Task 3).
+  - [x] Header limits on requests and responses (plan Task 3).
   - [ ] Read to the end, keep the limit (plan Task 4).
   - [ ] Opt-in decoding with `http.decompress` (plan Task 5).
   - [ ] The canary test, and the docs (plan Task 6).
