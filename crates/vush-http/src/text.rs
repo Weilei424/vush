@@ -37,6 +37,7 @@ pub(crate) const SHARED_CONNECT_FAILED: &str = "the shared connection attempt fa
 pub(crate) const HOP_TIMED_OUT: &str = "the hop ran out of time";
 pub(crate) const CONNECTION_CLOSED: &str = "the connection closed before the response was complete";
 pub(crate) const PROTOCOL_BROKEN: &str = "the response broke HTTP rules";
+pub(crate) const HEAD_TOO_LARGE: &str = "the response head is too large";
 pub(crate) const UNCLASSIFIED: &str = "the request failed for an unclassified reason";
 
 /// Every text above, once each. Only the catalogue test reads it.
@@ -68,6 +69,7 @@ pub(crate) const ALL: &[&str] = &[
     HOP_TIMED_OUT,
     CONNECTION_CLOSED,
     PROTOCOL_BROKEN,
+    HEAD_TOO_LARGE,
     UNCLASSIFIED,
 ];
 
@@ -87,6 +89,6 @@ mod tests {
             assert!(!text.contains(['{', '}']), "{text}");
             assert!(seen.insert(*text), "duplicate: {text}");
         }
-        assert_eq!(ALL.len(), 27);
+        assert_eq!(ALL.len(), 28);
     }
 }
