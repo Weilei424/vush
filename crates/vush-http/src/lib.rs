@@ -5,8 +5,10 @@
 //! wire, or none when it fails in `prepare`. It never follows a redirect and
 //! never retries, because core's driver owns both loops. This crate owns the
 //! redirect rules (`follow`), connection pooling, per-hop timeouts, response
-//! bounds, and the per-user session, which holds the user's cookie jar. It
-//! must not schedule work or own global counters: scheduling belongs to
+//! bounds, and the per-user session, which holds the user's cookie jar. A
+//! body is read to the end with at most `max_response_size` kept, and
+//! `decompress` decodes gzip and br within the same limit. Every failure
+//! text is a constant in one module. It must not schedule work or own global counters: scheduling belongs to
 //! `vush-core`, and aggregation to the metrics layer.
 //!
 //! # Building executors
