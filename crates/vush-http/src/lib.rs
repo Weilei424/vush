@@ -80,6 +80,7 @@ mod json;
 mod pool;
 mod prepare;
 mod stage;
+mod text;
 mod tls;
 
 pub use executor::{BuildError, CaFileProblem, Executor, Scope, Session};
