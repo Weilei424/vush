@@ -93,6 +93,13 @@ pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Fa
         return failure(kind, stage);
     }
     for error in chain(error).filter_map(|e| e.downcast_ref::<hyper::Error>()) {
+        if error.is_parse_too_large() {
+            return Failure {
+                kind: FailureKind::Protocol,
+                stage,
+                message: text::HEAD_TOO_LARGE,
+            };
+        }
         if error.is_parse() {
             return failure(FailureKind::Protocol, stage);
         }
