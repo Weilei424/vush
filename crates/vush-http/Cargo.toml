@@ -15,7 +15,8 @@ bytes = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
-hyper = { workspace = true, features = ["client", "http1", "http2"] }
+# "server" is needed only for `hyper::Error::is_parse_too_large`.
+hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 percent-encoding = { workspace = true }
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
