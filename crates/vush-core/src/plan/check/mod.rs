@@ -130,6 +130,11 @@ pub(super) fn check(draft: &PlanDraft) -> Vec<PlanError> {
         &root.key("http").key("redirects"),
         &mut errors,
     );
+    values::max_response_size(
+        draft.http.max_response_size,
+        &root.key("http").key("max_response_size"),
+        &mut errors,
+    );
     let limits = root.key("limits");
     values::max_cookies(
         draft.limits.max_cookies,
@@ -234,6 +239,13 @@ fn check_scenario<'a>(
         values::redirects(
             scenario.http.redirects,
             &at.key("http").key("redirects"),
+            errors,
+        );
+    }
+    if scenario.http.max_response_size != draft.http.max_response_size {
+        values::max_response_size(
+            scenario.http.max_response_size,
+            &at.key("http").key("max_response_size"),
             errors,
         );
     }
@@ -398,6 +410,7 @@ fn check_request(
     check_template(target, &at.key(key), scope, errors);
     check_pairs(&request.query, &at.key("query"), scope, errors);
     let headers = at.key("headers");
+    values::request_headers(&request.headers, &headers, errors);
     for (name, value) in &request.headers {
         values::header(name, value, &headers.key(name), errors);
         check_template(value, &headers.key(name), scope, errors);
@@ -557,7 +570,7 @@ mod tests {
     use super::super::step::{RequestStep, RequestTarget, RetryPolicy};
     use super::super::template::VarRef;
     use super::super::threshold::{Bound, PercentileStat};
-    use super::super::value::{MAX_DURATION, Rate};
+    use super::super::value::{ByteSize, MAX_DURATION, Rate};
     use super::testing::{draft, errors, request, scenario, tpl, wait};
     use super::*;
 
@@ -1091,6 +1104,113 @@ mod tests {
         );
     }
 
+    fn with_response_size(file: u64, scenarios: &[u64]) -> PlanDraft {
+        let mut d = draft(
+            scenarios
+                .iter()
+                .enumerate()
+                .map(|(i, &size)| {
+                    let mut s = scenario(&format!("s{i}"));
+                    s.http.max_response_size = ByteSize(size);
+                    s
+                })
+                .collect(),
+        );
+        d.http.max_response_size = ByteSize(file);
+        d
+    }
+
+    const MIB: u64 = 1 << 20;
+
+    #[test]
+    fn response_size_is_capped_at_64_mib() {
+        assert!(errors(&with_response_size(64 * MIB, &[64 * MIB])).is_empty());
+        assert!(errors(&with_response_size(0, &[0])).is_empty());
+        assert_eq!(
+            errors(&with_response_size(64 * MIB + 1, &[64 * MIB + 1])),
+            [at(
+                "http.max_response_size",
+                PlanErrorKind::ResponseSizeTooLarge
+            )]
+        );
+        assert_eq!(
+            errors(&with_response_size(MIB, &[64 * MIB + 1])),
+            [at(
+                "scenarios[0].http.max_response_size",
+                PlanErrorKind::ResponseSizeTooLarge
+            )]
+        );
+    }
+
+    #[test]
+    fn an_inherited_response_size_cap_is_reported_once() {
+        let big = 64 * MIB + 1;
+        assert_eq!(
+            errors(&with_response_size(big, &[big, big])),
+            [at(
+                "http.max_response_size",
+                PlanErrorKind::ResponseSizeTooLarge
+            )]
+        );
+        assert_eq!(
+            errors(&with_response_size(big, &[big, big + 1])),
+            [
+                at(
+                    "http.max_response_size",
+                    PlanErrorKind::ResponseSizeTooLarge
+                ),
+                at(
+                    "scenarios[1].http.max_response_size",
+                    PlanErrorKind::ResponseSizeTooLarge
+                ),
+            ]
+        );
+    }
+
+    fn with_headers(names: &[String]) -> RequestStep {
+        let mut r = request("GET", url());
+        r.headers = names.iter().map(|n| (n.clone(), tpl("v"))).collect();
+        r
+    }
+
+    fn names(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("x-{i}")).collect()
+    }
+
+    #[test]
+    fn request_headers_are_capped_at_256() {
+        assert!(errors(&one_request(with_headers(&names(256)))).is_empty());
+        assert_eq!(
+            errors(&one_request(with_headers(&names(257)))),
+            [at(&format!("{REQ}.headers"), PlanErrorKind::TooManyHeaders)]
+        );
+        let mut folded = names(256);
+        folded.push("X-0".to_string());
+        assert!(errors(&one_request(with_headers(&folded))).is_empty());
+
+        let mut s = scenario("a");
+        s.steps = vec![
+            if_then(
+                vec![Step::Request(Box::new(with_headers(&names(257))))],
+                vec![],
+            ),
+            repeat(vec![Step::Request(Box::new(with_headers(&names(257))))]),
+        ];
+        assert_eq!(
+            errors(&draft(vec![s])),
+            [
+                at(
+                    "scenarios[0].steps[0].if.then[0].request.headers",
+                    PlanErrorKind::TooManyHeaders
+                ),
+                at(
+                    "scenarios[0].steps[1].repeat.steps[0].request.headers",
+                    PlanErrorKind::TooManyHeaders
+                ),
+            ]
+        );
+    }
+
     fn with_max_cookies(file: u32, scenarios: &[u32]) -> PlanDraft {
         let mut d = draft(
             scenarios
@@ -1148,7 +1268,18 @@ mod tests {
 
     #[test]
     fn cap_texts_state_the_constants() {
-        use super::super::{MAX_COOKIES, MAX_REDIRECTS, MAX_RETRY_ATTEMPTS};
+        use super::super::{
+            MAX_COOKIES, MAX_REDIRECTS, MAX_REQUEST_HEADERS, MAX_RESPONSE_SIZE, MAX_RETRY_ATTEMPTS,
+        };
+        assert_eq!(MAX_RESPONSE_SIZE, ByteSize(64 << 20));
+        assert_eq!(
+            PlanErrorKind::ResponseSizeTooLarge.to_string(),
+            "`max_response_size` must be at most 64MiB"
+        );
+        assert_eq!(
+            PlanErrorKind::TooManyHeaders.to_string(),
+            format!("a request can set at most {MAX_REQUEST_HEADERS} headers")
+        );
         assert_eq!(
             PlanErrorKind::TooManyAttempts.to_string(),
             format!("`attempts` must be at most {MAX_RETRY_ATTEMPTS}")
