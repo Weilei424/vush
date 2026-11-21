@@ -183,6 +183,10 @@ pub enum PlanErrorKind {
     RedirectsTooHigh,
     /// `limits.max_cookies` is above `MAX_COOKIES`.
     TooManyCookies,
+    /// `http.max_response_size` is above `MAX_RESPONSE_SIZE`.
+    ResponseSizeTooLarge,
+    /// A request sets more than `MAX_REQUEST_HEADERS` header names.
+    TooManyHeaders,
     /// A non-idempotent method is retried without `allow_non_idempotent`.
     RetryNeedsOptIn,
     /// A status code is outside 100 to 599.
@@ -284,6 +288,14 @@ impl fmt::Display for PlanErrorKind {
             Self::TooManyCookies => {
                 write!(f, "`max_cookies` must be at most {}", super::MAX_COOKIES)
             }
+            Self::ResponseSizeTooLarge => {
+                f.write_str("`max_response_size` must be at most 64MiB")
+            }
+            Self::TooManyHeaders => write!(
+                f,
+                "a request can set at most {} headers",
+                super::MAX_REQUEST_HEADERS
+            ),
             Self::RetryNeedsOptIn => f.write_str(
                 "retrying a method other than GET, HEAD, PUT, DELETE, OPTIONS or TRACE needs `allow_non_idempotent: true`",
             ),
