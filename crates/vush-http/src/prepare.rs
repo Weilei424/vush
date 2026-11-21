@@ -14,6 +14,10 @@ use crate::text;
 /// The `User-Agent` sent unless the request sets its own.
 pub(crate) const USER_AGENT: &str = concat!("vush/", env!("CARGO_PKG_VERSION"));
 
+/// The `Accept-Encoding` sent under `decompress` unless the request sets its
+/// own.
+pub(crate) const ACCEPT_ENCODING: &str = "gzip, br";
+
 /// Header names a request can't set, in lowercase. The executor owns framing.
 pub(crate) const FORBIDDEN: [&str; 7] = [
     "content-length",
@@ -201,6 +205,21 @@ pub(crate) fn add_cookies(prepared: &mut Prepared, pairs: &[u8]) -> Result<(), F
         .try_insert(http::header::COOKIE, merged)
         .map_err(|_| too_many())?;
     Ok(())
+}
+
+/// Adds `Accept-Encoding: gzip, br` to `prepared` unless the request set its
+/// own, which is then sent as written. It is added by Vush, so it never
+/// counts toward the cap on the request's own header names.
+pub(crate) fn add_accept_encoding(prepared: &mut Prepared) {
+    let headers = &mut prepared.headers;
+    if !headers.contains_key(http::header::ACCEPT_ENCODING) {
+        // The map holds at most 259 names here, far fewer than it can, so
+        // this can't fail. If it did, the request would go without one.
+        let _ = headers.try_insert(
+            http::header::ACCEPT_ENCODING,
+            HeaderValue::from_static(ACCEPT_ENCODING),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -546,8 +565,30 @@ mod tests {
         r.body = Some(HttpBody::Json(JsonValue::Null));
         let mut p = prepare(&r).unwrap();
         assert_eq!(add_cookies(&mut p, b"c=1"), Ok(()));
-        // Content-Type, User-Agent and Cookie.
-        assert_eq!(p.headers.keys_len(), MAX_REQUEST_HEADERS + 3);
+        add_accept_encoding(&mut p);
+        // Content-Type, User-Agent, Cookie and Accept-Encoding.
+        assert_eq!(p.headers.keys_len(), MAX_REQUEST_HEADERS + 4);
+        assert_eq!(p.headers.keys_len(), 260);
+    }
+
+    fn accept_encoding(p: &Prepared) -> Vec<&[u8]> {
+        p.headers
+            .get_all(http::header::ACCEPT_ENCODING)
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect()
+    }
+
+    #[test]
+    fn accept_encoding_is_added_only_when_absent() {
+        let mut p = prepare(&absolute("https://h/")).unwrap();
+        assert!(accept_encoding(&p).is_empty(), "prepare adds none");
+        add_accept_encoding(&mut p);
+        assert_eq!(accept_encoding(&p), [b"gzip, br".as_slice()]);
+
+        let mut p = prepare(&with_headers(&[("Accept-Encoding", "identity")])).unwrap();
+        add_accept_encoding(&mut p);
+        assert_eq!(accept_encoding(&p), [b"identity".as_slice()]);
     }
 
     /// Hyper's calls panic when the map would grow past its largest size.
