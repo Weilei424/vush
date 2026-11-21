@@ -27,6 +27,7 @@ use crate::executors::{SystemRoots, build};
 use crate::pool::ScopeView;
 use crate::prepare::{Prepared, add_cookies, prepare};
 use crate::stage::StageMarker;
+use crate::text;
 
 /// Why an executor couldn't be built. Each text is fixed: it names a
 /// setting's key, never the path it holds, the file's content or a library's
@@ -425,7 +426,7 @@ impl HttpExecutor for Executor {
             Err(Failure {
                 kind: FailureKind::InvalidRequest,
                 stage: FailureStage::Prepare,
-                message: "the session belongs to another executor",
+                message: text::FOREIGN_SESSION,
             })
         } else if timeout_after.is_zero() {
             Err(timeout(FailureStage::Prepare))
