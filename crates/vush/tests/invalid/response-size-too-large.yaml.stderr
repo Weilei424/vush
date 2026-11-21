@@ -1,0 +1,5 @@
+error: `max_response_size` must be at most 64MiB
+  --> response-size-too-large.yaml:4:28
+   = at http.max_response_size
+
+response-size-too-large.yaml: not valid, 1 problem
