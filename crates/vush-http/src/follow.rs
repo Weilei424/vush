@@ -6,6 +6,7 @@ use vush_core::protocol::http::{HttpRequest, HttpResponse, RequestUrl};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 
 use crate::prepare::request_url;
+use crate::text;
 
 /// Headers dropped when a redirect changes the origin, in lowercase.
 const CROSS_ORIGIN_DROPPED: [&str; 4] = ["authorization", "proxy-authorization", "cookie", "host"];
@@ -35,26 +36,25 @@ pub(crate) fn follow(
         return Ok(None);
     };
     if locations.next().is_some() {
-        return Err(invalid("the redirect has more than one Location"));
+        return Err(invalid(text::REDIRECT_MANY_LOCATIONS));
     }
-    let location = std::str::from_utf8(location)
-        .map_err(|_| invalid("the redirect's Location can't be parsed"))?;
+    let location = std::str::from_utf8(location).map_err(|_| invalid(text::REDIRECT_UNPARSABLE))?;
 
     // A request that was sent always rebuilds, so a failure here is not expected.
     let sent = request_url(request).map_err(|failure| invalid(failure.message))?;
     // `http://` fails to parse with `EmptyHost`, which is the no-host case.
     let mut target: Url = sent.join(location).map_err(|error| match error {
-        url::ParseError::EmptyHost => invalid("the redirect's URL has no host"),
-        _ => invalid("the redirect's Location can't be parsed"),
+        url::ParseError::EmptyHost => invalid(text::REDIRECT_NO_HOST),
+        _ => invalid(text::REDIRECT_UNPARSABLE),
     })?;
     if !matches!(target.scheme(), "http" | "https") {
-        return Err(invalid("the redirect goes to an unsupported scheme"));
+        return Err(invalid(text::REDIRECT_UNSUPPORTED_SCHEME));
     }
     if !target.username().is_empty() || target.password().is_some() {
-        return Err(invalid("the redirect's URL holds a user name or password"));
+        return Err(invalid(text::REDIRECT_CREDENTIALS));
     }
     if target.host_str().is_none_or(str::is_empty) {
-        return Err(invalid("the redirect's URL has no host"));
+        return Err(invalid(text::REDIRECT_NO_HOST));
     }
     target.set_fragment(None);
 
@@ -79,7 +79,7 @@ pub(crate) fn follow(
     Ok(Some(HttpRequest {
         method: method
             .parse()
-            .map_err(|_| invalid("the redirect's Location can't be parsed"))?,
+            .map_err(|_| invalid(text::REDIRECT_UNPARSABLE))?,
         url: RequestUrl::Absolute(target.into()),
         query: Vec::new(),
         headers,
