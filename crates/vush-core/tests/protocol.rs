@@ -427,6 +427,7 @@ fn every_plan_field_has_an_owner() {
         redirects: _,         // driver (P2.2): the hop loop's limit
         cookies: _,           // session (P2.4): false gives no jar
         max_response_size: _, // executor construction (P2.5): caps the body, sets `truncated`
+        decompress: _,        // executor construction (P2.5): decoding gzip and br
         tls:
             TlsSettings {
                 ca_file: _,  // executor construction (P2.3)
