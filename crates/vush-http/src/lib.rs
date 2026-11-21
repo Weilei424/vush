@@ -74,6 +74,7 @@ mod capture;
 mod classify;
 mod connector;
 mod cookie;
+mod decode;
 mod executor;
 mod executors;
 mod follow;
