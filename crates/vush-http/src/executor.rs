@@ -20,6 +20,7 @@ use vush_core::protocol::http::{HttpExecutor, HttpHop, HttpRequest, HttpResponse
 use vush_core::protocol::{BodySizes, Failure, FailureKind, FailureStage, HopTiming};
 
 use crate::body::CountingBody;
+use crate::capture::Capture;
 use crate::classify::{classify, failure, timeout};
 use crate::connector::{ConnInfo, Connector};
 use crate::cookie::{Jar, Target};
@@ -163,8 +164,9 @@ pub(crate) enum Transport {
 /// - `version` sets the version mode: `auto` negotiates over TLS, `http1`
 ///   speaks only HTTP/1.1, and `http2` speaks only HTTP/2, with prior
 ///   knowledge in plaintext.
-/// - `max_response_size` is the body limit. A longer body is cut at it and
-///   marked `truncated`.
+/// - `max_response_size` is the body limit. A longer body is read to the end,
+///   its start kept up to the limit, and marked `truncated`. Its connection
+///   is reused.
 /// - `pool` says where connections live. Under `shared` and `scenario`, all
 ///   the sessions of an executor use its one pool, which [`Executors`] shares
 ///   with other executors under `shared`. Under `vu`, each session holds its
@@ -371,24 +373,16 @@ impl Executor {
         let (parts, mut body) = head.into_parts();
         let version = wire_version(parts.version)
             .ok_or_else(|| failure(FailureKind::Protocol, FailureStage::Headers))?;
-        let mut truncated = false;
+        let capture = progress.capture.insert(Capture::new(self.limit));
+        // Every frame is read, so an HTTP/1.1 connection can be reused.
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|error| classify(&error, FailureStage::Body))?;
             // Trailers are dropped.
-            let Ok(data) = frame.into_data() else {
-                continue;
-            };
-            let kept = progress.body.len() as u64;
-            let room = usize::try_from(self.limit.saturating_sub(kept)).unwrap_or(usize::MAX);
-            if data.len() > room {
-                // The rest is dropped unread, which closes an HTTP/1.1
-                // connection.
-                progress.body.extend_from_slice(&data[..room]);
-                truncated = true;
-                break;
+            if let Ok(data) = frame.into_data() {
+                capture.push(&data);
             }
-            progress.body.extend_from_slice(&data);
         }
+        let (body, truncated) = capture.finish();
         let headers = parts
             .headers
             .iter()
@@ -398,7 +392,7 @@ impl Executor {
             status: parts.status.as_u16(),
             version,
             headers,
-            body: std::mem::take(&mut progress.body),
+            body,
             truncated,
         })
     }
@@ -467,10 +461,7 @@ impl HttpExecutor for Executor {
             .or(progress.error_connection);
         let connection = info.as_ref().map(|info| info.id);
         let setup = info.and_then(|info| info.take_setup());
-        let received = match &outcome {
-            Ok(response) => response.body.len(),
-            Err(_) => progress.body.len(),
-        };
+        let received = progress.capture.as_ref().map_or(0, Capture::received);
         HttpHop {
             timing: HopTiming {
                 to_headers: progress.to_headers,
@@ -480,7 +471,7 @@ impl HttpExecutor for Executor {
             connection,
             sizes: BodySizes {
                 sent: sent.load(Ordering::Relaxed),
-                received: received as u64,
+                received,
             },
             outcome,
         }
@@ -500,8 +491,9 @@ impl HttpExecutor for Executor {
 struct Progress {
     start: Instant,
     to_headers: Option<Duration>,
-    /// The body bytes kept so far. On a failure, they count as received.
-    body: Vec<u8>,
+    /// The body being read, from the moment the head arrives. Its count is
+    /// what the hop received, on a failure too.
+    capture: Option<Capture>,
     /// The connection a hyper-util error names, if any.
     error_connection: Option<Arc<ConnInfo>>,
 }
@@ -511,7 +503,7 @@ impl Progress {
         Self {
             start: Instant::now(),
             to_headers: None,
-            body: Vec::new(),
+            capture: None,
             error_connection: None,
         }
     }
