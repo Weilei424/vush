@@ -40,6 +40,9 @@ pub(crate) const PROTOCOL_BROKEN: &str = "the response broke HTTP rules";
 pub(crate) const HEAD_TOO_LARGE: &str = "the response head is too large";
 pub(crate) const UNCLASSIFIED: &str = "the request failed for an unclassified reason";
 
+// `protocol` in `body`, from `capture` under `decompress`.
+pub(crate) const BODY_CORRUPT: &str = "the compressed body is corrupt";
+
 /// Every text above, once each. Only the catalogue test reads it.
 #[cfg(test)]
 pub(crate) const ALL: &[&str] = &[
@@ -71,6 +74,7 @@ pub(crate) const ALL: &[&str] = &[
     PROTOCOL_BROKEN,
     HEAD_TOO_LARGE,
     UNCLASSIFIED,
+    BODY_CORRUPT,
 ];
 
 #[cfg(test)]
@@ -89,6 +93,6 @@ mod tests {
             assert!(!text.contains(['{', '}']), "{text}");
             assert!(seen.insert(*text), "duplicate: {text}");
         }
-        assert_eq!(ALL.len(), 28);
+        assert_eq!(ALL.len(), 29);
     }
 }
