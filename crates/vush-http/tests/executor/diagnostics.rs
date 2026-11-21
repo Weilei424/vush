@@ -11,15 +11,15 @@ use flate2::write::GzEncoder;
 use rustls::RootCertStore;
 use vush_core::plan::{HttpSettings, HttpVersion, ResourceLimits, RetryPolicy};
 use vush_core::protocol::http::{HttpBody, HttpExecutor, HttpHop, HttpRequest, RequestUrl};
-use vush_core::protocol::{FailureKind, FailureStage, Outcome};
+use vush_core::protocol::{FailureKind, FailureStage, JsonValue, Outcome};
 use vush_core::runner::{StepPolicy, Timer, run_attempt, run_step};
 use vush_http::Executor;
 
 use crate::common::{
     LOCALHOST, MIB, NO_DIR, TIMEOUT, TestCa, close_after_head, echo, executor, failure,
-    garbage_status, get, hundred_and_one_headers, json_a_1, limited, one_503_then_gone, pairs,
-    redirecting, refused_port, reply, send, send_within, settings, silent_after_head, spawn_h1,
-    spawn_raw, spawn_tls, stalled_body, trusting,
+    garbage_status, get, hundred_and_one_headers, limited, one_503_then_gone, pairs, redirecting,
+    refused_port, reply, send, send_within, settings, silent_after_head, spawn_h1, spawn_raw,
+    spawn_tls, stalled_body, trusting,
 };
 
 const CANARY: &str = "vush-canary-7f3a";
@@ -56,7 +56,10 @@ fn requests(base: &str) -> Vec<HttpRequest> {
     let bodies = [
         HttpBody::Text(CANARY.to_owned()),
         HttpBody::Form(pairs(&[("secret", CANARY)])),
-        json_a_1(),
+        HttpBody::Json(JsonValue::Object(vec![(
+            "secret".to_owned(),
+            JsonValue::String(CANARY.to_owned()),
+        )])),
     ];
     let mut all = vec![with_canary(get(url.clone()), None)];
     for body in bodies {
@@ -232,6 +235,9 @@ async fn closed_and_broken_responses_never_show_the_canary() {
     .await;
     let hop = send(&decoding, &get(format!("http://{valid}/"))).await;
     assert_clean(&hop);
+    let got = crate::common::response(&hop);
+    assert_eq!(got.status, 200);
+    assert_eq!(got.body, CANARY.as_bytes());
 }
 
 #[tokio::test(flavor = "multi_thread")]
