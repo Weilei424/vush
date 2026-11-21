@@ -353,6 +353,12 @@ const TABLE_DEFAULTS: &[Known] = &[
     },
     Known {
         heading: "`http`",
+        key: "`decompress`",
+        default: "`false`",
+        check: Same(&[(&[], &[("#FILE", "http: { decompress: $ }")])]),
+    },
+    Known {
+        heading: "`http`",
         key: "`tls.ca_file`",
         default: "none",
         check: Holds(|| {
