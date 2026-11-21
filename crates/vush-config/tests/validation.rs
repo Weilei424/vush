@@ -127,6 +127,29 @@ fn rows() -> Vec<Row> {
             "at most 3000",
         ),
         row(
+            "ResponseSizeTooLarge",
+            file(&top("http: {max_response_size: 65MiB}\n"), LOAD, &get("")),
+            "http.max_response_size",
+            "max_response_size: 65MiB",
+            "at most 64MiB",
+        ),
+        row(
+            "TooManyHeaders",
+            file(
+                BASE,
+                LOAD,
+                &get(&format!(
+                    "          headers:\n{}",
+                    (0..257)
+                        .map(|i| format!("            x-{i}: v\n"))
+                        .collect::<String>()
+                )),
+            ),
+            "scenarios[0].steps[0].request.headers",
+            "x-0:",
+            "at most 256",
+        ),
+        row(
             "TooFewAttempts",
             file(
                 BASE,
