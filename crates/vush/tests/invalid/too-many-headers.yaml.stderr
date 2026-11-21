@@ -1,0 +1,5 @@
+error: a request can set at most 256 headers
+  --> too-many-headers.yaml:12:13
+   = at scenarios[0].steps[0].request.headers
+
+too-many-headers.yaml: not valid, 1 problem
