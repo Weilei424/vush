@@ -11,8 +11,8 @@ use vush_http::Executor;
 
 use crate::common::{
     Echo, LOCALHOST, MIB, NO_DIR, TestCa, echo, executor, failure, get, head_with_length,
-    header_values, json_a_1, method, no_content, pairs, raw_headers, redirecting, response, send,
-    settings, sized, spawn_auto, spawn_h1, spawn_raw, spawn_tls, trusting,
+    header_values, json_a_1, limited, method, no_content, pairs, raw_headers, redirecting,
+    response, send, settings, sized, spawn_auto, spawn_h1, spawn_raw, spawn_tls, trusting,
 };
 
 const H2_AND_H1: &[&[u8]] = &[b"h2", b"http/1.1"];
@@ -193,8 +193,32 @@ async fn bodies_over_the_limit_are_cut() {
         let size = path.rsplit('/').next().unwrap().as_bytes();
         assert_eq!(header_values(got, "x-size"), [size], "{path}");
         assert_eq!(got.body.len() as u64, MIB, "{path}");
-        assert_eq!(hop.sizes.received, MIB, "{path}");
+        let full: u64 = std::str::from_utf8(size).unwrap().parse().unwrap();
+        assert_eq!(hop.sizes.received, full, "{path}");
     }
+}
+
+async fn cut_bodies_share_a_connection(addr: std::net::SocketAddr, executor: &Executor) {
+    let mut seen = Vec::new();
+    for path in ["/fixed/2097152", "/fixed/2097152", "/chunked/2097152"] {
+        let hop = send(executor, &get(format!("http://{addr}{path}"))).await;
+        assert!(response(&hop).truncated, "{path}");
+        assert_eq!(hop.sizes.received, 2_097_152, "{path}");
+        seen.push(hop.connection.expect("a connection"));
+    }
+    assert!(seen.iter().all(|id| *id == seen[0]), "{seen:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_body_keeps_its_connection_on_http1() {
+    let addr = spawn_h1(sized).await;
+    cut_bodies_share_a_connection(addr, &limited(HttpVersion::Http1, MIB)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_body_keeps_its_connection_on_http2() {
+    let addr = spawn_auto(sized).await;
+    cut_bodies_share_a_connection(addr, &limited(HttpVersion::Http2, MIB)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
