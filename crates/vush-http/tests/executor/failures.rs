@@ -12,9 +12,10 @@ use vush_http::Executor;
 
 use crate::common::{
     CountingListener, LOCALHOST, MIB, NO_DIR, TestCa, close_after_head, echo, executor, failure,
-    garbage_status, get, h2_reset_after_one_frame, hold, hundred_and_one_headers, hundred_headers,
-    malformed_chunk, pairs, refused_port, reply, send, send_within, silent_after_head, spawn_auto,
-    spawn_raw, spawn_tls, stalled_body, trusting,
+    garbage_status, get, h2_reset_after_one_frame, hold, http10_to_close, hundred_and_one_headers,
+    hundred_headers, limited, malformed_chunk, pairs, refused_port, reply, send, send_within,
+    silent_after_head, spawn_auto, spawn_raw, spawn_tls, stalled_body, trusting,
+    two_mib_promised_then_stall,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -152,6 +153,33 @@ async fn a_missing_head_times_out_in_headers() {
     assert!(hop.connection.is_some());
     assert!(hop.timing.setup.is_some());
     assert_eq!(hop.timing.to_headers, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stall_past_the_limit_times_out_in_body() {
+    let addr = spawn_raw(two_mib_promised_then_stall).await;
+    let hop = send_within(
+        &limited(HttpVersion::Auto, 1024),
+        &get(format!("http://{addr}/")),
+        Duration::from_millis(500),
+    )
+    .await;
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Body));
+    assert!(hop.sizes.received >= 1024, "{}", hop.sizes.received);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_http10_body_past_the_limit_reads_to_close() {
+    let addr = spawn_raw(http10_to_close).await;
+    let hop = send(
+        &limited(HttpVersion::Auto, 1024),
+        &get(format!("http://{addr}/")),
+    )
+    .await;
+    let got = crate::common::response(&hop);
+    assert_eq!(got.body.len(), 1024);
+    assert!(got.truncated);
+    assert_eq!(hop.sizes.received, 4096);
 }
 
 #[tokio::test(flavor = "multi_thread")]
