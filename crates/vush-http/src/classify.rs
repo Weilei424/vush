@@ -7,17 +7,18 @@ use hyper_util::client::legacy::Error as ClientError;
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 
 use crate::connector::ConnectError;
+use crate::text;
 
 /// The fixed message of each kind `send` reports beyond `prepare` and the
 /// connector's own. The connector reports its own `connect` failures, so
 /// this one is for a hop that waited for another hop's connect.
 fn message(kind: FailureKind) -> &'static str {
     match kind {
-        FailureKind::Timeout => "the hop ran out of time",
-        FailureKind::ConnectionClosed => "the connection closed before the response was complete",
-        FailureKind::Protocol => "the response broke HTTP rules",
-        FailureKind::Connect => "the shared connection attempt failed",
-        _ => "the request failed for an unclassified reason",
+        FailureKind::Timeout => text::HOP_TIMED_OUT,
+        FailureKind::ConnectionClosed => text::CONNECTION_CLOSED,
+        FailureKind::Protocol => text::PROTOCOL_BROKEN,
+        FailureKind::Connect => text::SHARED_CONNECT_FAILED,
+        _ => text::UNCLASSIFIED,
     }
 }
 
