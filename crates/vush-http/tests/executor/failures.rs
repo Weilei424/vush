@@ -5,15 +5,16 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use vush_core::plan::{HttpSettings, HttpVersion, ResourceLimits};
+use vush_core::plan::{HttpSettings, HttpVersion, MAX_REQUEST_HEADERS, ResourceLimits};
 use vush_core::protocol::http::{HttpBody, HttpRequest};
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 use vush_http::Executor;
 
 use crate::common::{
     CountingListener, LOCALHOST, MIB, NO_DIR, TestCa, close_after_head, echo, executor, failure,
-    garbage_status, get, h2_reset_after_one_frame, hold, malformed_chunk, pairs, refused_port,
-    send, send_within, silent_after_head, spawn_auto, spawn_raw, spawn_tls, stalled_body, trusting,
+    garbage_status, get, h2_reset_after_one_frame, hold, hundred_and_one_headers, hundred_headers,
+    malformed_chunk, pairs, refused_port, reply, send, send_within, silent_after_head, spawn_auto,
+    spawn_raw, spawn_tls, stalled_body, trusting,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -260,10 +261,10 @@ fn with_distinct_headers(url: String, count: usize) -> HttpRequest {
     request
 }
 
-/// A request holds at most 4,096 header names of its own.
+/// A request holds at most `MAX_REQUEST_HEADERS` header names of its own.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_with_too_many_headers_fails_in_prepare() {
-    let most = 4096;
+    let most = MAX_REQUEST_HEADERS;
     let listener = CountingListener::bind().await;
     let request = with_distinct_headers(format!("http://{}/", listener.addr), most + 1);
     let hop = send(&executor(HttpVersion::Auto), &request).await;
@@ -275,18 +276,22 @@ async fn a_request_with_too_many_headers_fails_in_prepare() {
     assert_eq!(listener.accepted().await, 0);
 
     // The most a request can hold reaches hyper, which adds its own headers
-    // without a panic. The server refuses so many: HTTP/1.1 answers `431`,
-    // or resets while the headers are still being written, and HTTP/2
-    // resets the stream.
+    // without a panic. HTTP/1.1 servers refuse more than 100 headers: the
+    // answer is `431`, or a reset while the headers are still being written.
+    // The HTTP/2 server takes them, since they fit its header list.
     let addr = spawn_auto(echo).await;
-    for version in [HttpVersion::Http1, HttpVersion::Http2] {
-        let request = with_distinct_headers(format!("http://{addr}/"), most);
-        let hop = send(&executor(version), &request).await;
-        assert!(hop.connection.is_some(), "{version:?}");
-        match &hop.outcome {
-            Ok(response) => assert_eq!(response.status, 431, "{version:?}"),
-            Err(error) => assert_eq!(error.kind, FailureKind::ConnectionClosed, "{version:?}"),
-        }
+    let request = with_distinct_headers(format!("http://{addr}/"), most);
+    let hop = send(&executor(HttpVersion::Http1), &request).await;
+    assert!(hop.connection.is_some());
+    match &hop.outcome {
+        Ok(response) => assert_eq!(response.status, 431),
+        Err(error) => assert_eq!(error.kind, FailureKind::ConnectionClosed),
+    }
+    let hop = send(&executor(HttpVersion::Http2), &request).await;
+    assert!(hop.connection.is_some());
+    match &hop.outcome {
+        Ok(response) => assert_eq!(response.status, 200),
+        Err(error) => panic!("HTTP/2 should accept {most} headers: {error:?}"),
     }
 }
 
@@ -346,4 +351,46 @@ async fn failures_never_show_the_url() {
             assert!(!shown.contains(secret), "{shown}");
         }
     }
+}
+
+/// hyper's default of 100 response headers is pinned here: the 101st makes
+/// the head too large.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_of_100_headers_passes_and_101_is_too_large() {
+    let executor = executor(HttpVersion::Http1);
+    let addr = spawn_raw(hundred_headers).await;
+    let hop = send(&executor, &get(format!("http://{addr}/"))).await;
+    let Ok(response) = &hop.outcome else {
+        panic!("100 headers should pass: {:?}", hop.outcome)
+    };
+    assert_eq!(response.status, 200);
+
+    let addr = spawn_raw(hundred_and_one_headers).await;
+    let hop = send(&executor, &get(format!("http://{addr}/"))).await;
+    assert_eq!(
+        failure(&hop),
+        (FailureKind::Protocol, FailureStage::Headers)
+    );
+    let Err(failed) = &hop.outcome else {
+        unreachable!()
+    };
+    assert_eq!(failed.message, "the response head is too large");
+}
+
+/// The client advertises a 16 KiB header list, so a larger head is a
+/// protocol failure rather than a reset or a hang.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_http2_head_over_16_kib_is_a_protocol_failure() {
+    let addr =
+        spawn_auto(|_request| async { reply(200, &[("x-big", &"a".repeat(17_000))], Vec::new()) })
+            .await;
+    let hop = send(
+        &executor(HttpVersion::Http2),
+        &get(format!("http://{addr}/")),
+    )
+    .await;
+    assert_eq!(
+        failure(&hop),
+        (FailureKind::Protocol, FailureStage::Headers)
+    );
 }
