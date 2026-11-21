@@ -7,7 +7,8 @@ use vush_core::runner::{AttemptResult, run_attempt};
 use vush_http::Executor;
 
 use crate::common::{
-    Echo, TIMEOUT, echo, executor, get, json_a_1, method, pairs, redirecting, spawn_h1,
+    Echo, MIB, ReplyFuture, TIMEOUT, echo, executor, get, json_a_1, limited, method, pairs,
+    redirecting, reply, spawn_h1,
 };
 
 async fn attempt(executor: &Executor, request: HttpRequest, redirects: u32) -> AttemptResult {
@@ -118,4 +119,26 @@ async fn a_bad_location_ends_with_invalid_redirect() {
             stage: FailureStage::Prepare
         }
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_redirect_body_keeps_its_connection() {
+    let addr = spawn_h1(|request| -> ReplyFuture {
+        if request.uri().path() == "/big" {
+            Box::pin(
+                async move { reply(302, &[("location", "/echo")], vec![b'x'; 2 * MIB as usize]) },
+            )
+        } else {
+            echo(request)
+        }
+    })
+    .await;
+    let executor = limited(HttpVersion::Http1, MIB);
+    let result = attempt(&executor, get(format!("http://{addr}/big")), 5).await;
+    let hops = result.record.hops();
+    assert_eq!(hops.len(), 2);
+    assert_eq!(hops[0].sizes.received, 2 * MIB);
+    assert!(hops[0].connection.is_some());
+    assert_eq!(hops[0].connection, hops[1].connection);
+    assert_eq!(status(&result), 200);
 }
