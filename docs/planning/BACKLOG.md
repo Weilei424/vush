@@ -271,7 +271,7 @@
   - [x] One module for every failure text (plan Task 2).
   - [x] Header limits on requests and responses (plan Task 3).
   - [x] Read to the end, keep the limit (plan Task 4).
-  - [ ] Opt-in decoding with `http.decompress` (plan Task 5).
+  - [x] Opt-in decoding with `http.decompress` (plan Task 5).
   - [ ] The canary test, and the docs (plan Task 6).
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
