@@ -24,9 +24,10 @@ use crate::capture::Capture;
 use crate::classify::{classify, failure, timeout};
 use crate::connector::{ConnInfo, Connector};
 use crate::cookie::{Jar, Target};
+use crate::decode;
 use crate::executors::{SystemRoots, build};
 use crate::pool::ScopeView;
-use crate::prepare::{Prepared, add_cookies, prepare};
+use crate::prepare::{Prepared, add_accept_encoding, add_cookies, prepare};
 use crate::stage::StageMarker;
 use crate::text;
 
@@ -167,6 +168,13 @@ pub(crate) enum Transport {
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
+/// - `decompress` asks for gzip and br bodies and decodes them. A request
+///   with no `Accept-Encoding` of its own gets `Accept-Encoding: gzip, br`. A
+///   response whose one `Content-Encoding` is `gzip`, `x-gzip` or `br` is
+///   decoded as it arrives, and the limit counts decoded bytes: decoding
+///   stops there. Any other body is kept raw, and the headers are left as
+///   received. A corrupt compressed body fails as `protocol` in `body`.
+///   `decompress` doesn't change pool sharing.
 /// - `pool` says where connections live. Under `shared` and `scenario`, all
 ///   the sessions of an executor use its one pool, which [`Executors`] shares
 ///   with other executors under `shared`. Under `vu`, each session holds its
@@ -195,6 +203,8 @@ pub struct Executor {
     limit: u64,
     /// The size of each session's jar, or `None` for no jar.
     pub(crate) cookies: Option<NonZeroU32>,
+    /// Whether to ask for gzip and br and decode them.
+    decompress: bool,
 }
 
 /// The size of each session's jar under `settings` and `limits`, or `None`
@@ -259,18 +269,21 @@ impl Executor {
         Ok(built.pop().expect("one scope builds one executor"))
     }
 
-    /// An executor over `transport`, with the body limit `max_response_size`
-    /// and jars of `cookies` cookies, or none. It gets an ID of its own.
+    /// An executor over `transport`, with the body limit `max_response_size`,
+    /// jars of `cookies` cookies, or none, and decoding under `decompress`.
+    /// It gets an ID of its own.
     pub(crate) fn from_parts(
         transport: Transport,
         max_response_size: u64,
         cookies: Option<NonZeroU32>,
+        decompress: bool,
     ) -> Self {
         Self {
             id: NEXT_EXECUTOR.fetch_add(1, Ordering::Relaxed),
             transport,
             limit: max_response_size,
             cookies,
+            decompress,
         }
     }
 
@@ -319,8 +332,9 @@ impl Executor {
     }
 
     /// Sends the request, waits for its head, and reads its body up to the
-    /// limit. `jar` is the session's jar, if it has one, with the target the
-    /// head's `Set-Cookie` values are stored against.
+    /// limit, decoding it under `decompress`. `jar` is the session's jar, if
+    /// it has one, with the target the head's `Set-Cookie` values are stored
+    /// against.
     async fn drive(
         &self,
         client: &Client<Connector, CountingBody>,
@@ -373,16 +387,22 @@ impl Executor {
         let (parts, mut body) = head.into_parts();
         let version = wire_version(parts.version)
             .ok_or_else(|| failure(FailureKind::Protocol, FailureStage::Headers))?;
-        let capture = progress.capture.insert(Capture::new(self.limit));
-        // Every frame is read, so an HTTP/1.1 connection can be reused.
+        // The encoding is known only now, from the head.
+        let encoding = self
+            .decompress
+            .then(|| decode::encoding(&parts.headers))
+            .flatten();
+        let capture = progress.capture.insert(Capture::new(self.limit, encoding));
+        // Every frame is read, so an HTTP/1.1 connection can be reused. A
+        // corrupt compressed body fails at once.
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|error| classify(&error, FailureStage::Body))?;
             // Trailers are dropped.
             if let Ok(data) = frame.into_data() {
-                capture.push(&data);
+                capture.push(&data)?;
             }
         }
-        let (body, truncated) = capture.finish();
+        let (body, truncated) = capture.finish()?;
         let headers = parts
             .headers
             .iter()
@@ -437,7 +457,7 @@ impl HttpExecutor for Executor {
         } else {
             // The pool is borrowed apart from the jar, which the hop changes.
             let Session { client, jar, .. } = session;
-            match ready(request, jar.as_mut(), deadline) {
+            match ready(request, jar.as_mut(), deadline, self.decompress) {
                 Err(failure) => Err(failure),
                 Ok(prepared) => {
                     let (mut request, target) = wire_request(prepared, sent.clone());
@@ -510,13 +530,15 @@ impl Progress {
 }
 
 /// Everything a hop does before the wire, in order: `prepare`, adding the
-/// jar's cookies, the deadline check, and counting those cookies as used. A
-/// failure in any step is in `prepare`, and changes nothing in the jar but
-/// the expired cookies that picking removes.
+/// jar's cookies, adding `Accept-Encoding` under `decompress`, the deadline
+/// check, and counting those cookies as used. A failure in any step is in
+/// `prepare`, and changes nothing in the jar but the expired cookies that
+/// picking removes.
 fn ready(
     request: &HttpRequest,
     mut jar: Option<&mut Jar>,
     deadline: Option<Instant>,
+    decompress: bool,
 ) -> Result<Prepared, Failure> {
     let mut prepared = prepare(request)?;
     let picked = jar.as_deref_mut().and_then(|jar| {
@@ -530,6 +552,9 @@ fn ready(
     });
     if let Some(picked) = &picked {
         add_cookies(&mut prepared, picked.pairs())?;
+    }
+    if decompress {
+        add_accept_encoding(&mut prepared);
     }
     // Preparing can't be cut short, so the deadline is checked once it is
     // done.
@@ -619,6 +644,7 @@ mod tests {
             Transport::Pooled(Box::new(client(connector, HttpVersion::Auto))),
             1_048_576,
             NonZeroU32::new(64),
+            false,
         )
     }
 
@@ -998,7 +1024,7 @@ mod tests {
             "http://h.test/".to_owned(),
             &[("Cookie", "a=1"), ("Cookie", "b=2")],
         );
-        let prepared = ready(&request, Some(&mut jar), None).unwrap();
+        let prepared = ready(&request, Some(&mut jar), None, false).unwrap();
         let values: Vec<&[u8]> = prepared
             .headers
             .get_all(COOKIE)
