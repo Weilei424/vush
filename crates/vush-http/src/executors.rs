@@ -29,11 +29,11 @@ use crate::tls::{Trust, Verification, add_ca_file, client_config, system_roots};
 ///   joins a shared pool.
 ///
 /// Settings other than `version`, `pool` and `tls`, such as
-/// `max_response_size`, are each executor's own, so they don't stop scopes
-/// from sharing. Each pool's background connects are bounded by the longest
-/// attempt timeout of the requests it serves, and at least by each of its
-/// scopes' `http.timeout`. Sharing a pool never shares cookies or
-/// credentials.
+/// `max_response_size` and `decompress`, are each executor's own, so they
+/// don't stop scopes from sharing. Each pool's background connects are
+/// bounded by the longest attempt timeout of the requests it serves, and at
+/// least by each of its scopes' `http.timeout`. Sharing a pool never shares
+/// cookies or credentials.
 ///
 /// Building needs no runtime, but `send` must run inside a Tokio runtime.
 pub struct Executors {
@@ -173,6 +173,7 @@ pub(crate) fn build(
                 pools[index].clone(),
                 view.settings.max_response_size.0,
                 jar_limit(view.settings, view.limits),
+                view.settings.decompress,
             )
         })
         .collect())
