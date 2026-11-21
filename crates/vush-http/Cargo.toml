@@ -11,7 +11,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+brotli-decompressor = { workspace = true }
 bytes = { workspace = true }
+flate2 = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
