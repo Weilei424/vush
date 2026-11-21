@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use vush_config::{Format, MAX_DEPTH, MAX_FILE_BYTES, MAX_TEXT_BYTES, MAX_VALUES, parse};
 use vush_core::plan::{
-    Expect, HttpSettings, MAX_COOKIES, MAX_DURATION, MAX_REDIRECTS, MAX_RETRY_ATTEMPTS,
-    RequestStep, ResourceLimits, StatusMatch, Step, WorkloadPlan, parse_duration,
+    ByteSize, Expect, HttpSettings, MAX_COOKIES, MAX_DURATION, MAX_REDIRECTS, MAX_RESPONSE_SIZE,
+    MAX_RETRY_ATTEMPTS, RequestStep, ResourceLimits, StatusMatch, Step, WorkloadPlan,
+    parse_duration,
 };
 
 use Check::{Holds, Same};
@@ -843,6 +844,11 @@ fn caps_match_the_constants() {
         type_cell("`limits`", "`max_cookies`"),
         format!("integer, 0 to {MAX_COOKIES}")
     );
+    assert_eq!(
+        type_cell("`http`", "`max_response_size`"),
+        "size, at most 64MiB"
+    );
+    assert_eq!(MAX_RESPONSE_SIZE, ByteSize(64 << 20));
     let attempts = type_cell("`retry`", "`attempts`");
     assert!(
         attempts.starts_with(&format!("integer, 2 to {MAX_RETRY_ATTEMPTS}.")),
