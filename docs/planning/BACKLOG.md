@@ -247,14 +247,33 @@
   - [x] The guarantee end to end, and the docs (plan Task 6).
   - [x] Final-review fixes (2026-11-20): the jar ignores a cookie whose stored path or domain is over 1024 bytes, the eviction tests now tell least recently used from oldest, and the schema's cookie rules are corrected.
   - [x] CI green on all four runners after the user pushes (plan Task 6). Run 44788773613 on `b2fd04b`, 2026-11-20.
-- [ ] P2.5 Implement bounded body capture and safe error diagnostics.
-  - From P2.1:
-    - Whether to drain or close the connection after a cut body. The spike found that dropping the rest of the body closes an HTTP/1.1 connection.
-    - Header limits, and the fixed failure texts.
-  - From P2.2:
-    - A body past the limit is cut, and its connection is closed.
-    - A request holds at most 4,096 header names of its own, an interim cap. Past it, the request fails `invalid_request` in `prepare`. hyper adds `Host` and `Content-Length` with calls that panic if `http::HeaderMap` must grow past 32,768 slots. Names that collide in its hash can force that from 6,554 names, so any real limit stays below that. Set the real limit, and decide whether `vush validate` checks it.
-    - Vush never sends `Accept-Encoding` and never decompresses. Decide whether that changes, with limits on decompression.
+- [ ] P2.5 Implement bounded body capture and safe error diagnostics (design approved 2026-11-21).
+  - Spec: `docs/superpowers/specs/2026-11-21-phase-2-5-body-capture-diagnostics-design.md` · Plan: `docs/superpowers/plans/2026-11-21-phase-2-5-body-capture-diagnostics.md` (local only).
+  - Decided 2026-11-21:
+    - **Read to the end, keep the limit** (answers P2.1's drain-or-close question):
+      - A body past `max_response_size` is read to the end. Only its start is kept, and it is marked `truncated`.
+      - Its connection is reused.
+      - `received` counts every body byte, and a timeout while reading the rest is `timeout` in `body`.
+    - **`max_response_size` is at most 64 MiB**, checked by `vush validate`.
+    - **`http.decompress` is opt-in** (default `false`):
+      - It sends `Accept-Encoding: gzip, br` unless the request sets its own, and decodes a single `gzip`, `x-gzip` or `br`. Anything else is kept raw.
+      - The limit counts decoded bytes, and decoding stops there.
+      - A corrupt body is `protocol` in `body`.
+      - It adds `flate2` (Rust backend) and `brotli-decompressor`.
+    - **Headers:**
+      - A request sets at most 256 header names of its own, checked by `vush validate` and by `send`.
+      - Headers Vush adds never count. That reverses P2.4's rule for the jar's `Cookie`.
+      - Response heads are bounded at 100 headers and about 400 KB over HTTP/1.1, and 16 KiB over HTTP/2. A head over them is `protocol`, with "the response head is too large" where hyper can tell.
+    - **Failure texts:**
+      - Every failure text is a constant in `vush-http`'s new `text` module.
+      - A canary test proves that no URL, header, body or cookie value reaches a failure text or `Debug` output.
+  - [ ] The response-size and header caps in `vush validate` (plan Task 1).
+  - [ ] One module for every failure text (plan Task 2).
+  - [ ] Header limits on requests and responses (plan Task 3).
+  - [ ] Read to the end, keep the limit (plan Task 4).
+  - [ ] Opt-in decoding with `http.decompress` (plan Task 5).
+  - [ ] The canary test, and the docs (plan Task 6).
+  - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
   - From P2.3: a hop that waits on a shared HTTP/2 connect that fails still reports `connect` in `connect` ("the shared connection attempt failed"). Decide whether to pass the connect's real kind, such as `tls`, on to the waiting hops.
@@ -266,6 +285,10 @@
 - [ ] P3.2 Add per-VU state, JSON/header extraction, interpolation and cookie/token propagation.
   - From P2.4: cookies already carry over through the session's jar, and the response keeps its `Set-Cookie` headers for `extract`. P3.2 only needs to propagate tokens.
 - [ ] P3.3 Add status/content/JSON assertions and distinct failure categories.
+  - From P2.5:
+    - Decide how `expect` and `extract` treat a `truncated` body.
+    - Decide how they treat a body kept raw because its `Content-Encoding` wasn't decoded.
+    - Decide whether bodies that no step reads can be counted and dropped instead of kept, like k6's `discardResponseBodies`.
 - [ ] P3.4 Add think time, structured `if/else` and bounded loops.
 - [ ] P3.5 Implement global/per-scenario declarative setup/teardown and define their failure policies.
 - [ ] P3.6 Enforce body, variable, loop and hook bounds; test auth-flow and failing-flow cases.
@@ -298,6 +321,7 @@
 - [ ] P6.2 Aggregate request/iteration time, scheduler/queue delay, achieved rates, errors, drop reasons and in-flight counts.
   - From P2.2: `setup` goes to the first hop that asks for the connection's setup times. Under a shared pool, that may not be the hop that waited for the connection.
   - From P2.4: decide whether to count the cookies a full jar evicts and the `Set-Cookie` values it ignores. Today nothing counts them.
+  - From P2.5: `received` counts body bytes on the wire, past the limit too, and before decoding. Decide whether to report the kept and decoded sizes, and whether a body was decoded or truncated.
 - [ ] P6.3 Add optional sampled detailed events with redaction and finite capacity.
 - [ ] P6.4 Add assertions, performance thresholds, dropped-work thresholds and pass/fail policy.
 - [ ] P6.5 Add human-readable summary, versioned JSON output and deterministic exit-code mapping.
