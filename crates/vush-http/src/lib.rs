@@ -8,8 +8,9 @@
 //! bounds, and the per-user session, which holds the user's cookie jar. A
 //! body is read to the end with at most `max_response_size` kept, and
 //! `decompress` decodes gzip and br within the same limit. Every failure
-//! text is a constant in one module. It must not schedule work or own global counters: scheduling belongs to
-//! `vush-core`, and aggregation to the metrics layer.
+//! text is a constant in one module. It must not schedule work or own
+//! global counters: scheduling belongs to `vush-core`, and aggregation to
+//! the metrics layer.
 //!
 //! # Building executors
 //!
