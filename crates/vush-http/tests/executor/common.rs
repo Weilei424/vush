@@ -673,6 +673,27 @@ impl CountingListener {
     }
 }
 
+/// Answers its first connection `503` with `Connection: close`. It stops
+/// listening as soon as that connection is accepted, so every later connect
+/// to its address is refused.
+pub async fn one_503_then_gone() -> SocketAddr {
+    let listener = bind().await;
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        drop(listener);
+        read_head(&stream).await;
+        write_all(
+            &stream,
+            b"HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\ncontent-length: 0\r\n\r\n",
+        )
+        .await;
+    });
+    addr
+}
+
 /// Reads into `buf`. 0 means the stream ended or failed.
 async fn read_some(stream: &TcpStream, buf: &mut [u8]) -> usize {
     loop {
