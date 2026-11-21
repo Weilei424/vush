@@ -59,6 +59,9 @@ pub struct HttpSettings {
     pub cookies: bool,
     /// The most body bytes kept per response, at most `MAX_RESPONSE_SIZE`.
     pub max_response_size: ByteSize,
+    /// Whether to ask for gzip and br bodies and decode them. The limit then
+    /// counts decoded bytes.
+    pub decompress: bool,
     pub tls: TlsSettings,
 }
 
@@ -71,6 +74,7 @@ impl Default for HttpSettings {
             redirects: 5,
             cookies: true,
             max_response_size: ByteSize(1_048_576),
+            decompress: false,
             tls: TlsSettings {
                 ca_file: None,
                 insecure: false,
@@ -118,6 +122,7 @@ mod tests {
                 redirects: 5,
                 cookies: true,
                 max_response_size: ByteSize(1_048_576),
+                decompress: false,
                 tls: TlsSettings {
                     ca_file: None,
                     insecure: false
