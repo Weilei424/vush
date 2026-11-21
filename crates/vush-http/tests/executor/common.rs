@@ -72,7 +72,12 @@ pub fn settings(version: HttpVersion, limit: u64) -> HttpSettings {
 
 /// An executor that trusts no certificate, for plaintext servers.
 pub fn executor(version: HttpVersion) -> Executor {
-    let settings = settings(version, MIB);
+    limited(version, MIB)
+}
+
+/// Like [`executor`], with the body limit `limit`.
+pub fn limited(version: HttpVersion, limit: u64) -> Executor {
+    let settings = settings(version, limit);
     Executor::with_roots(
         &settings,
         &ResourceLimits::default(),
@@ -759,6 +764,29 @@ pub fn close_after_head(stream: TcpStream) -> BoxFuture {
 /// Promises 10 body bytes, sends 3, then stays silent.
 pub fn stalled_body(stream: TcpStream) -> BoxFuture {
     answer(stream, b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
+}
+
+/// Promises 2 MiB, sends 1 MiB, then holds the connection.
+pub fn two_mib_promised_then_stall(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        read_head(&stream).await;
+        write_all(
+            &stream,
+            b"HTTP/1.1 200 OK\r\ncontent-length: 2097152\r\n\r\n",
+        )
+        .await;
+        write_all(&stream, &vec![b'x'; MIB as usize]).await;
+        pending::<()>().await;
+    })
+}
+
+/// An `HTTP/1.0` answer with no length and 4096 bytes, then a close.
+pub fn http10_to_close(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        read_head(&stream).await;
+        write_all(&stream, b"HTTP/1.0 200 OK\r\n\r\n").await;
+        write_all(&stream, &[b'x'; 4096]).await;
+    })
 }
 
 pub fn garbage_status(stream: TcpStream) -> BoxFuture {
