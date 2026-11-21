@@ -114,6 +114,14 @@ pub struct Session {
     jar: Option<Jar>,
 }
 
+/// The most bytes hyper buffers for an HTTP/1.1 response head: 408 KiB.
+/// With hyper's default of 100 headers, this is the whole head limit.
+pub(crate) const HEAD_BUFFER_BYTES: usize = 417_792;
+
+/// The most bytes an HTTP/2 response header list may hold: 16 KiB. The
+/// client advertises it, so a server that honors it sends no more.
+pub(crate) const H2_HEADER_LIST_BYTES: u32 = 16_384;
+
 /// Builds a pool. Every pool, pooled or per user, is built here, so each
 /// closes its idle connections after [`IDLE_TIMEOUT`].
 pub(crate) fn client(
@@ -124,6 +132,8 @@ pub(crate) fn client(
         .pool_idle_timeout(IDLE_TIMEOUT)
         .pool_timer(TokioTimer::new())
         .http2_only(version == HttpVersion::Http2)
+        .http1_max_buf_size(HEAD_BUFFER_BYTES)
+        .http2_max_header_list_size(H2_HEADER_LIST_BYTES)
         .build(connector)
 }
 
