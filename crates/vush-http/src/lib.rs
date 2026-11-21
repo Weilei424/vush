@@ -70,6 +70,7 @@
 //! [`WorkloadPlan`]: vush_core::plan::WorkloadPlan
 
 mod body;
+mod capture;
 mod classify;
 mod connector;
 mod cookie;
