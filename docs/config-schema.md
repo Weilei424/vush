@@ -122,6 +122,7 @@ File-level `setup` runs once, before any scenario. File-level `teardown` runs on
 | `redirects` | integer, 0 to 20 | `5` | The most redirects one attempt follows. Only `301`, `302`, `303`, `307` and `308` with a `Location` are followed. When a chain needs more, the attempt fails with `too_many_redirects`. `0` means don't follow, and then the `3xx` is the response. A redirect to another origin drops `Authorization`, `Proxy-Authorization`, `Cookie` and `Host` |
 | `cookies` | boolean | `true` | Whether each user keeps cookies. Cookies are always per user and per hook run. See [Cookies](#cookies) |
 | `max_response_size` | size, at most 64MiB | `1MiB` | Upper bound on the response body kept. A longer body is still read to the end, so its connection is reused, but only its first `max_response_size` bytes are kept. The response is marked `truncated` and still counts as a response. If the hop's `timeout` runs out while the rest is read, the hop fails with `timeout` |
+| `decompress` | boolean | `false` | Ask for and decode compressed bodies. See [Compression](#compression) |
 | `tls.ca_file` | path | none | PEM certificates to trust as well as the system's roots. Relative to the test file's directory. Read once when the run starts. At most 1 MiB, with at least one certificate, and every certificate in it must be usable. Not read when `tls.insecure` is `true` |
 | `tls.insecure` | boolean | `false` | Accepts any certificate for any name. The connection is still encrypted. Connections made this way are never shared with settings that verify |
 
@@ -157,6 +158,21 @@ What is sent:
 - Cookie values are bytes. A value that isn't UTF-8 is sent back as it came.
 
 A redirect to another origin drops the request's own `Cookie` and `Authorization` headers. The jar then adds only what it holds for the new host. `Authorization` is never kept in the jar.
+
+### Compression
+
+With `decompress: true`, Vush asks for compressed bodies and decodes them.
+
+- Each request gets `Accept-Encoding: gzip, br`, unless it sets its own `Accept-Encoding`. A request's own value is sent as written, and a `gzip` or `br` body sent back is still decoded.
+- A body is decoded only when the response has exactly one `Content-Encoding` header, and its value is `gzip`, `x-gzip` or `br`, in any letter case. Anything else is kept raw, and isn't a failure: no header, `identity`, `deflate`, `zstd`, a list such as `gzip, br`, or several headers.
+- The response's headers are left as received, `Content-Encoding` and `Content-Length` included.
+- `max_response_size` counts decoded bytes. Decoding stops at the limit, and the rest of the body is read to the end but not decoded. The response is marked `truncated`. So a small body that decodes to much more costs at most `max_response_size`.
+- A decoded body exactly at the limit isn't `truncated`, and its gzip checksum or brotli end marker is still checked.
+- A corrupt compressed body fails as `protocol`, and so does one that ends too early. A `br` body that uses brotli's large-window extension counts as corrupt.
+- A gzip body of several members decodes as one body.
+- A response with no body, such as the answer to a `HEAD`, has nothing to decode.
+
+With `decompress: false`, nothing is asked for and nothing is decoded. A request's own `Accept-Encoding` is still sent, and its body comes back as received.
 
 ## `limits`
 
@@ -415,7 +431,7 @@ This section says what a request becomes on the wire. It holds for every step.
 - `body` is sent as its UTF-8 bytes.
 - `Content-Type` is added when there is a body and the request has none: `application/json` for `json`, `application/x-www-form-urlencoded` for `form` and `text/plain; charset=utf-8` for `body`.
 - `User-Agent: vush/<version>` is added when the request has none.
-- No `Accept-Encoding` is sent, so a server normally sends the body uncompressed. Vush never decompresses a body.
+- No `Accept-Encoding` is sent, and no body is decoded, unless `http.decompress` is `true`. A request's own `Accept-Encoding` is always sent as written.
 - Repeats of one header name are sent in their given order. The order across different names isn't kept.
 - A request sets at most 256 header names of its own. Repeats of one name, in any letter case, count once. Headers Vush adds (`Content-Type`, `User-Agent`, `Accept-Encoding` and the cookie jar's `Cookie`) never count. With more, it fails as `invalid_request`, and nothing is sent. `vush validate` checks this too.
 - A response head can hold at most 100 headers and about 400 KB over HTTP/1.1, and 16 KiB over HTTP/2. A larger one fails as `protocol`.
