@@ -6,6 +6,7 @@
 mod common;
 mod compression;
 mod cookies;
+mod diagnostics;
 mod failures;
 mod pools;
 mod redirects;
