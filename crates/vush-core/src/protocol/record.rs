@@ -47,7 +47,9 @@ pub struct BodySizes {
     /// Request body bytes after encoding. 0 when there was no body or nothing
     /// was sent.
     pub sent: u64,
-    /// Response body bytes read. At most the size limit when the body was cut.
+    /// Response body bytes read, past the size limit too. They are counted as
+    /// framed on the wire, after chunked decoding and before any content
+    /// decoding.
     pub received: u64,
 }
 
