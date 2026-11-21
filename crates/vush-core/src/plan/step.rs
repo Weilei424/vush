@@ -17,6 +17,9 @@ pub const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 /// The most attempts one request step may make, the first included.
 pub const MAX_RETRY_ATTEMPTS: u32 = 10;
 
+/// The most header names one request may set, counted ignoring ASCII case.
+pub const MAX_REQUEST_HEADERS: usize = 256;
+
 const METHOD_EXPECTED: &str = "an HTTP method such as GET, POST or M-SEARCH (uppercase A-Z, 0-9 and -, starting with a letter)";
 
 /// One step of a step list.
