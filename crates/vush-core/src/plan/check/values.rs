@@ -5,12 +5,13 @@ use std::time::Duration;
 
 use super::super::error::{PlanError, PlanErrorKind};
 use super::super::load::{ClosedStop, ClosedVusLoad, LoadModel, RateSchedule, Stage};
-use super::super::settings::{MAX_COOKIES, MAX_REDIRECTS};
+use super::super::settings::{MAX_COOKIES, MAX_REDIRECTS, MAX_RESPONSE_SIZE};
 use super::super::step::{
-    Condition, HttpMethod, MAX_RETRY_ATTEMPTS, RequestTarget, RetryPolicy, StatusMatch,
+    Condition, HttpMethod, MAX_REQUEST_HEADERS, MAX_RETRY_ATTEMPTS, RequestTarget, RetryPolicy,
+    StatusMatch,
 };
 use super::super::template::{Template, TemplatePart};
-use super::super::value::{JsonNumber, MAX_DURATION, Rate};
+use super::super::value::{ByteSize, JsonNumber, MAX_DURATION, Rate};
 use super::{At, push};
 
 /// Checks a duration at `at`: it may not be above [`MAX_DURATION`], and when
@@ -47,6 +48,29 @@ pub(super) fn redirects(value: u32, at: &At<'_>, errors: &mut Vec<PlanError>) {
 pub(super) fn max_cookies(value: u32, at: &At<'_>, errors: &mut Vec<PlanError>) {
     if value > MAX_COOKIES {
         push(errors, at, PlanErrorKind::TooManyCookies);
+    }
+}
+
+/// Checks a response size limit. `at` is the `max_response_size` place.
+pub(super) fn max_response_size(value: ByteSize, at: &At<'_>, errors: &mut Vec<PlanError>) {
+    if value.0 > MAX_RESPONSE_SIZE.0 {
+        push(errors, at, PlanErrorKind::ResponseSizeTooLarge);
+    }
+}
+
+/// Checks how many distinct header names, ignoring ASCII case, a request sets.
+/// `at` is the `headers` place.
+pub(super) fn request_headers(
+    names: &[(String, Template)],
+    at: &At<'_>,
+    errors: &mut Vec<PlanError>,
+) {
+    let distinct: HashSet<String> = names
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    if distinct.len() > MAX_REQUEST_HEADERS {
+        push(errors, at, PlanErrorKind::TooManyHeaders);
     }
 }
 
