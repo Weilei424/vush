@@ -43,6 +43,8 @@ pub struct TlsSettings {
 pub const MAX_REDIRECTS: u32 = 20;
 /// The most cookies one user may hold.
 pub const MAX_COOKIES: u32 = 3000;
+/// The largest `max_response_size`, 64 MiB.
+pub const MAX_RESPONSE_SIZE: ByteSize = ByteSize(64 << 20);
 
 /// HTTP settings, after file-level and scenario-level values are merged.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +57,7 @@ pub struct HttpSettings {
     pub redirects: u32,
     /// Whether each user keeps cookies.
     pub cookies: bool,
+    /// The most body bytes kept per response, at most `MAX_RESPONSE_SIZE`.
     pub max_response_size: ByteSize,
     pub tls: TlsSettings,
 }
