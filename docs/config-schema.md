@@ -154,7 +154,6 @@ What is sent:
 
 - Before each hop, expired cookies are removed. The cookies that match the host, the path and the scheme are sent in one `Cookie` header: longest path first, then oldest first.
 - A request's own `Cookie` header names win. A jar cookie with the same name as one the request sets is left out. Names are compared exactly, letter case included. The request's own values stay as written, first, and the jar's follow.
-- The jar's header counts toward the 4096 header names a request may hold. A request that already holds 4096 names of its own and no `Cookie` fails in `prepare` with `invalid_request`.
 - Cookie values are bytes. A value that isn't UTF-8 is sent back as it came.
 
 A redirect to another origin drops the request's own `Cookie` and `Authorization` headers. The jar then adds only what it holds for the new host. `Authorization` is never kept in the jar.
@@ -418,7 +417,8 @@ This section says what a request becomes on the wire. It holds for every step.
 - `User-Agent: vush/<version>` is added when the request has none.
 - No `Accept-Encoding` is sent, so a server normally sends the body uncompressed. Vush never decompresses a body.
 - Repeats of one header name are sent in their given order. The order across different names isn't kept.
-- A request holds at most 4,096 header names of its own. Repeats of one name count once, and an added `Content-Type` or `User-Agent` doesn't count. With more, it fails as `invalid_request`, and nothing is sent.
+- A request sets at most 256 header names of its own. Repeats of one name, in any letter case, count once. Headers Vush adds (`Content-Type`, `User-Agent`, `Accept-Encoding` and the cookie jar's `Cookie`) never count. With more, it fails as `invalid_request`, and nothing is sent. `vush validate` checks this too.
+- A response head can hold at most 100 headers and about 400 KB over HTTP/1.1, and 16 KiB over HTTP/2. A larger one fails as `protocol`.
 
 ### Redirects
 
