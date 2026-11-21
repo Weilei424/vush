@@ -35,8 +35,9 @@ pub struct HttpResponse {
     pub headers: Vec<(String, Vec<u8>)>,
     /// At most the executor's response-size limit.
     pub body: Vec<u8>,
-    /// The body was longer than the limit, and `body` holds only its start.
-    /// That is not a failure: the status and the headers are kept.
+    /// The body was longer than the limit. It was read to the end, and `body`
+    /// holds only its start. That is not a failure: the status and the
+    /// headers are kept.
     pub truncated: bool,
 }
 
