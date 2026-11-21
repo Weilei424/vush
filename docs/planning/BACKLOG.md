@@ -268,7 +268,7 @@
       - Every failure text is a constant in `vush-http`'s new `text` module.
       - A canary test proves that no URL, header, body or cookie value reaches a failure text or `Debug` output.
   - [x] The response-size and header caps in `vush validate` (plan Task 1).
-  - [ ] One module for every failure text (plan Task 2).
+  - [x] One module for every failure text (plan Task 2).
   - [ ] Header limits on requests and responses (plan Task 3).
   - [ ] Read to the end, keep the limit (plan Task 4).
   - [ ] Opt-in decoding with `http.decompress` (plan Task 5).
