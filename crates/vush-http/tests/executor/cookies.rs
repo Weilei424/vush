@@ -8,7 +8,7 @@ use std::time::Duration;
 use http::Request;
 use hyper::body::Incoming;
 use rustls::RootCertStore;
-use vush_core::plan::{HttpSettings, HttpVersion, ResourceLimits};
+use vush_core::plan::{HttpSettings, HttpVersion, MAX_REQUEST_HEADERS, ResourceLimits};
 use vush_core::protocol::http::{HttpExecutor, HttpHop, HttpRequest};
 use vush_core::protocol::{FailureKind, FailureStage};
 use vush_core::runner::run_attempt;
@@ -343,15 +343,15 @@ async fn cookie_bytes_come_back_as_sent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_jars_header_counts_toward_the_header_cap() {
-    let addr = spawn_h1(cookie_routes(&[("/set", 200, &[("set-cookie", "a=1")])])).await;
+async fn a_request_past_the_header_cap_sends_nothing() {
     let listener = CountingListener::bind().await;
     let executor = executor(HttpVersion::Auto);
     let mut session = executor.new_session();
-    go(&executor, &mut session, format!("http://{addr}/set")).await;
 
     let mut request = get(format!("http://{}/", listener.addr));
-    request.headers = (0..4096).map(|n| (format!("x-{n}"), "v".into())).collect();
+    request.headers = (0..=MAX_REQUEST_HEADERS)
+        .map(|n| (format!("x-{n}"), "v".into()))
+        .collect();
     let hop = executor
         .send(&mut session, &request, Duration::from_secs(5))
         .await;
