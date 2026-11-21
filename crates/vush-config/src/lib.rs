@@ -108,6 +108,8 @@ pub fn parse(text: &str, format: Format) -> Result<WorkloadPlan, Vec<ConfigError
                         | PlanErrorKind::TooManyAttempts
                         | PlanErrorKind::RedirectsTooHigh
                         | PlanErrorKind::TooManyCookies
+                        | PlanErrorKind::ResponseSizeTooLarge
+                        | PlanErrorKind::TooManyHeaders
                         | PlanErrorKind::RetryNeedsOptIn
                         | PlanErrorKind::StatusOutOfRange
                         | PlanErrorKind::EmptyStatus
