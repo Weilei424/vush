@@ -116,8 +116,16 @@ pub struct Session {
     jar: Option<Jar>,
 }
 
-/// The most bytes hyper buffers for an HTTP/1.1 response head: 408 KiB.
-/// With hyper's default of 100 headers, this is the whole head limit.
+/// The read buffer limit hyper gets for HTTP/1.1: 417,792 bytes, which is
+/// 408 KiB, hyper's own default set here so it can't move. hyper parses
+/// what it has before it checks the size, and fails a head as too large only
+/// when the head is still incomplete with at least this much buffered. So a
+/// head of up to this size always passes, within hyper's default of 100
+/// headers. One read fills all of the buffer's spare capacity, which can be
+/// more than the limit leaves, so a longer head passes when one read brings
+/// it in. Memory stays bounded by hyper's read buffer. hyper's client has no
+/// exact head-size setting: `max_header_size` exists only on its server
+/// builder.
 pub(crate) const HEAD_BUFFER_BYTES: usize = 417_792;
 
 /// The most bytes an HTTP/2 response header list may hold: 16 KiB. The
@@ -172,9 +180,11 @@ pub(crate) enum Transport {
 ///   with no `Accept-Encoding` of its own gets `Accept-Encoding: gzip, br`. A
 ///   response whose one `Content-Encoding` is `gzip`, `x-gzip` or `br` is
 ///   decoded as it arrives, and the limit counts decoded bytes: decoding
-///   stops there. Any other body is kept raw, and the headers are left as
-///   received. A corrupt compressed body fails as `protocol` in `body`.
-///   `decompress` doesn't change pool sharing.
+///   stops there, and the rest is read but not decoded or checked. Decoding
+///   runs in steps of at most 64 KiB of output with a yield after each, so
+///   `timeout` covers it. Any other body is kept raw, and the headers are
+///   left as received. A corrupt compressed body fails as `protocol` in
+///   `body`. `decompress` doesn't change pool sharing.
 /// - `pool` says where connections live. Under `shared` and `scenario`, all
 ///   the sessions of an executor use its one pool, which [`Executors`] shares
 ///   with other executors under `shared`. Under `vu`, each session holds its
@@ -189,7 +199,8 @@ pub(crate) enum Transport {
 ///   request they match. `cookies` and `max_cookies` don't change pool
 ///   sharing, because sharing a pool never shares cookies.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
-///   `send`, and follows redirects itself.
+///   `send`, and follows redirects itself. A hop that ends at or after its
+///   deadline fails as `timeout`, even when its body was all read.
 /// - `tls.ca_file` names a PEM file, resolved against the test file's
 ///   directory, whose certificates are trusted as well as the system's
 ///   roots. It is read once, while building. `tls.insecure` accepts any
@@ -305,8 +316,11 @@ impl Executor {
     }
 
     /// Runs the rest of the hop until the hop's deadline, and reports a
-    /// timeout in the stage the marker shows. With no deadline, the hop
-    /// never runs out of time.
+    /// timeout in the stage the marker shows. The hop yields between decoding
+    /// steps, so the deadline can fire while a body decodes. A hop that ends
+    /// `Ok` at or after its deadline still ran out of time, and reports a
+    /// timeout too (see [`settle`]). With no deadline, the hop never runs
+    /// out of time.
     async fn exchange(
         &self,
         client: &Client<Connector, CountingBody>,
@@ -322,19 +336,26 @@ impl Executor {
         let marker = StageMarker::new();
         marker.set(FailureStage::Connect);
         let hop = self.drive(client, request, capture, &marker, progress, jar);
-        let Some(deadline) = deadline else {
-            return hop.await;
+        let outcome = match deadline {
+            None => hop.await,
+            Some(deadline) => match tokio::time::timeout_at(deadline.into(), hop).await {
+                Ok(outcome) => outcome,
+                Err(_elapsed) => return Err(timeout(marker.get())),
+            },
         };
-        match tokio::time::timeout_at(deadline.into(), hop).await {
-            Ok(outcome) => outcome,
-            Err(_elapsed) => Err(timeout(marker.get())),
-        }
+        settle(outcome, deadline, Instant::now(), marker.get())
     }
 
     /// Sends the request, waits for its head, and reads its body up to the
     /// limit, decoding it under `decompress`. `jar` is the session's jar, if
     /// it has one, with the target the head's `Set-Cookie` values are stored
     /// against.
+    ///
+    /// A decoded body is decoded in steps of at most 64 KiB of output, with
+    /// a yield after each, so no poll decodes more than one step: the hop's
+    /// timeout can fire, and other tasks on the worker run. Each frame
+    /// counts as received when it arrives, so a frame whose decoding a
+    /// timeout cuts short still counts whole.
     async fn drive(
         &self,
         client: &Client<Connector, CountingBody>,
@@ -398,9 +419,24 @@ impl Executor {
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|error| classify(&error, FailureStage::Body))?;
             // Trailers are dropped.
-            if let Ok(data) = frame.into_data() {
-                capture.push(&data)?;
+            let Ok(data) = frame.into_data() else {
+                continue;
+            };
+            capture.arrive(data.len());
+            let mut rest = &data[..];
+            while !rest.is_empty() {
+                let stepped = capture.decodes();
+                rest = &rest[capture.push(rest)?..];
+                if stepped {
+                    tokio::task::yield_now().await;
+                }
             }
+        }
+        // A br stream can hold up to its window of output after its last
+        // byte, and gzip its last buffer and trailer, so the end is decoded
+        // in steps too.
+        while !capture.drain()? {
+            tokio::task::yield_now().await;
         }
         let (body, truncated) = capture.finish()?;
         let headers = parts
@@ -575,6 +611,22 @@ fn wire_request(prepared: Prepared, sent: Arc<AtomicU64>) -> (Request<CountingBo
     *request.uri_mut() = prepared.uri;
     *request.headers_mut() = prepared.headers;
     (request, prepared.target)
+}
+
+/// The outcome of a hop that ended at `now`. An `Ok` reached at or after the
+/// `deadline` ran out of time all the same, so it becomes a timeout in
+/// `stage`, the stage the hop was in. A failure keeps its own kind, and with
+/// no deadline nothing changes.
+fn settle(
+    outcome: Result<HttpResponse, Failure>,
+    deadline: Option<Instant>,
+    now: Instant,
+    stage: FailureStage,
+) -> Result<HttpResponse, Failure> {
+    match outcome {
+        Ok(_) if deadline.is_some_and(|deadline| now >= deadline) => Err(timeout(stage)),
+        outcome => outcome,
+    }
 }
 
 /// Resolves once hyper-util assigns a connection to the request, new or
@@ -1015,6 +1067,36 @@ mod tests {
             BuildError::NoTrustedRoots.to_string(),
             "no trusted root certificates could be loaded from the system"
         );
+    }
+
+    #[test]
+    fn an_ok_at_or_after_the_deadline_is_a_timeout() {
+        let ok = || {
+            Ok(HttpResponse {
+                status: 200,
+                version: WireVersion::Http11,
+                headers: vec![],
+                body: b"done".to_vec(),
+                truncated: false,
+            })
+        };
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        let body = FailureStage::Body;
+        assert_eq!(settle(ok(), Some(later), now, body), ok(), "before");
+        assert_eq!(settle(ok(), Some(now), now, body), Err(timeout(body)), "at");
+        assert_eq!(
+            settle(ok(), Some(now), later, FailureStage::Headers),
+            Err(timeout(FailureStage::Headers)),
+            "after, in the stage given"
+        );
+        let protocol = failure(FailureKind::Protocol, body);
+        assert_eq!(
+            settle(Err(protocol), Some(now), later, body),
+            Err(protocol),
+            "a failure keeps its kind"
+        );
+        assert_eq!(settle(ok(), None, later, body), ok(), "no deadline");
     }
 
     #[test]
