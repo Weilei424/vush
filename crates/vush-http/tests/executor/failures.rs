@@ -11,11 +11,11 @@ use vush_core::protocol::{Failure, FailureKind, FailureStage};
 use vush_http::Executor;
 
 use crate::common::{
-    CountingListener, LOCALHOST, MIB, NO_DIR, TestCa, close_after_head, echo, executor, failure,
-    garbage_status, get, h2_reset_after_one_frame, head_of_1_mb, head_of_400_kb, hold,
-    http10_to_close, hundred_and_one_headers, hundred_headers, limited, malformed_chunk, pairs,
-    refused_port, reply, send, send_within, silent_after_head, spawn_auto, spawn_raw, spawn_tls,
-    stalled_body, trusting, two_mib_promised_then_stall,
+    CountingListener, HEAD_BUFFER_BYTES, LOCALHOST, MIB, NO_DIR, TestCa, close_after_head, echo,
+    executor, failure, garbage_status, get, h2_reset_after_one_frame, head_of_1_mb, head_of_len,
+    head_of_the_buffer, hold, http10_to_close, hundred_and_one_headers, hundred_headers, limited,
+    malformed_chunk, pairs, refused_port, reply, send, send_within, silent_after_head, spawn_auto,
+    spawn_raw, spawn_tls, stalled_body, trusting, two_mib_promised_then_stall,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -408,17 +408,28 @@ async fn a_head_of_100_headers_passes_and_101_is_too_large() {
     assert_eq!(failed.message, "the response head is too large");
 }
 
-/// The head buffer is 417,792 bytes. hyper reads into the buffer's spare
-/// capacity, which grows by doubling, so the edge is fuzzy: measured here, a
-/// 600 KB head still passes and an 840 KB one is too large. The two sizes
-/// are kept far apart, one under the limit and one well past that fuzz.
+/// The head buffer is 417,792 bytes, 408 KiB. hyper parses what it has
+/// before it checks the size, and a head is too large only when it is still
+/// incomplete with at least that much buffered. So a head of up to 417,792
+/// bytes always passes, within the 100-header cap. One read fills all of the
+/// buffer's spare capacity, which can be more than the limit leaves, so a
+/// longer head can pass when one read carries it past the limit: measured
+/// here, 600 KB passed, and 840 KB and 1 MB failed. Memory stays bounded by
+/// hyper's read buffer either way.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_head_of_400_kb_passes_and_1_mb_is_too_large() {
+async fn a_head_that_fills_the_buffer_passes_and_1_mb_is_too_large() {
+    let head = head_of_len(HEAD_BUFFER_BYTES);
+    assert_eq!(head.len(), 417_792);
+    assert!(head.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(head.ends_with(b"\r\ncontent-length: 0\r\n\r\n"));
     let executor = executor(HttpVersion::Http1);
-    let addr = spawn_raw(head_of_400_kb).await;
+    let addr = spawn_raw(head_of_the_buffer).await;
     let hop = send(&executor, &get(format!("http://{addr}/"))).await;
     let Ok(response) = &hop.outcome else {
-        panic!("a 400 KB head should pass: {:?}", hop.outcome)
+        panic!(
+            "a head that fills the buffer should pass: {:?}",
+            hop.outcome
+        )
     };
     assert_eq!(response.status, 200);
 
