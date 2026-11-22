@@ -801,12 +801,15 @@ pub fn two_mib_promised_then_stall(stream: TcpStream) -> BoxFuture {
     })
 }
 
-/// An `HTTP/1.0` answer with no length and 4096 bytes, then a close.
+/// An `HTTP/1.0` answer with no length and 262144 bytes (256 KiB) in 64
+/// writes of 4096, then a close.
 pub fn http10_to_close(stream: TcpStream) -> BoxFuture {
     Box::pin(async move {
         read_head(&stream).await;
         write_all(&stream, b"HTTP/1.0 200 OK\r\n\r\n").await;
-        write_all(&stream, &[b'x'; 4096]).await;
+        for _ in 0..64 {
+            write_all(&stream, &[b'x'; 4096]).await;
+        }
     })
 }
 
@@ -843,6 +846,29 @@ fn head_with_headers(stream: TcpStream, count: usize) -> BoxFuture {
         write_all(&stream, head.as_bytes()).await;
         pending::<()>().await;
     })
+}
+
+/// A `200` whose head is one header with a value of `value_len` bytes, then
+/// holds the connection open.
+fn head_with_big_value(stream: TcpStream, value_len: usize) -> BoxFuture {
+    Box::pin(async move {
+        read_head(&stream).await;
+        let mut head = String::from("HTTP/1.1 200 OK\r\nx-big: ");
+        head.push_str(&"a".repeat(value_len));
+        head.push_str("\r\ncontent-length: 0\r\n\r\n");
+        write_all(&stream, head.as_bytes()).await;
+        pending::<()>().await;
+    })
+}
+
+/// A head of about 400 KB, well under the 417,792-byte head buffer.
+pub fn head_of_400_kb(stream: TcpStream) -> BoxFuture {
+    head_with_big_value(stream, 400_000)
+}
+
+/// A head of about 1 MB, far over the 417,792-byte head buffer.
+pub fn head_of_1_mb(stream: TcpStream) -> BoxFuture {
+    head_with_big_value(stream, 1_000_000)
 }
 
 /// A `200` with exactly 100 header lines, hyper's default limit.
