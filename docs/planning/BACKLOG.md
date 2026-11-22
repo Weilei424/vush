@@ -278,7 +278,7 @@
     - Decode in steps of at most 64 KiB of output that yield to Tokio, so the hop's timeout covers decoding, and a hop past its deadline never ends `Ok`.
     - Correct the HTTP/1.1 head-limit docs: up to 408 KiB always passes, and hyper can accept a longer head that arrives in one read.
     - Say which compression checks stop once the limit cuts a body.
-  - [ ] Codex review round 2 fixes (decided 2026-11-22):
+  - [x] Codex review round 2 fixes (decided 2026-11-22):
     - Any hop outcome reached at or after its deadline is `timeout`, including a late failure, as contract point 2 says.
     - Tests that need two sequential HTTP/1.1 hops on one connection run on a current-thread runtime. hyper-util returns the connection to the pool from a spawned task, and on a multi-thread runtime a fresh connect can win (this failed CI on Linux arm64).
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
