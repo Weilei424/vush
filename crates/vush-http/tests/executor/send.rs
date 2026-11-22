@@ -217,6 +217,9 @@ async fn a_cut_body_keeps_its_connection_on_http1() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cut_body_keeps_its_connection_on_http2() {
+    // An early drop resets only the stream on HTTP/2, so the shared
+    // connection assertion would hold regardless. Only the `received`
+    // assertion catches a regression.
     let addr = spawn_auto(sized).await;
     cut_bodies_share_a_connection(addr, &limited(HttpVersion::Http2, MIB)).await;
 }
