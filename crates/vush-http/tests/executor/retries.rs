@@ -35,7 +35,8 @@ fn policy(backoff: Duration) -> StepPolicy {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn a_503_then_a_200_takes_two_attempts_on_one_session() {
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = seen.clone();
