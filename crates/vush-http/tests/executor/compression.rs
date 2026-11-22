@@ -157,14 +157,14 @@ impl<F: Future> Future for Polled<F> {
     }
 }
 
-/// Decoding runs in steps of at most 64 KiB of output, with a yield after
-/// each, so another task on the same thread runs while a body decodes. The
-/// server, the hop and a ticker share one thread. The ticker counts a turn
-/// each time it runs after the hop was polled again, so the two took turns.
-/// Its plain runs can't show that: it also spins while the hop waits for the
-/// network, from 166 to 1044 runs measured here for a raw body of the same
-/// size on the wire. A 16 MiB body is 256 steps, so about 256 turns.
-/// Decoded in one poll per frame, it measured 4 or 5 turns.
+/// Decoding runs in steps that each hand back at most 64 KiB of gzip
+/// output, with a yield after each, so another task on the same thread runs
+/// while a body decodes. The server, the hop and a ticker share one thread.
+/// The ticker counts a turn each time it runs after the hop was polled
+/// again, so the two took turns. Its plain runs can't show that: it also
+/// spins while the hop waits for the network, hundreds of runs even for a
+/// raw body of the same size on the wire. A 16 MiB body is 256 steps, so
+/// about 256 turns. Decoded in one poll per frame, it took only a handful.
 #[tokio::test(flavor = "current_thread")]
 async fn a_large_body_decodes_without_holding_the_thread() {
     const DECODED: usize = 16 << 20;
