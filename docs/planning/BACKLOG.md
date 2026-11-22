@@ -278,11 +278,15 @@
     - Decode in steps of at most 64 KiB of output that yield to Tokio, so the hop's timeout covers decoding, and a hop past its deadline never ends `Ok`.
     - Correct the HTTP/1.1 head-limit docs: up to 408 KiB always passes, and hyper can accept a longer head that arrives in one read.
     - Say which compression checks stop once the limit cuts a body.
+  - [ ] Codex review round 2 fixes (decided 2026-11-22):
+    - Any hop outcome reached at or after its deadline is `timeout`, including a late failure, as contract point 2 says.
+    - Tests that need two sequential HTTP/1.1 hops on one connection run on a current-thread runtime. hyper-util returns the connection to the pool from a spawned task, and on a multi-thread runtime a fresh connect can win (this failed CI on Linux arm64).
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
   - From P2.3: a hop that waits on a shared HTTP/2 connect that fails still reports `connect` in `connect` ("the shared connection attempt failed"). Decide whether to pass the connect's real kind, such as `tls`, on to the waiting hops.
   - From P2.2: tests never ask a real resolver, so a `dns` failure from a real cause needs a controlled one. Decide whether the connector's private resolver seam becomes public.
+  - From P2.5: under load, back-to-back HTTP/1.1 hops on a multi-thread runtime can open a new connection instead of reusing the idle one. hyper-util returns it to the pool from a spawned task, and its checkout races a new connect. Decide whether Vush must guarantee HTTP/1.1 reuse, for example by owning the HTTP/1.1 pool. That is an architecture change.
 ## Phase 3 Execution Checklist — Scenario interpreter
 
 - [ ] P3.1 Implement ordered step execution and fail-fast per-iteration policy.
