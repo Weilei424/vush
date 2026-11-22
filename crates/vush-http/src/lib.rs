@@ -7,10 +7,12 @@
 //! redirect rules (`follow`), connection pooling, per-hop timeouts, response
 //! bounds, and the per-user session, which holds the user's cookie jar. A
 //! body is read to the end with at most `max_response_size` kept, and
-//! `decompress` decodes gzip and br within the same limit. Every failure
-//! text is a constant in one module. It must not schedule work or own
-//! global counters: scheduling belongs to `vush-core`, and aggregation to
-//! the metrics layer.
+//! `decompress` decodes gzip and br within the same limit. Decoding runs in
+//! steps of at most 64 KiB of output, with a yield to the runtime after
+//! each, so the hop's timeout covers it and other tasks keep running. Every
+//! failure text is a constant in one module. It must not schedule work or
+//! own global counters: scheduling belongs to `vush-core`, and aggregation
+//! to the metrics layer.
 //!
 //! # Building executors
 //!
