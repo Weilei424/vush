@@ -55,7 +55,8 @@ pub const MIB: u64 = 1_048_576;
 // connection is ready again. The next request races a pool checkout
 // against a brand-new connect, and on a multi-thread runtime under load a
 // loopback connect can win, so the two hops get different connections. On
-// one thread, the spawned task runs before the next request starts. HTTP/2
+// one thread, the spawned task almost always runs before the next request
+// starts. HTTP/2
 // reuse is not affected, because hyper-util shares an HTTP/2 connection at
 // once.
 
@@ -749,7 +750,8 @@ async fn read_head(stream: &TcpStream) {
     }
 }
 
-async fn write_all(stream: &TcpStream, mut bytes: &[u8]) {
+/// Writes every byte of `bytes`, or stops quietly if the peer is gone.
+pub async fn write_all(stream: &TcpStream, mut bytes: &[u8]) {
     while !bytes.is_empty() {
         if stream.writable().await.is_err() {
             return;
