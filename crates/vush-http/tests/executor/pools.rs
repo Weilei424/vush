@@ -45,7 +45,8 @@ async fn send_on(
     executor.send(session, request, timeout).await
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn vu_sessions_have_their_own_connections() {
     let addr = spawn_h1(echo).await;
     let request = get(format!("http://{addr}/"));
@@ -69,7 +70,8 @@ async fn vu_sessions_have_their_own_connections() {
     assert_eq!(first.connection, copied.connection);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn sessions_of_a_pooled_executor_share_its_pool() {
     for pool in [PoolScope::Shared, PoolScope::Scenario] {
         let addr = spawn_h1(echo).await;
@@ -153,7 +155,8 @@ fn tls(ca_file: Option<&str>, insecure: bool) -> HttpSettings {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn shared_scopes_with_one_profile_reuse_a_connection() {
     let addr = spawn_h1(echo).await;
     let request = get(format!("http://{addr}/"));
@@ -217,7 +220,8 @@ async fn shared_pools_keep_trust_apart() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn scenario_pools_are_their_own() {
     let addr = spawn_h1(echo).await;
     let request = get(format!("http://{addr}/"));
@@ -243,7 +247,8 @@ async fn scenario_pools_are_their_own() {
     assert_eq!(again.connection, connections[1]);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn a_vu_scope_never_joins_the_shared_pool() {
     let addr = spawn_h1(echo).await;
     let request = get(format!("http://{addr}/"));
