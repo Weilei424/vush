@@ -2,9 +2,12 @@
 //! most `limit` are kept. A body with a decoded encoding is decoded as it
 //! arrives, and then the limit counts decoded bytes.
 //!
-//! Decoding runs in steps of at most 64 KiB of output, so the reader can
-//! yield between them: [`Capture::push`] runs one step over a frame and
-//! gives back what it used, and [`Capture::drain`] runs one step of the end.
+//! Decoding runs in steps, so the reader can yield between them:
+//! [`Capture::push`] runs one step over a frame and gives back what it
+//! used, and [`Capture::drain`] runs one step of the end. A step hands back
+//! at most 64 KiB of output, but a br step can decode up to the stream's
+//! window, at most 16 MiB, first, because brotli writes its ring buffer out
+//! only when it fills.
 //! Once decoded output passes the limit, the body is cut there, and the rest
 //! is counted but never decoded: the checksum, end marker, corruption,
 //! trailing-byte and member-cap checks apply only to what came before the
