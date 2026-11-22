@@ -181,9 +181,11 @@ pub(crate) enum Transport {
 ///   response whose one `Content-Encoding` is `gzip`, `x-gzip` or `br` is
 ///   decoded as it arrives, and the limit counts decoded bytes: decoding
 ///   stops there, and the rest is read but not decoded or checked. Decoding
-///   runs in steps of at most 64 KiB of output with a yield after each, so
-///   `timeout` covers it. Any other body is kept raw, and the headers are
-///   left as received. A corrupt compressed body fails as `protocol` in
+///   runs in steps with a yield after each, so `timeout` covers it. A step
+///   hands back at most 64 KiB of output, but a br step can decode up to
+///   the stream's window, at most 16 MiB, first, because brotli writes its
+///   ring buffer out only when it fills. Any other body is kept raw, and the
+///   headers are left as received. A corrupt compressed body fails as `protocol` in
 ///   `body`. `decompress` doesn't change pool sharing.
 /// - `pool` says where connections live. Under `shared` and `scenario`, all
 ///   the sessions of an executor use its one pool, which [`Executors`] shares
@@ -343,6 +345,7 @@ impl Executor {
                 Err(_elapsed) => return Err(timeout(marker.get())),
             },
         };
+        // The deadline is a std Instant from core, so `now` is too (only tokio's pause differs).
         settle(outcome, deadline, Instant::now(), marker.get())
     }
 
@@ -351,9 +354,12 @@ impl Executor {
     /// it has one, with the target the head's `Set-Cookie` values are stored
     /// against.
     ///
-    /// A decoded body is decoded in steps of at most 64 KiB of output, with
-    /// a yield after each, so no poll decodes more than one step: the hop's
-    /// timeout can fire, and other tasks on the worker run. Each frame
+    /// A decoded body is decoded in steps, with a yield after each, so no
+    /// poll runs more than one step: the hop's timeout can fire between
+    /// steps, and other tasks on the worker run. A step hands back at most
+    /// 64 KiB of output, but a br step can decode up to the stream's window,
+    /// at most 16 MiB, first, because brotli writes its ring buffer out only
+    /// when it fills. Each frame
     /// counts as received when it arrives, so a frame whose decoding a
     /// timeout cuts short still counts whole.
     async fn drive(
