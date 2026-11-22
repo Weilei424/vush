@@ -1,10 +1,15 @@
 //! Bodies under `http.decompress`: what is asked for, what is decoded, and
 //! what is kept raw.
 
-use std::future::pending;
+use std::future::{Future, pending};
 use std::io::{self, Write as _};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use flate2::Compression;
@@ -21,7 +26,7 @@ use vush_http::Executor;
 
 use crate::common::{
     BoxFuture, MIB, NO_DIR, failure, get, header_values, method, pairs, reply, response, send,
-    settings, spawn_auto, spawn_raw,
+    send_within, settings, spawn_auto, spawn_raw,
 };
 
 const HELLO: &[u8] = b"hello world";
@@ -135,6 +140,78 @@ async fn a_bomb_is_kept_at_the_limit() {
         seen.push(hop.connection.expect("a connection"));
     }
     assert_eq!(seen[0], seen[1], "the second hop reuses the connection");
+}
+
+/// Counts the polls of the future it wraps.
+struct Polled<F> {
+    future: Pin<Box<F>>,
+    polls: Arc<AtomicUsize>,
+}
+
+impl<F: Future> Future for Polled<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        self.polls.fetch_add(1, Ordering::Relaxed);
+        self.future.as_mut().poll(cx)
+    }
+}
+
+/// Decoding runs in steps of at most 64 KiB of output, with a yield after
+/// each, so another task on the same thread runs while a body decodes. The
+/// server, the hop and a ticker share one thread. The ticker counts a turn
+/// each time it runs after the hop was polled again, so the two took turns.
+/// Its plain runs can't show that: it also spins while the hop waits for the
+/// network, from 166 to 1044 runs measured here for a raw body of the same
+/// size on the wire. A 16 MiB body is 256 steps, so about 256 turns.
+/// Decoded in one poll per frame, it measured 4 or 5 turns.
+#[tokio::test(flavor = "current_thread")]
+async fn a_large_body_decodes_without_holding_the_thread() {
+    const DECODED: usize = 16 << 20;
+    let addr = serve("gzip", gzip(&vec![0; DECODED])).await;
+    let settings = HttpSettings {
+        decompress: true,
+        ..settings(HttpVersion::Http1, DECODED as u64)
+    };
+    let executor = Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        RootCertStore::empty(),
+    )
+    .unwrap();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let turns = Arc::new(AtomicUsize::new(0));
+    let ticker = tokio::spawn({
+        let polls = polls.clone();
+        let turns = turns.clone();
+        async move {
+            let mut seen = polls.load(Ordering::Relaxed);
+            loop {
+                let now = polls.load(Ordering::Relaxed);
+                if now != seen {
+                    turns.fetch_add(1, Ordering::Relaxed);
+                    seen = now;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+
+    let request = get(format!("http://{addr}/"));
+    let hop = Polled {
+        future: Box::pin(send_within(&executor, &request, Duration::from_secs(120))),
+        polls,
+    }
+    .await;
+    ticker.abort();
+
+    let got = response(&hop);
+    assert_eq!(got.body.len(), DECODED);
+    assert!(got.body.iter().all(|&byte| byte == 0));
+    assert!(!got.truncated);
+    let turns = turns.load(Ordering::Relaxed);
+    assert!(turns >= 128, "the hop and the ticker took {turns} turns");
 }
 
 #[tokio::test(flavor = "multi_thread")]
