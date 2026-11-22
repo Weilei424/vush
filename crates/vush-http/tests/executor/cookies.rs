@@ -143,7 +143,8 @@ async fn users_on_one_http2_connection_never_see_each_other() {
     assert_eq!(Echo::of(&hop_b).values("authorization"), ["Bearer b"]);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn users_on_one_http1_pool_never_see_each_other() {
     let addr = spawn_h1(cookie_routes(&[
         ("/set-a", 200, &[("set-cookie", "who=a")]),
