@@ -121,7 +121,8 @@ async fn a_bad_location_ends_with_invalid_redirect() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn a_large_redirect_body_keeps_its_connection() {
     let addr = spawn_h1(|request| -> ReplyFuture {
         if request.uri().path() == "/big" {
