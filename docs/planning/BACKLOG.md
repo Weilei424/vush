@@ -274,6 +274,10 @@
   - [x] Read to the end, keep the limit (plan Task 4).
   - [x] Opt-in decoding with `http.decompress` (plan Task 5).
   - [x] The canary test, and the docs (plan Task 6).
+  - [ ] Codex review fixes (decided 2026-11-22):
+    - Decode in steps of at most 64 KiB of output that yield to Tokio, so the hop's timeout covers decoding, and a hop past its deadline never ends `Ok`.
+    - Correct the HTTP/1.1 head-limit docs: up to 408 KiB always passes, and hyper can accept a longer head that arrives in one read.
+    - Say which compression checks stop once the limit cuts a body.
   - [ ] CI green on all four runners after the user pushes (plan Task 6).
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
