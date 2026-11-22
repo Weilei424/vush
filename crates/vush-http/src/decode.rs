@@ -8,13 +8,23 @@
 //! ahead of its sink: up to 32 KiB for gzip, and up to the stream's window
 //! for br, which is at most 16 MiB because the large-window extension is
 //! refused.
+//!
+//! A gzip body of up to [`MAX_GZIP_MEMBERS`] members decodes as one body.
+//! Each member costs a fresh decoder, and an empty member adds no output for
+//! the limit to stop, so more members than that are corrupt.
 
 use std::io::{self, Write};
 
 use brotli_decompressor::{BrotliDecoderParameter, DecompressorWriter};
-use flate2::write::MultiGzDecoder;
+use flate2::write::GzDecoder;
 use http::HeaderMap;
 use http::header::CONTENT_ENCODING;
+
+/// The most gzip members one body may hold. Each new member builds a fresh
+/// decoder, with tens of KiB of state, for a few input bytes, and an empty
+/// member adds no output, so the body limit never stops a run of them.
+/// Starting one more is corrupt.
+const MAX_GZIP_MEMBERS: u32 = 1024;
 
 /// A content coding that is decoded.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,6 +60,7 @@ pub(crate) fn encoding(headers: &HeaderMap) -> Option<Encoding> {
 pub(crate) struct Corrupt;
 
 /// Where a decoder's output goes. It keeps at most `limit` bytes.
+#[derive(Default)]
 struct Sink {
     kept: Vec<u8>,
     limit: u64,
@@ -73,6 +84,8 @@ impl Write for Sink {
             return Err(io::ErrorKind::WriteZero.into());
         }
         let take = data.len().min(room);
+        let limit = usize::try_from(self.limit).unwrap_or(usize::MAX);
+        crate::capture::grow_kept(&mut self.kept, take, limit);
         self.kept.extend_from_slice(&data[..take]);
         Ok(take)
     }
@@ -85,8 +98,11 @@ impl Write for Sink {
 /// Both are boxed, because each holds hundreds of bytes of state or more,
 /// and a capture lives in every hop.
 enum Inner {
-    /// Every gzip member in turn, as one body.
-    Gzip(Box<MultiGzDecoder<Sink>>),
+    /// Every gzip member in turn, as one body: the decoder of the current
+    /// member, and how many members have started. A finished member's
+    /// decoder takes no more input, so the next member gets a fresh one
+    /// over the same sink, up to [`MAX_GZIP_MEMBERS`].
+    Gzip(Box<GzDecoder<Sink>>, u32),
     Brotli(Box<DecompressorWriter<Sink>>),
 }
 
@@ -106,7 +122,7 @@ impl Decoder {
             full: false,
         };
         let inner = match encoding {
-            Encoding::Gzip => Inner::Gzip(Box::new(MultiGzDecoder::new(sink))),
+            Encoding::Gzip => Inner::Gzip(Box::new(GzDecoder::new(sink)), 1),
             Encoding::Brotli => {
                 // 0 picks the decoder's default output buffer, 4 KiB.
                 let mut decoder = DecompressorWriter::new(sink, 0);
@@ -125,13 +141,18 @@ impl Decoder {
         let mut rest = data;
         while !rest.is_empty() {
             let written = match &mut self.inner {
-                Inner::Gzip(decoder) => decoder.write(rest),
+                Inner::Gzip(decoder, _) => decoder.write(rest),
                 Inner::Brotli(decoder) => decoder.write(rest),
             };
             match written {
                 // A decoder that takes none of the input has ended, and the
-                // input follows its stream.
-                Ok(0) => return Err(Corrupt),
+                // input follows its stream. Only gzip may go on, with a
+                // next member.
+                Ok(0) => {
+                    if !self.next_gzip_member()? {
+                        return Ok(true);
+                    }
+                }
                 Ok(taken) => rest = &rest[taken..],
                 Err(_) => return self.stopped(),
             }
@@ -139,13 +160,33 @@ impl Decoder {
         // gzip holds back up to one buffer of output. Flushing hands it to
         // the sink, so the limit is seen on this write.
         let flushed = match &mut self.inner {
-            Inner::Gzip(decoder) => decoder.flush(),
+            Inner::Gzip(decoder, _) => decoder.flush(),
             Inner::Brotli(decoder) => decoder.flush(),
         };
         if flushed.is_err() {
             return self.stopped();
         }
         Ok(self.sink().full)
+    }
+
+    /// Starts the next gzip member after the current one ended, over the
+    /// same sink. It gives `false` when the sink refused a byte while the
+    /// ended member was finished. A brotli stream has no next member, and a
+    /// gzip body at the cap, or with a broken member, is `Corrupt`.
+    fn next_gzip_member(&mut self) -> Result<bool, Corrupt> {
+        let Inner::Gzip(decoder, members) = &mut self.inner else {
+            return Err(Corrupt);
+        };
+        if *members >= MAX_GZIP_MEMBERS {
+            return Err(Corrupt);
+        }
+        if decoder.try_finish().is_err() {
+            return self.stopped().map(|full| !full);
+        }
+        let sink = std::mem::take(decoder.get_mut());
+        **decoder = GzDecoder::new(sink);
+        *members += 1;
+        Ok(true)
     }
 
     /// Ends the stream, and gives the decoded bytes and whether any were
@@ -155,7 +196,7 @@ impl Decoder {
     pub(crate) fn finish(mut self) -> Result<(Vec<u8>, bool), Corrupt> {
         if !self.sink().full {
             let ended = match &mut self.inner {
-                Inner::Gzip(decoder) => decoder.try_finish(),
+                Inner::Gzip(decoder, _) => decoder.try_finish(),
                 Inner::Brotli(decoder) => decoder.close(),
             };
             if ended.is_err() {
@@ -178,14 +219,14 @@ impl Decoder {
 
     fn sink(&self) -> &Sink {
         match &self.inner {
-            Inner::Gzip(decoder) => decoder.get_ref(),
+            Inner::Gzip(decoder, _) => decoder.get_ref(),
             Inner::Brotli(decoder) => decoder.get_ref(),
         }
     }
 
     fn sink_mut(&mut self) -> &mut Sink {
         match &mut self.inner {
-            Inner::Gzip(decoder) => decoder.get_mut(),
+            Inner::Gzip(decoder, _) => decoder.get_mut(),
             Inner::Brotli(decoder) => decoder.get_mut(),
         }
     }
@@ -331,6 +372,76 @@ mod tests {
             decode(Encoding::Gzip, &stream, 10),
             Ok((b"abcd".to_vec(), false))
         );
+    }
+
+    #[test]
+    fn up_to_the_member_cap_decodes_and_past_it_is_corrupt() {
+        let empty = gzip(b"");
+        let members = |count: usize| empty.repeat(count);
+        assert_eq!(
+            decode(Encoding::Gzip, &members(1024), 10),
+            Ok((Vec::new(), false))
+        );
+        assert_eq!(decode(Encoding::Gzip, &members(1025), 10), Err(Corrupt));
+        // Fed a member at a time, the cap is the same.
+        let mut decoder = Decoder::new(Encoding::Gzip, 10);
+        let mut results = Vec::new();
+        for _ in 0..1025 {
+            results.push(decoder.write(&empty));
+        }
+        assert!(results[..1024].iter().all(|r| *r == Ok(false)));
+        assert_eq!(results[1024], Err(Corrupt));
+    }
+
+    #[test]
+    fn a_thousand_members_with_data_join() {
+        let mut stream = Vec::new();
+        let mut want = Vec::new();
+        for n in 0..1024u32 {
+            let piece = n.to_le_bytes();
+            stream.extend(gzip(&piece));
+            want.extend(piece);
+        }
+        assert_eq!(decode(Encoding::Gzip, &stream, 1 << 20), Ok((want, false)));
+    }
+
+    #[test]
+    fn bytes_after_the_stream_are_corrupt() {
+        let mut br = HELLO_WORLD_BR.to_vec();
+        br.push(0);
+        assert_eq!(decode(Encoding::Brotli, &br, 100), Err(Corrupt));
+        let mut stream = gzip(b"hello");
+        stream.extend(b"\0\0");
+        assert_eq!(decode(Encoding::Gzip, &stream, 100), Err(Corrupt));
+    }
+
+    #[test]
+    fn brotli_exactly_at_the_limit_is_checked() {
+        assert_eq!(
+            decode(Encoding::Brotli, &HELLO_WORLD_BR, 11),
+            Ok((b"hello world".to_vec(), false))
+        );
+        assert_eq!(
+            decode(Encoding::Brotli, &HELLO_WORLD_BR[..14], 11),
+            Err(Corrupt)
+        );
+    }
+
+    #[test]
+    fn a_decoded_body_never_holds_more_than_the_limit() {
+        const LIMIT: usize = 1000;
+        let plain: Vec<u8> = (0..5000u32).map(|n| (n % 251) as u8).collect();
+        let stream = gzip(&plain);
+        let mut decoder = Decoder::new(Encoding::Gzip, LIMIT as u64);
+        for chunk in stream.chunks(7) {
+            if decoder.write(chunk) == Ok(true) {
+                break;
+            }
+        }
+        let (kept, truncated) = decoder.finish().unwrap();
+        assert!(truncated);
+        assert_eq!(kept, plain[..LIMIT]);
+        assert!(kept.capacity() <= LIMIT, "{}", kept.capacity());
     }
 
     #[test]
