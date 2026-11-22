@@ -209,7 +209,8 @@ async fn cut_bodies_share_a_connection(addr: std::net::SocketAddr, executor: &Ex
     assert!(seen.iter().all(|id| *id == seen[0]), "{seen:?}");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn a_cut_body_keeps_its_connection_on_http1() {
     let addr = spawn_h1(sized).await;
     cut_bodies_share_a_connection(addr, &limited(HttpVersion::Http1, MIB)).await;
@@ -262,7 +263,8 @@ async fn response_headers_keep_repeats_and_raw_bytes() {
     assert_eq!(header_values(got, "x-raw"), [b"\xff\xfe".as_slice()]);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn connections_are_reused_without_a_race() {
     let ca = TestCa::generate();
 
