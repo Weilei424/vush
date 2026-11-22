@@ -28,6 +28,19 @@ fn corrupt(_: Corrupt) -> Failure {
     }
 }
 
+/// Makes room in `kept` for `take` more bytes, growing its capacity
+/// geometrically but never past `limit`. Plain `extend_from_slice` doubles,
+/// so a body near the limit could hold about twice that. The caller keeps
+/// `kept.len() + take` within `limit`.
+pub(crate) fn grow_kept(kept: &mut Vec<u8>, take: usize, limit: usize) {
+    if kept.capacity() - kept.len() < take {
+        let want = (kept.capacity().saturating_mul(2))
+            .max(kept.len() + take)
+            .min(limit);
+        kept.reserve_exact(want - kept.len());
+    }
+}
+
 impl Capture {
     /// An empty capture that keeps at most `limit` bytes. With an
     /// `encoding`, the body is decoded and `limit` counts decoded bytes.
@@ -71,6 +84,8 @@ impl Capture {
             self.truncated = true;
         }
         let take = data.len().min(room);
+        let limit = usize::try_from(self.limit).unwrap_or(usize::MAX);
+        grow_kept(&mut self.kept, take, limit);
         self.kept.extend_from_slice(&data[..take]);
     }
 
@@ -151,6 +166,19 @@ mod tests {
         let mut empty = Capture::new(0, None);
         empty.push(b"").unwrap();
         assert_eq!(empty.finish(), Ok((Vec::new(), false)));
+    }
+
+    #[test]
+    fn a_kept_body_never_holds_more_than_the_limit() {
+        const LIMIT: usize = 1000;
+        let mut capture = Capture::new(LIMIT as u64, None);
+        for size in [1, 3, 10, 77, 200, 333, 5, 400, 600] {
+            capture.push(&vec![9; size]).unwrap();
+        }
+        let (kept, truncated) = capture.finish().unwrap();
+        assert!(truncated);
+        assert_eq!(kept.len(), LIMIT);
+        assert!(kept.capacity() <= LIMIT, "{}", kept.capacity());
     }
 
     #[test]
