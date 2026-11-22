@@ -258,6 +258,7 @@
     - **`http.decompress` is opt-in** (default `false`):
       - It sends `Accept-Encoding: gzip, br` unless the request sets its own, and decodes a single `gzip`, `x-gzip` or `br`. Anything else is kept raw.
       - The limit counts decoded bytes, and decoding stops there.
+      - A gzip body of more than 1024 members is corrupt, because empty members add no bytes toward the limit (final review).
       - A corrupt body is `protocol` in `body`.
       - It adds `flate2` (Rust backend) and `brotli-decompressor`.
     - **Headers:**
@@ -278,6 +279,7 @@
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
   - From P2.3: a hop that waits on a shared HTTP/2 connect that fails still reports `connect` in `connect` ("the shared connection attempt failed"). Decide whether to pass the connect's real kind, such as `tls`, on to the waiting hops.
   - From P2.2: tests never ask a real resolver, so a `dns` failure from a real cause needs a controlled one. Decide whether the connector's private resolver seam becomes public.
+  - From P2.5: the HTTP/1.1 head limit is documented as about 400 KB. hyper reads into spare capacity that doubles, so a 600 KB head passes and an 840 KB head fails. Correct the wording in `docs/config-schema.md`, `ARCHITECTURE_NOTES.md` and the `HEAD_BUFFER_BYTES` comment, or pin the real edge.
 
 ## Phase 3 Execution Checklist — Scenario interpreter
 
