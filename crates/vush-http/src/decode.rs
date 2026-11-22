@@ -5,18 +5,22 @@
 //! write that would pass the limit keeps what fits, and the next is refused,
 //! which stops the decoder. So no call keeps more than `limit` bytes, and a
 //! bomb costs at most the limit of decoding, plus what the decoder runs
-//! ahead of its sink: up to 32 KiB for gzip, and up to the stream's window
-//! for br, which is at most 16 MiB because the large-window extension is
-//! refused.
+//! ahead of its sink: about 64 KiB for gzip, which is flate2's 32 KiB buffer
+//! plus up to 32 KiB of output pending inside miniz, and up to the stream's
+//! window for br, which is at most 16 MiB because the large-window
+//! extension is refused.
 //!
 //! Decoding runs in steps, so the caller can yield between them. The sink
 //! takes at most [`STEP_OUTPUT_BYTES`] in one step, and then refuses for the
 //! rest of it. A step ends there: the decoder keeps the output it couldn't
 //! hand over, and the input it didn't use goes back to the caller for the
-//! next step. Within a step the decoder can still decode ahead of the sink,
-//! by the same amounts as at the limit. Every step uses input, hands output
-//! to the sink, or ends the stream, so no loop spins without progress, and a
-//! step that does none of these is `Corrupt`.
+//! next step. So a step hands back at most 64 KiB, but it can decode ahead
+//! of the sink by the same amounts as at the limit: about 64 KiB for gzip,
+//! and for br up to the stream's window, at most 16 MiB, because brotli
+//! writes its ring buffer out only when it fills. A gzip step also starts at
+//! most one member. Every step uses input, hands output to the sink, or
+//! ends the stream, so no loop spins without progress, and a step that does
+//! none of these is `Corrupt`.
 //!
 //! A gzip body of up to [`MAX_GZIP_MEMBERS`] members decodes as one body.
 //! Each member costs a fresh decoder, and an empty member adds no output for
@@ -43,7 +47,9 @@ pub(crate) const STEP_OUTPUT_BYTES: usize = 64 * 1024;
 /// Starting one more is corrupt.
 const MAX_GZIP_MEMBERS: u32 = 1024;
 
-/// The buffer brotli decodes into on its way to the sink: 16 KiB.
+/// The buffer each brotli call copies its output into, on the way to the
+/// sink: 16 KiB. brotli decodes into its own ring buffer, up to the
+/// stream's window, and copies out from there.
 const BROTLI_OUT_BYTES: usize = 16 * 1024;
 
 /// A content coding that is decoded.
@@ -167,13 +173,18 @@ struct Gzip {
 }
 
 impl Gzip {
-    /// Decodes from the start of `data` until the step's budget is spent or
-    /// `data` is used up. A `GzDecoder` returns at once when its sink refuses
-    /// a write, keeping the output it couldn't hand over, and has then used
-    /// none of that call's input, so the step can stop there and go on
-    /// later.
+    /// Decodes from the start of `data` until the step's budget is spent,
+    /// `data` is used up, or a new member has started. A `GzDecoder` returns
+    /// at once when its sink refuses a write, keeping the output it couldn't
+    /// hand over, and has then used none of that call's input, so the step
+    /// can stop there and go on later.
+    ///
+    /// A step starts at most one member, because each start builds a fresh
+    /// decoder whatever the member's size. It ends once the new member's
+    /// first write has used input, so it never ends without progress.
     fn step(&mut self, data: &[u8]) -> Result<Step, Corrupt> {
         let mut used = 0;
+        let mut started = false;
         while used < data.len() {
             if self.sink().budget == 0 {
                 return Ok(Step::Used(used));
@@ -193,7 +204,12 @@ impl Gzip {
                     let sink = std::mem::take(self.decoder.get_mut());
                     *self.decoder = GzDecoder::new(sink);
                     self.members += 1;
+                    started = true;
                 }
+                // The new member's first write reads its header, and the
+                // ended member's output is all handed over, so nothing is
+                // left to flush.
+                Ok(taken) if started => return Ok(Step::Used(used + taken)),
                 Ok(taken) => used += taken,
                 Err(_) => return stopped(self.sink_mut(), used),
             }
@@ -227,7 +243,9 @@ impl Gzip {
 
 /// A brotli stream, through the library's resumable stream call. The call
 /// stops when its output space is full and goes on from there, so a step
-/// gives it no more space than the step's budget.
+/// gives it no more space than the step's budget. The call decodes into the
+/// library's ring buffer and copies out only when that fills, so one call
+/// can decode up to the stream's window before it hands back any output.
 struct Brotli {
     /// Boxed, because it holds kilobytes of state.
     state: Box<BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>>,
@@ -500,39 +518,63 @@ mod tests {
         decoder.finish()
     }
 
-    /// Decodes `frames` with steps of `step` bytes, then drains, and gives
-    /// the output and how much each step handed over, the drain's included.
+    /// What a stepped decode gave: the output, and how much each step
+    /// handed over, the pushes' steps apart from the drain's.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Stepped {
+        kept: Vec<u8>,
+        pushes: Vec<usize>,
+        drains: Vec<usize>,
+    }
+
+    impl Stepped {
+        /// Every step's size, the pushes' then the drain's.
+        fn sizes(&self) -> impl Iterator<Item = usize> + '_ {
+            self.pushes.iter().chain(&self.drains).copied()
+        }
+    }
+
+    /// Decodes `frames` with steps of `step` bytes, then drains.
     fn stepped(
         encoding: Encoding,
         frames: &[&[u8]],
         limit: u64,
         step: usize,
-    ) -> Result<(Vec<u8>, Vec<usize>), Corrupt> {
+    ) -> Result<Stepped, Corrupt> {
         let mut decoder = Decoder::with_step(encoding, limit, step);
-        let mut sizes = Vec::new();
         let mut held = 0;
         let mut grown = |decoder: &Decoder| {
             let now = decoder.sink().kept.len();
-            sizes.push(now - held);
+            let size = now - held;
             held = now;
+            size
         };
+        let mut pushes = Vec::new();
         for frame in frames {
             let mut rest = *frame;
             while !rest.is_empty() {
                 let Step::Used(used) = decoder.step(rest)? else {
                     panic!("the limit is never reached here")
                 };
-                grown(&decoder);
+                pushes.push(grown(&decoder));
                 rest = &rest[used..];
             }
         }
-        while !decoder.drain()? {
-            grown(&decoder);
+        let mut drains = Vec::new();
+        loop {
+            let done = decoder.drain()?;
+            drains.push(grown(&decoder));
+            if done {
+                break;
+            }
         }
-        grown(&decoder);
         let (kept, truncated) = decoder.finish()?;
         assert!(!truncated);
-        Ok((kept, sizes))
+        Ok(Stepped {
+            kept,
+            pushes,
+            drains,
+        })
     }
 
     fn headers(values: &[&str]) -> HeaderMap {
@@ -753,23 +795,42 @@ mod tests {
         const STEP: usize = 4096;
         let plain = vec![0; 1 << 20];
         let stream = gzip(&plain);
-        let (kept, sizes) = stepped(Encoding::Gzip, &[&stream], 2 << 20, STEP).unwrap();
-        assert_eq!(kept, plain);
-        assert!(sizes.iter().all(|&size| size <= STEP), "{sizes:?}");
+        let got = stepped(Encoding::Gzip, &[&stream], 2 << 20, STEP).unwrap();
+        assert_eq!(got.kept, plain);
+        assert!(got.sizes().all(|size| size <= STEP), "{got:?}");
         // The whole stream is one frame, so only steps split its output.
-        assert!(sizes.len() >= plain.len() / STEP, "{} steps", sizes.len());
+        assert!(got.sizes().count() >= plain.len() / STEP);
     }
 
     #[test]
     fn a_brotli_step_hands_over_at_most_its_budget() {
         const STEP: usize = 3;
-        let (kept, sizes) = stepped(Encoding::Brotli, &[&HELLO_WORLD_BR], 100, STEP).unwrap();
-        assert_eq!(kept, b"hello world");
-        assert!(sizes.iter().all(|&size| size <= STEP), "{sizes:?}");
-        // Its 11 bytes come out over at least 4 steps, after all 15 input
-        // bytes are in, so some come out in the drain.
-        let giving = sizes.iter().filter(|&&size| size > 0).count();
-        assert!(giving >= 4, "{sizes:?}");
+        let got = stepped(Encoding::Brotli, &[&HELLO_WORLD_BR], 100, STEP).unwrap();
+        assert_eq!(got.kept, b"hello world");
+        assert!(got.sizes().all(|size| size <= STEP), "{got:?}");
+        // The first push takes all 15 input bytes and hands over 3 of the 11
+        // output bytes. The rest is pending in the decoder, and the drain
+        // hands it over in steps: 3, 3 and 2 here.
+        let drained = got.drains.iter().filter(|&&size| size > 0).count();
+        assert!(drained >= 2, "{got:?}");
+    }
+
+    #[test]
+    fn each_gzip_member_starts_a_step() {
+        let empty = gzip(b"");
+        let got = stepped(Encoding::Gzip, &[&empty.repeat(100)], 10, STEP_OUTPUT_BYTES).unwrap();
+        assert!(got.kept.is_empty());
+        // The first member has the decoder's own start, and each of the
+        // other 99 ends the step that starts it, so one frame takes 100.
+        assert!(got.pushes.len() >= 100, "{} steps", got.pushes.len());
+        // With data, the members still join.
+        let mut stream = Vec::new();
+        for piece in [&b"ab"[..], b"cd", b"ef"] {
+            stream.extend(gzip(piece));
+        }
+        let got = stepped(Encoding::Gzip, &[&stream], 10, STEP_OUTPUT_BYTES).unwrap();
+        assert_eq!(got.kept, b"abcdef");
+        assert!(got.pushes.len() >= 3, "{} steps", got.pushes.len());
     }
 
     #[test]
@@ -780,14 +841,14 @@ mod tests {
         let mut want = plain.clone();
         want.extend(b"and a second member");
         let frames: Vec<&[u8]> = stream.chunks(7).collect();
-        let (small, sizes) = stepped(Encoding::Gzip, &frames, 1 << 20, 1000).unwrap();
-        assert_eq!(small, want);
-        assert!(sizes.iter().all(|&size| size <= 1000));
+        let got = stepped(Encoding::Gzip, &frames, 1 << 20, 1000).unwrap();
+        assert_eq!(got.kept, want);
+        assert!(got.sizes().all(|size| size <= 1000));
         assert_eq!(decode(Encoding::Gzip, &stream, 1 << 20), Ok((want, false)));
 
         let frames: Vec<&[u8]> = HELLO_WORLD_BR.chunks(1).collect();
-        let (small, _) = stepped(Encoding::Brotli, &frames, 100, 1).unwrap();
-        assert_eq!(small, b"hello world");
+        let got = stepped(Encoding::Brotli, &frames, 100, 1).unwrap();
+        assert_eq!(got.kept, b"hello world");
     }
 
     #[test]
