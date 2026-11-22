@@ -123,7 +123,8 @@ async fn a_requests_own_accept_encoding_is_sent() {
     assert_eq!(got.body, HELLO);
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Reuse needs one thread: see "One thread for reuse" in common.rs.
+#[tokio::test(flavor = "current_thread")]
 async fn a_bomb_is_kept_at_the_limit() {
     let bomb = gzip(&vec![0; 16 << 20]);
     let compressed = bomb.len() as u64;
@@ -307,4 +308,58 @@ async fn a_head_response_labelled_gzip_is_empty() {
     assert_eq!(got.status, 200);
     assert!(got.body.is_empty());
     assert!(!got.truncated);
+}
+
+/// How many bytes the gzip body of [`stalled_gzip`] holds, decoded.
+const STALLED_DECODED: usize = 4 << 20;
+
+/// The gzip stream [`stalled_gzip`] sends before it stalls.
+fn stalled_stream() -> Vec<u8> {
+    gzip(&vec![0; STALLED_DECODED])
+}
+
+/// Answers with a head that says `gzip` and a body of a billion bytes, sends
+/// a gzip stream that decodes to several MiB, then holds the connection
+/// open without ending the body.
+fn stalled_gzip(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        if !read_head(&stream).await {
+            return;
+        }
+        let mut reply =
+            b"HTTP/1.1 200 OK\r\ncontent-encoding: gzip\r\ncontent-length: 1000000000\r\n\r\n"
+                .to_vec();
+        reply.extend_from_slice(&stalled_stream());
+        let mut rest: &[u8] = &reply;
+        while !rest.is_empty() {
+            if stream.writable().await.is_err() {
+                return;
+            }
+            match stream.try_write(rest) {
+                Ok(written) => rest = &rest[written..],
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
+            }
+        }
+        pending::<()>().await;
+    })
+}
+
+/// Decoding is covered by the hop's timeout, and a body the deadline cuts
+/// short is a `timeout` in `body`, however fast the machine decodes. The
+/// server sends a whole gzip stream and then stalls, so the hop can only end
+/// at its deadline, and every compressed byte sent counts as received.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoded_body_cut_by_the_deadline_is_a_timeout() {
+    let addr = spawn_raw(stalled_gzip).await;
+    let hop = send_within(
+        &decoding(HttpVersion::Http1, true),
+        &get(format!("http://{addr}/")),
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Body));
+    assert_eq!(hop.sizes.received, stalled_stream().len() as u64);
+    let message = hop.outcome.unwrap_err().message;
+    assert_eq!(message, "the hop ran out of time");
 }
