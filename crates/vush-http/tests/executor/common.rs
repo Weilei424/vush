@@ -848,27 +848,39 @@ fn head_with_headers(stream: TcpStream, count: usize) -> BoxFuture {
     })
 }
 
-/// A `200` whose head is one header with a value of `value_len` bytes, then
-/// holds the connection open.
-fn head_with_big_value(stream: TcpStream, value_len: usize) -> BoxFuture {
+/// The HTTP/1.1 head buffer `vush-http` gives hyper: 417,792 bytes, which
+/// is 408 KiB.
+pub const HEAD_BUFFER_BYTES: usize = 417_792;
+
+/// A `200` head of exactly `len` bytes, counting its status line, its
+/// headers and the empty line that ends it. Its `x-big` header is padded to
+/// make up the length, and `content-length: 0` follows it.
+pub fn head_of_len(len: usize) -> Vec<u8> {
+    let start = b"HTTP/1.1 200 OK\r\nx-big: ";
+    let end = b"\r\ncontent-length: 0\r\n\r\n";
+    let mut head = start.to_vec();
+    head.resize(len - end.len(), b'a');
+    head.extend_from_slice(end);
+    head
+}
+
+/// Writes a head of exactly `len` bytes, then holds the connection open.
+fn head_of(stream: TcpStream, len: usize) -> BoxFuture {
     Box::pin(async move {
         read_head(&stream).await;
-        let mut head = String::from("HTTP/1.1 200 OK\r\nx-big: ");
-        head.push_str(&"a".repeat(value_len));
-        head.push_str("\r\ncontent-length: 0\r\n\r\n");
-        write_all(&stream, head.as_bytes()).await;
+        write_all(&stream, &head_of_len(len)).await;
         pending::<()>().await;
     })
 }
 
-/// A head of about 400 KB, well under the 417,792-byte head buffer.
-pub fn head_of_400_kb(stream: TcpStream) -> BoxFuture {
-    head_with_big_value(stream, 400_000)
+/// A head that fills the head buffer exactly.
+pub fn head_of_the_buffer(stream: TcpStream) -> BoxFuture {
+    head_of(stream, HEAD_BUFFER_BYTES)
 }
 
-/// A head of about 1 MB, far over the 417,792-byte head buffer.
+/// A head of 1 MB, far over the head buffer.
 pub fn head_of_1_mb(stream: TcpStream) -> BoxFuture {
-    head_with_big_value(stream, 1_000_000)
+    head_of(stream, 1_000_000)
 }
 
 /// A `200` with exactly 100 header lines, hyper's default limit.
