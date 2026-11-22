@@ -167,9 +167,11 @@ With `decompress: true`, Vush asks for compressed bodies and decodes them.
 - A body is decoded only when the response has exactly one `Content-Encoding` header, and its value is `gzip`, `x-gzip` or `br`, in any letter case. Anything else is kept raw, and isn't a failure: no header, `identity`, `deflate`, `zstd`, a list such as `gzip, br`, or several headers.
 - The response's headers are left as received, `Content-Encoding` and `Content-Length` included.
 - `max_response_size` counts decoded bytes. Decoding stops at the limit, and the rest of the body is read to the end but not decoded. The response is marked `truncated`. Vush keeps at most `max_response_size`, but the decoder can run past the limit before it stops: by up to about 32 KiB for `gzip`, and by up to the stream's window for `br`, which is at most 16 MiB because large-window brotli is refused. A `br` hop can also hold up to that window in decoder memory.
+- Decoding runs in steps of at most 64 KiB of output, and Vush's other work runs between them. So the hop's `timeout` covers decoding too: a hop whose time runs out while its body decodes fails as `timeout`.
 - A decoded body exactly at the limit isn't `truncated`, and its gzip checksum or brotli end marker is still checked.
 - A corrupt compressed body fails as `protocol`, and so does one that ends too early. A `br` body that uses brotli's large-window extension counts as corrupt. So do bytes after the end of the compressed stream.
 - A gzip body of up to 1024 members decodes as one body. A body with more members is corrupt.
+- These checks apply to what is decoded before the limit: the gzip checksum and length, the brotli end marker, a corrupt stream, bytes after the end and the member cap. Once the limit cuts a body, the rest is read to the end but neither decoded nor checked, so nothing after the cut can make the hop fail as corrupt.
 - A response with no body, such as the answer to a `HEAD`, has nothing to decode.
 
 With `decompress: false`, nothing is asked for and nothing is decoded. A request's own `Accept-Encoding` is still sent, and its body comes back as received.
@@ -434,7 +436,7 @@ This section says what a request becomes on the wire. It holds for every step.
 - No `Accept-Encoding` is sent, and no body is decoded, unless `http.decompress` is `true`. A request's own `Accept-Encoding` is always sent as written.
 - Repeats of one header name are sent in their given order. The order across different names isn't kept.
 - A request sets at most 256 header names of its own. Repeats of one name, in any letter case, count once. Headers Vush adds (`Content-Type`, `User-Agent`, `Accept-Encoding` and the cookie jar's `Cookie`) never count. With more, it fails as `invalid_request`, and nothing is sent. `vush validate` checks this too.
-- A response head can hold at most 100 headers and about 400 KB over HTTP/1.1, and 16 KiB over HTTP/2. A larger one fails as `protocol`.
+- Over HTTP/1.1, a response head can hold at most 100 headers. A head of up to 408 KiB (417,792 bytes) always passes. A longer one can still pass when one read brings it in, and memory stays bounded by the HTTP library's read buffer either way. Over HTTP/2, a head can hold at most 16 KiB. A head over these limits fails as `protocol`.
 
 ### Redirects
 
