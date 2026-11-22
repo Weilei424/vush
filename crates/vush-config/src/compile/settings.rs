@@ -183,6 +183,7 @@ mod tests {
                 ca_file: Some("a.pem".to_owned()),
                 insecure: false,
             },
+            decompress: true,
             ..HttpSettings::default()
         };
         let (got, errors) = run("{tls: {insecure: true}}", |n, e| http(n, "http", &base, e));
@@ -190,6 +191,9 @@ mod tests {
         assert_eq!(got.timeout, Duration::from_secs(10));
         assert_eq!(got.tls.ca_file.as_deref(), Some("a.pem"));
         assert!(got.tls.insecure);
+        assert!(got.decompress, "an unset key keeps the base's true");
+        let (got, errors) = run("{decompress: false}", |n, e| http(n, "http", &base, e));
+        assert!(errors.is_empty());
         assert!(!got.decompress);
     }
 
