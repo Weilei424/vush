@@ -166,10 +166,10 @@ With `decompress: true`, Vush asks for compressed bodies and decodes them.
 - Each request gets `Accept-Encoding: gzip, br`, unless it sets its own `Accept-Encoding`. A request's own value is sent as written, and a `gzip` or `br` body sent back is still decoded.
 - A body is decoded only when the response has exactly one `Content-Encoding` header, and its value is `gzip`, `x-gzip` or `br`, in any letter case. Anything else is kept raw, and isn't a failure: no header, `identity`, `deflate`, `zstd`, a list such as `gzip, br`, or several headers.
 - The response's headers are left as received, `Content-Encoding` and `Content-Length` included.
-- `max_response_size` counts decoded bytes. Decoding stops at the limit, and the rest of the body is read to the end but not decoded. The response is marked `truncated`. So a small body that decodes to much more costs at most `max_response_size`.
+- `max_response_size` counts decoded bytes. Decoding stops at the limit, and the rest of the body is read to the end but not decoded. The response is marked `truncated`. Vush keeps at most `max_response_size`, but the decoder can run past the limit before it stops: by up to about 32 KiB for `gzip`, and by up to the stream's window for `br`, which is at most 16 MiB because large-window brotli is refused. A `br` hop can also hold up to that window in decoder memory.
 - A decoded body exactly at the limit isn't `truncated`, and its gzip checksum or brotli end marker is still checked.
-- A corrupt compressed body fails as `protocol`, and so does one that ends too early. A `br` body that uses brotli's large-window extension counts as corrupt.
-- A gzip body of several members decodes as one body.
+- A corrupt compressed body fails as `protocol`, and so does one that ends too early. A `br` body that uses brotli's large-window extension counts as corrupt. So do bytes after the end of the compressed stream.
+- A gzip body of up to 1024 members decodes as one body. A body with more members is corrupt.
 - A response with no body, such as the answer to a `HEAD`, has nothing to decode.
 
 With `decompress: false`, nothing is asked for and nothing is decoded. A request's own `Accept-Encoding` is still sent, and its body comes back as received.
