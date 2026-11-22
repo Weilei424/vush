@@ -1,5 +1,5 @@
-//! Decoding a gzip or br body as it arrives, into a buffer that never holds
-//! more than the body limit.
+//! Decoding a gzip or br body as it arrives, in bounded steps, into a
+//! buffer that never holds more than the body limit.
 //!
 //! Each decoder writes into a [`Sink`] that keeps at most `limit` bytes. A
 //! write that would pass the limit keeps what fits, and the next is refused,
@@ -9,22 +9,42 @@
 //! for br, which is at most 16 MiB because the large-window extension is
 //! refused.
 //!
+//! Decoding runs in steps, so the caller can yield between them. The sink
+//! takes at most [`STEP_OUTPUT_BYTES`] in one step, and then refuses for the
+//! rest of it. A step ends there: the decoder keeps the output it couldn't
+//! hand over, and the input it didn't use goes back to the caller for the
+//! next step. Within a step the decoder can still decode ahead of the sink,
+//! by the same amounts as at the limit. Every step uses input, hands output
+//! to the sink, or ends the stream, so no loop spins without progress, and a
+//! step that does none of these is `Corrupt`.
+//!
 //! A gzip body of up to [`MAX_GZIP_MEMBERS`] members decodes as one body.
 //! Each member costs a fresh decoder, and an empty member adds no output for
 //! the limit to stop, so more members than that are corrupt.
+//!
+//! Every check here applies to what is decoded before the limit: the gzip
+//! checksum and length, the brotli end marker, a broken stream, bytes after
+//! the stream and the member cap. Once output passes the limit, the decoder
+//! is dropped, and the rest of the body is never decoded or checked.
 
 use std::io::{self, Write};
 
-use brotli_decompressor::{BrotliDecoderParameter, DecompressorWriter};
+use brotli_decompressor::{BrotliDecompressStream, BrotliResult, BrotliState, StandardAlloc};
 use flate2::write::GzDecoder;
 use http::HeaderMap;
 use http::header::CONTENT_ENCODING;
+
+/// The most decoded output one step hands to the sink: 64 KiB.
+pub(crate) const STEP_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// The most gzip members one body may hold. Each new member builds a fresh
 /// decoder, with tens of KiB of state, for a few input bytes, and an empty
 /// member adds no output, so the body limit never stops a run of them.
 /// Starting one more is corrupt.
 const MAX_GZIP_MEMBERS: u32 = 1024;
+
+/// The buffer brotli decodes into on its way to the sink: 16 KiB.
+const BROTLI_OUT_BYTES: usize = 16 * 1024;
 
 /// A content coding that is decoded.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -59,7 +79,20 @@ pub(crate) fn encoding(headers: &HeaderMap) -> Option<Encoding> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Corrupt;
 
-/// Where a decoder's output goes. It keeps at most `limit` bytes.
+/// What one step did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// The step used this many bytes from the start of its input. The rest
+    /// of the input, and any output the decoder still holds, wait for the
+    /// next step.
+    Used(usize),
+    /// Decoded output passed the limit: exactly `limit` bytes are kept, and
+    /// nothing more should be decoded.
+    Full,
+}
+
+/// Where a decoder's output goes. It keeps at most `limit` bytes, and takes
+/// at most `budget` more in the current step.
 #[derive(Default)]
 struct Sink {
     kept: Vec<u8>,
@@ -67,12 +100,19 @@ struct Sink {
     /// Whether a byte past the limit was refused. Every write after that
     /// fails.
     full: bool,
+    /// How many more bytes the current step may take. Between steps it is
+    /// 0, so the sink takes nothing.
+    budget: usize,
+    /// Whether a write was refused because the step's budget was spent.
+    spent: bool,
 }
 
 impl Write for Sink {
-    /// Keeps what fits under the limit. With no room left, it refuses a
-    /// non-empty write with an error, never with `Ok(0)`, which would make
-    /// the decoders retry forever.
+    /// Keeps what fits under the limit and the step's budget. With no room
+    /// left, it refuses a non-empty write with an error, never with `Ok(0)`,
+    /// which would make the decoders retry forever. A refused byte past the
+    /// limit marks the sink full. One within the limit but past the budget
+    /// marks the step spent, and the decoder keeps it for the next step.
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         if data.is_empty() {
             return Ok(0);
@@ -83,10 +123,15 @@ impl Write for Sink {
             self.full = true;
             return Err(io::ErrorKind::WriteZero.into());
         }
-        let take = data.len().min(room);
+        if self.budget == 0 {
+            self.spent = true;
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let take = data.len().min(room).min(self.budget);
         let limit = usize::try_from(self.limit).unwrap_or(usize::MAX);
         crate::capture::grow_kept(&mut self.kept, take, limit);
         self.kept.extend_from_slice(&data[..take]);
+        self.budget -= take;
         Ok(take)
     }
 
@@ -95,139 +140,317 @@ impl Write for Sink {
     }
 }
 
-/// Both are boxed, because each holds hundreds of bytes of state or more,
-/// and a capture lives in every hop.
-enum Inner {
-    /// Every gzip member in turn, as one body: the decoder of the current
-    /// member, and how many members have started. A finished member's
-    /// decoder takes no more input, so the next member gets a fresh one
-    /// over the same sink, up to [`MAX_GZIP_MEMBERS`].
-    Gzip(Box<GzDecoder<Sink>>, u32),
-    Brotli(Box<DecompressorWriter<Sink>>),
-}
-
-/// A body being decoded under a size limit.
-pub(crate) struct Decoder {
-    inner: Inner,
-}
-
-impl Decoder {
-    /// A decoder for `encoding` that keeps at most `limit` decoded bytes.
-    /// Brotli's large-window extension is refused, so its window is at most
-    /// the 16 MiB RFC 7932 allows.
-    pub(crate) fn new(encoding: Encoding, limit: u64) -> Self {
-        let sink = Sink {
-            kept: Vec::new(),
-            limit,
-            full: false,
-        };
-        let inner = match encoding {
-            Encoding::Gzip => Inner::Gzip(Box::new(GzDecoder::new(sink)), 1),
-            Encoding::Brotli => {
-                // 0 picks the decoder's default output buffer, 4 KiB.
-                let mut decoder = DecompressorWriter::new(sink, 0);
-                // Before the first write, this can't be refused.
-                decoder.set_parameter(BrotliDecoderParameter::BROTLI_DECODER_PARAM_LARGE_WINDOW, 0);
-                Inner::Brotli(Box::new(decoder))
-            }
-        };
-        Self { inner }
+/// What a decoder's error means: the limit when the sink refused a byte past
+/// it, the end of the step, having used `used` input bytes, when the sink
+/// refused a byte past the step's budget, and a broken stream otherwise.
+/// Both decoders return at once when the sink refuses, so the error is that
+/// refusal.
+fn stopped(sink: &mut Sink, used: usize) -> Result<Step, Corrupt> {
+    if sink.full {
+        Ok(Step::Full)
+    } else if std::mem::take(&mut sink.spent) {
+        Ok(Step::Used(used))
+    } else {
+        Err(Corrupt)
     }
+}
 
-    /// Decodes `data`. It gives `true` once decoded output would pass the
-    /// limit: exactly `limit` bytes are then kept, the rest is dropped, and
-    /// nothing more should be written.
-    pub(crate) fn write(&mut self, data: &[u8]) -> Result<bool, Corrupt> {
-        let mut rest = data;
-        while !rest.is_empty() {
-            let written = match &mut self.inner {
-                Inner::Gzip(decoder, _) => decoder.write(rest),
-                Inner::Brotli(decoder) => decoder.write(rest),
-            };
-            match written {
+/// Every gzip member in turn, as one body.
+struct Gzip {
+    /// The decoder of the current member. Boxed, because it holds hundreds
+    /// of bytes of state, and a capture lives in every hop. A finished
+    /// member's decoder takes no more input, so the next member gets a fresh
+    /// one over the same sink.
+    decoder: Box<GzDecoder<Sink>>,
+    /// How many members have started, up to [`MAX_GZIP_MEMBERS`].
+    members: u32,
+}
+
+impl Gzip {
+    /// Decodes from the start of `data` until the step's budget is spent or
+    /// `data` is used up. A `GzDecoder` returns at once when its sink refuses
+    /// a write, keeping the output it couldn't hand over, and has then used
+    /// none of that call's input, so the step can stop there and go on
+    /// later.
+    fn step(&mut self, data: &[u8]) -> Result<Step, Corrupt> {
+        let mut used = 0;
+        while used < data.len() {
+            if self.sink().budget == 0 {
+                return Ok(Step::Used(used));
+            }
+            match self.decoder.write(&data[used..]) {
                 // A decoder that takes none of the input has ended, and the
-                // input follows its stream. Only gzip may go on, with a
-                // next member.
+                // input follows its stream. It may be a next member.
                 Ok(0) => {
-                    if !self.next_gzip_member()? {
-                        return Ok(true);
+                    if self.members >= MAX_GZIP_MEMBERS {
+                        return Err(Corrupt);
                     }
+                    // Hands over the ended member's last output, then checks
+                    // its checksum and length.
+                    if self.decoder.try_finish().is_err() {
+                        return stopped(self.sink_mut(), used);
+                    }
+                    let sink = std::mem::take(self.decoder.get_mut());
+                    *self.decoder = GzDecoder::new(sink);
+                    self.members += 1;
                 }
-                Ok(taken) => rest = &rest[taken..],
-                Err(_) => return self.stopped(),
+                Ok(taken) => used += taken,
+                Err(_) => return stopped(self.sink_mut(), used),
             }
         }
-        // gzip holds back up to one buffer of output. Flushing hands it to
-        // the sink, so the limit is seen on this write.
-        let flushed = match &mut self.inner {
-            Inner::Gzip(decoder, _) => decoder.flush(),
-            Inner::Brotli(decoder) => decoder.flush(),
-        };
-        if flushed.is_err() {
-            return self.stopped();
+        // gzip holds back up to one buffer of output. Flushing hands the
+        // sink what the budget allows, so the limit is seen in this step.
+        if self.sink().budget > 0 && self.decoder.flush().is_err() {
+            return stopped(self.sink_mut(), used);
         }
-        Ok(self.sink().full)
+        Ok(Step::Used(used))
     }
 
-    /// Starts the next gzip member after the current one ended, over the
-    /// same sink. It gives `false` when the sink refused a byte while the
-    /// ended member was finished. A brotli stream has no next member, and a
-    /// gzip body at the cap, or with a broken member, is `Corrupt`.
-    fn next_gzip_member(&mut self) -> Result<bool, Corrupt> {
-        let Inner::Gzip(decoder, members) = &mut self.inner else {
-            return Err(Corrupt);
-        };
-        if *members >= MAX_GZIP_MEMBERS {
-            return Err(Corrupt);
-        }
-        if decoder.try_finish().is_err() {
-            return self.stopped().map(|full| !full);
-        }
-        let sink = std::mem::take(decoder.get_mut());
-        **decoder = GzDecoder::new(sink);
-        *members += 1;
-        Ok(true)
-    }
-
-    /// Ends the stream, and gives the decoded bytes and whether any were
-    /// dropped. Unless the limit was passed, the gzip checksum and length, or
-    /// the brotli end marker, are checked, so a stream that is cut short is
-    /// `Corrupt`.
-    pub(crate) fn finish(mut self) -> Result<(Vec<u8>, bool), Corrupt> {
-        if !self.sink().full {
-            let ended = match &mut self.inner {
-                Inner::Gzip(decoder, _) => decoder.try_finish(),
-                Inner::Brotli(decoder) => decoder.close(),
-            };
-            if ended.is_err() {
-                self.stopped()?;
-            }
-        }
-        let sink = self.sink_mut();
-        Ok((std::mem::take(&mut sink.kept), sink.full))
-    }
-
-    /// What a decoder's error means: the limit when the sink refused a byte,
-    /// and a broken stream otherwise.
-    fn stopped(&self) -> Result<bool, Corrupt> {
-        if self.sink().full {
-            Ok(true)
-        } else {
-            Err(Corrupt)
+    /// Hands over the output still held, within the step's budget, and then
+    /// checks the checksum and length. It gives `false` while output is still
+    /// held.
+    fn drain(&mut self) -> Result<bool, Corrupt> {
+        match self.decoder.try_finish() {
+            Ok(()) => Ok(true),
+            Err(_) => stopped(self.sink_mut(), 0).map(|step| step == Step::Full),
         }
     }
 
     fn sink(&self) -> &Sink {
+        self.decoder.get_ref()
+    }
+
+    fn sink_mut(&mut self) -> &mut Sink {
+        self.decoder.get_mut()
+    }
+}
+
+/// A brotli stream, through the library's resumable stream call. The call
+/// stops when its output space is full and goes on from there, so a step
+/// gives it no more space than the step's budget.
+struct Brotli {
+    /// Boxed, because it holds kilobytes of state.
+    state: Box<BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>>,
+    out: Box<[u8]>,
+    sink: Sink,
+    /// The library's count of output bytes, which it needs.
+    total_out: usize,
+    /// Whether the stream's end marker was decoded.
+    ended: bool,
+}
+
+impl Brotli {
+    /// A stream decoder that refuses the large-window extension, which the
+    /// library's other constructors accept.
+    fn new(sink: Sink) -> Self {
+        let state = BrotliState::new_strict(
+            StandardAlloc::default(),
+            StandardAlloc::default(),
+            StandardAlloc::default(),
+        );
+        Self {
+            state: Box::new(state),
+            out: vec![0; BROTLI_OUT_BYTES].into_boxed_slice(),
+            sink,
+            total_out: 0,
+            ended: false,
+        }
+    }
+
+    /// One stream call over `data` from `*used`, with output space of at
+    /// most the step's budget. It moves `*used` past the input taken, hands
+    /// the output to the sink, and gives the call's result and how many
+    /// bytes it put out. An error is the sink's refusal.
+    fn call(&mut self, data: &[u8], used: &mut usize) -> io::Result<(BrotliResult, usize)> {
+        let mut available_in = data.len() - *used;
+        let mut available_out = self.out.len().min(self.sink.budget);
+        let mut produced = 0;
+        let result = BrotliDecompressStream(
+            &mut available_in,
+            used,
+            data,
+            &mut available_out,
+            &mut produced,
+            &mut self.out[..],
+            &mut self.total_out,
+            &mut *self.state,
+        );
+        self.sink.write_all(&self.out[..produced])?;
+        Ok((result, produced))
+    }
+
+    /// Decodes from the start of `data` until the step's budget is spent,
+    /// `data` is used up, or the stream ends. Bytes after the end are
+    /// `Corrupt`.
+    fn step(&mut self, data: &[u8]) -> Result<Step, Corrupt> {
+        let mut used = 0;
+        loop {
+            if self.ended {
+                return if used < data.len() {
+                    Err(Corrupt)
+                } else {
+                    Ok(Step::Used(used))
+                };
+            }
+            if self.sink.budget == 0 {
+                return Ok(Step::Used(used));
+            }
+            let Ok((result, produced)) = self.call(data, &mut used) else {
+                return stopped(&mut self.sink, used);
+            };
+            match result {
+                BrotliResult::ResultSuccess => self.ended = true,
+                // All of `data` is in. Output the call had no room for waits
+                // for the next step.
+                BrotliResult::NeedsMoreInput => return Ok(Step::Used(used)),
+                BrotliResult::NeedsMoreOutput if produced > 0 => {}
+                // Out of room without any output is no progress.
+                BrotliResult::NeedsMoreOutput | BrotliResult::ResultFailure => {
+                    return Err(Corrupt);
+                }
+            }
+        }
+    }
+
+    /// Hands over the output still held, within the step's budget, until
+    /// the end marker. It gives `false` while output is still held. A stream
+    /// with nothing left to give and no end marker is cut short.
+    fn drain(&mut self) -> Result<bool, Corrupt> {
+        let mut used = 0;
+        loop {
+            if self.ended {
+                return Ok(true);
+            }
+            if self.sink.budget == 0 {
+                return Ok(false);
+            }
+            let Ok((result, produced)) = self.call(&[], &mut used) else {
+                return stopped(&mut self.sink, 0).map(|step| step == Step::Full);
+            };
+            match result {
+                BrotliResult::ResultSuccess => self.ended = true,
+                BrotliResult::NeedsMoreInput | BrotliResult::NeedsMoreOutput if produced > 0 => {}
+                _ => return Err(Corrupt),
+            }
+        }
+    }
+}
+
+enum Inner {
+    Gzip(Gzip),
+    Brotli(Brotli),
+}
+
+/// A body being decoded under a size limit, a step at a time.
+pub(crate) struct Decoder {
+    inner: Inner,
+    /// The most output one step hands to the sink.
+    step: usize,
+}
+
+impl Decoder {
+    /// A decoder for `encoding` that keeps at most `limit` decoded bytes,
+    /// with steps of [`STEP_OUTPUT_BYTES`]. Brotli's large-window extension
+    /// is refused, so its window is at most the 16 MiB RFC 7932 allows.
+    pub(crate) fn new(encoding: Encoding, limit: u64) -> Self {
+        Self::with_step(encoding, limit, STEP_OUTPUT_BYTES)
+    }
+
+    /// Like [`Decoder::new`], with steps of `step` bytes of output.
+    fn with_step(encoding: Encoding, limit: u64, step: usize) -> Self {
+        let sink = Sink {
+            limit,
+            ..Sink::default()
+        };
+        let inner = match encoding {
+            Encoding::Gzip => Inner::Gzip(Gzip {
+                decoder: Box::new(GzDecoder::new(sink)),
+                members: 1,
+            }),
+            Encoding::Brotli => Inner::Brotli(Brotli::new(sink)),
+        };
+        Self { inner, step }
+    }
+
+    /// Runs one step over `data`: decodes from its start until the step has
+    /// handed over its budget of output, `data` is used up, or output passes
+    /// the limit. It gives how much of `data` it used, or [`Step::Full`]
+    /// once output passed the limit: exactly `limit` bytes are then kept,
+    /// and nothing more should be decoded.
+    pub(crate) fn step(&mut self, data: &[u8]) -> Result<Step, Corrupt> {
+        let before = self.sink().kept.len();
+        self.open();
+        let stepped = match &mut self.inner {
+            Inner::Gzip(gzip) => gzip.step(data),
+            Inner::Brotli(brotli) => brotli.step(data),
+        };
+        self.close();
+        // A step that uses none of the input and hands over nothing would be
+        // run again on the same input forever.
+        if stepped == Ok(Step::Used(0)) && !data.is_empty() && self.sink().kept.len() == before {
+            return Err(Corrupt);
+        }
+        stepped
+    }
+
+    /// Runs one step toward the end of the stream, once all its input is in.
+    /// It gives `true` once the stream has ended and been checked, or output
+    /// passed the limit, and `false` while the decoder still holds output
+    /// for another step. Unless the limit was passed, the gzip checksum and
+    /// length, or the brotli end marker, are checked, so a stream that is
+    /// cut short is `Corrupt`.
+    pub(crate) fn drain(&mut self) -> Result<bool, Corrupt> {
+        if self.sink().full {
+            return Ok(true);
+        }
+        let before = self.sink().kept.len();
+        self.open();
+        let drained = match &mut self.inner {
+            Inner::Gzip(gzip) => gzip.drain(),
+            Inner::Brotli(brotli) => brotli.drain(),
+        };
+        self.close();
+        // A drain that hands over nothing and doesn't end would run forever.
+        if drained == Ok(false) && self.sink().kept.len() == before {
+            return Err(Corrupt);
+        }
+        drained
+    }
+
+    /// Ends the stream, and gives the decoded bytes and whether any were
+    /// dropped. It drains what is left first, all at once, so after
+    /// [`drain`](Self::drain) gave `true` it decodes nothing. The checks are
+    /// `drain`'s.
+    pub(crate) fn finish(mut self) -> Result<(Vec<u8>, bool), Corrupt> {
+        while !self.drain()? {}
+        let sink = self.sink_mut();
+        Ok((std::mem::take(&mut sink.kept), sink.full))
+    }
+
+    /// Starts a step: the sink takes up to the step's budget.
+    fn open(&mut self) {
+        let step = self.step;
+        self.sink_mut().budget = step;
+    }
+
+    /// Ends a step: the sink takes nothing until the next one.
+    fn close(&mut self) {
+        let sink = self.sink_mut();
+        sink.budget = 0;
+        sink.spent = false;
+    }
+
+    fn sink(&self) -> &Sink {
         match &self.inner {
-            Inner::Gzip(decoder, _) => decoder.get_ref(),
-            Inner::Brotli(decoder) => decoder.get_ref(),
+            Inner::Gzip(gzip) => gzip.sink(),
+            Inner::Brotli(brotli) => &brotli.sink,
         }
     }
 
     fn sink_mut(&mut self) -> &mut Sink {
         match &mut self.inner {
-            Inner::Gzip(decoder, _) => decoder.get_mut(),
-            Inner::Brotli(decoder) => decoder.get_mut(),
+            Inner::Gzip(gzip) => gzip.sink_mut(),
+            Inner::Brotli(brotli) => &mut brotli.sink,
         }
     }
 }
@@ -257,11 +480,59 @@ mod tests {
         encoder.finish().unwrap()
     }
 
-    /// Decodes `data` in one write under `limit`.
+    /// Steps through all of `data`, as one frame. It gives `true` once
+    /// output passed the limit.
+    fn write(decoder: &mut Decoder, data: &[u8]) -> Result<bool, Corrupt> {
+        let mut rest = data;
+        while !rest.is_empty() {
+            match decoder.step(rest)? {
+                Step::Used(used) => rest = &rest[used..],
+                Step::Full => return Ok(true),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Decodes `data` as one frame under `limit`.
     fn decode(encoding: Encoding, data: &[u8], limit: u64) -> Result<(Vec<u8>, bool), Corrupt> {
         let mut decoder = Decoder::new(encoding, limit);
-        decoder.write(data)?;
+        write(&mut decoder, data)?;
         decoder.finish()
+    }
+
+    /// Decodes `frames` with steps of `step` bytes, then drains, and gives
+    /// the output and how much each step handed over, the drain's included.
+    fn stepped(
+        encoding: Encoding,
+        frames: &[&[u8]],
+        limit: u64,
+        step: usize,
+    ) -> Result<(Vec<u8>, Vec<usize>), Corrupt> {
+        let mut decoder = Decoder::with_step(encoding, limit, step);
+        let mut sizes = Vec::new();
+        let mut held = 0;
+        let mut grown = |decoder: &Decoder| {
+            let now = decoder.sink().kept.len();
+            sizes.push(now - held);
+            held = now;
+        };
+        for frame in frames {
+            let mut rest = *frame;
+            while !rest.is_empty() {
+                let Step::Used(used) = decoder.step(rest)? else {
+                    panic!("the limit is never reached here")
+                };
+                grown(&decoder);
+                rest = &rest[used..];
+            }
+        }
+        while !decoder.drain()? {
+            grown(&decoder);
+        }
+        grown(&decoder);
+        let (kept, truncated) = decoder.finish()?;
+        assert!(!truncated);
+        Ok((kept, sizes))
     }
 
     fn headers(values: &[&str]) -> HeaderMap {
@@ -303,7 +574,7 @@ mod tests {
     fn gzip_fed_one_byte_at_a_time() {
         let mut decoder = Decoder::new(Encoding::Gzip, 10);
         for byte in gzip(b"hello") {
-            assert_eq!(decoder.write(&[byte]), Ok(false));
+            assert_eq!(write(&mut decoder, &[byte]), Ok(false));
         }
         assert_eq!(decoder.finish(), Ok((b"hello".to_vec(), false)));
     }
@@ -312,8 +583,8 @@ mod tests {
     fn gzip_past_the_limit_is_cut() {
         let plain: Vec<u8> = (0..100u8).collect();
         let mut decoder = Decoder::new(Encoding::Gzip, 10);
-        // The write whose output passes the limit says so.
-        assert_eq!(decoder.write(&gzip(&plain)), Ok(true));
+        // The frame whose output passes the limit says so.
+        assert_eq!(write(&mut decoder, &gzip(&plain)), Ok(true));
         assert_eq!(decoder.finish(), Ok((plain[..10].to_vec(), true)));
     }
 
@@ -326,7 +597,7 @@ mod tests {
         let mut full = false;
         for chunk in bomb.chunks(1024) {
             pushed += chunk.len();
-            if decoder.write(chunk) == Ok(true) {
+            if write(&mut decoder, chunk) == Ok(true) {
                 full = true;
                 break;
             }
@@ -360,7 +631,7 @@ mod tests {
         let stream = gzip(b"hello, hello, hello");
         let cut = &stream[..stream.len() / 2];
         let mut decoder = Decoder::new(Encoding::Gzip, 100);
-        assert_eq!(decoder.write(cut), Ok(false));
+        assert_eq!(write(&mut decoder, cut), Ok(false));
         assert_eq!(decoder.finish(), Err(Corrupt));
     }
 
@@ -387,7 +658,7 @@ mod tests {
         let mut decoder = Decoder::new(Encoding::Gzip, 10);
         let mut results = Vec::new();
         for _ in 0..1025 {
-            results.push(decoder.write(&empty));
+            results.push(write(&mut decoder, &empty));
         }
         assert!(results[..1024].iter().all(|r| *r == Ok(false)));
         assert_eq!(results[1024], Err(Corrupt));
@@ -434,7 +705,7 @@ mod tests {
         let stream = gzip(&plain);
         let mut decoder = Decoder::new(Encoding::Gzip, LIMIT as u64);
         for chunk in stream.chunks(7) {
-            if decoder.write(chunk) == Ok(true) {
+            if write(&mut decoder, chunk) == Ok(true) {
                 break;
             }
         }
@@ -451,7 +722,7 @@ mod tests {
             Ok((b"hello world".to_vec(), false))
         );
         let mut decoder = Decoder::new(Encoding::Brotli, 5);
-        assert_eq!(decoder.write(&HELLO_WORLD_BR), Ok(true));
+        assert_eq!(write(&mut decoder, &HELLO_WORLD_BR), Ok(true));
         assert_eq!(decoder.finish(), Ok((b"hello".to_vec(), true)));
         assert_eq!(
             decode(Encoding::Brotli, b"this is not brotli", 100),
@@ -475,5 +746,63 @@ mod tests {
             decode(Encoding::Brotli, &HELLO_LARGE_WINDOW_BR, 100),
             Err(Corrupt)
         );
+    }
+
+    #[test]
+    fn a_gzip_step_hands_over_at_most_its_budget() {
+        const STEP: usize = 4096;
+        let plain = vec![0; 1 << 20];
+        let stream = gzip(&plain);
+        let (kept, sizes) = stepped(Encoding::Gzip, &[&stream], 2 << 20, STEP).unwrap();
+        assert_eq!(kept, plain);
+        assert!(sizes.iter().all(|&size| size <= STEP), "{sizes:?}");
+        // The whole stream is one frame, so only steps split its output.
+        assert!(sizes.len() >= plain.len() / STEP, "{} steps", sizes.len());
+    }
+
+    #[test]
+    fn a_brotli_step_hands_over_at_most_its_budget() {
+        const STEP: usize = 3;
+        let (kept, sizes) = stepped(Encoding::Brotli, &[&HELLO_WORLD_BR], 100, STEP).unwrap();
+        assert_eq!(kept, b"hello world");
+        assert!(sizes.iter().all(|&size| size <= STEP), "{sizes:?}");
+        // Its 11 bytes come out over at least 4 steps, after all 15 input
+        // bytes are in, so some come out in the drain.
+        let giving = sizes.iter().filter(|&&size| size > 0).count();
+        assert!(giving >= 4, "{sizes:?}");
+    }
+
+    #[test]
+    fn many_small_steps_give_the_same_bytes_as_one() {
+        let plain: Vec<u8> = (0..300_000u32).map(|n| (n / 7 % 13) as u8).collect();
+        let mut stream = gzip(&plain);
+        stream.extend(gzip(b"and a second member"));
+        let mut want = plain.clone();
+        want.extend(b"and a second member");
+        let frames: Vec<&[u8]> = stream.chunks(7).collect();
+        let (small, sizes) = stepped(Encoding::Gzip, &frames, 1 << 20, 1000).unwrap();
+        assert_eq!(small, want);
+        assert!(sizes.iter().all(|&size| size <= 1000));
+        assert_eq!(decode(Encoding::Gzip, &stream, 1 << 20), Ok((want, false)));
+
+        let frames: Vec<&[u8]> = HELLO_WORLD_BR.chunks(1).collect();
+        let (small, _) = stepped(Encoding::Brotli, &frames, 100, 1).unwrap();
+        assert_eq!(small, b"hello world");
+    }
+
+    #[test]
+    fn stepped_decoding_keeps_its_checks() {
+        // Cut short, a stream fails in the drain however small the steps.
+        let stream = gzip(&[5; 10_000]);
+        let cut = &stream[..stream.len() - 1];
+        assert_eq!(stepped(Encoding::Gzip, &[cut], 1 << 20, 100), Err(Corrupt));
+        assert_eq!(
+            stepped(Encoding::Brotli, &[&HELLO_WORLD_BR[..14]], 100, 2),
+            Err(Corrupt)
+        );
+        // Bytes after the end are still found.
+        let mut br = HELLO_WORLD_BR.to_vec();
+        br.push(0);
+        assert_eq!(stepped(Encoding::Brotli, &[&br], 100, 2), Err(Corrupt));
     }
 }
