@@ -264,7 +264,7 @@
     - **Headers:**
       - A request sets at most 256 header names of its own, checked by `vush validate` and by `send`.
       - Headers Vush adds never count. That reverses P2.4's rule for the jar's `Cookie`.
-      - Response heads are bounded at 100 headers and about 400 KB over HTTP/1.1, and 16 KiB over HTTP/2. A head over them is `protocol`, with "the response head is too large" where hyper can tell.
+      - Response heads are bounded at 100 headers over HTTP/1.1, where a head of up to 408 KiB always fits hyper's read buffer and a longer one can pass when one read brings it in. Over HTTP/2 they are bounded at 16 KiB. A head over them is `protocol`, with "the response head is too large" where hyper can tell.
     - **Failure texts:**
       - Every failure text is a constant in `vush-http`'s new `text` module.
       - A canary test proves that no URL, header, body or cookie value reaches a failure text or `Debug` output.
@@ -274,7 +274,7 @@
   - [x] Read to the end, keep the limit (plan Task 4).
   - [x] Opt-in decoding with `http.decompress` (plan Task 5).
   - [x] The canary test, and the docs (plan Task 6).
-  - [ ] Codex review fixes (decided 2026-11-22):
+  - [x] Codex review fixes (decided 2026-11-22):
     - Decode in steps of at most 64 KiB of output that yield to Tokio, so the hop's timeout covers decoding, and a hop past its deadline never ends `Ok`.
     - Correct the HTTP/1.1 head-limit docs: up to 408 KiB always passes, and hyper can accept a longer head that arrives in one read.
     - Say which compression checks stop once the limit cuts a body.
@@ -283,8 +283,6 @@
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
   - From P2.3: a hop that waits on a shared HTTP/2 connect that fails still reports `connect` in `connect` ("the shared connection attempt failed"). Decide whether to pass the connect's real kind, such as `tls`, on to the waiting hops.
   - From P2.2: tests never ask a real resolver, so a `dns` failure from a real cause needs a controlled one. Decide whether the connector's private resolver seam becomes public.
-  - From P2.5: the HTTP/1.1 head limit is documented as about 400 KB. hyper reads into spare capacity that doubles, so a 600 KB head passes and an 840 KB head fails. Correct the wording in `docs/config-schema.md`, `ARCHITECTURE_NOTES.md` and the `HEAD_BUFFER_BYTES` comment, or pin the real edge.
-
 ## Phase 3 Execution Checklist — Scenario interpreter
 
 - [ ] P3.1 Implement ordered step execution and fail-fast per-iteration policy.
