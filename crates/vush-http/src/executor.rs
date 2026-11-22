@@ -202,7 +202,8 @@ pub(crate) enum Transport {
 ///   sharing, because sharing a pool never shares cookies.
 /// - `timeout` and `redirects` are core's. Core passes the time left to each
 ///   `send`, and follows redirects itself. A hop that ends at or after its
-///   deadline fails as `timeout`, even when its body was all read.
+///   deadline fails as `timeout`, even when its body was all read or it
+///   failed another way on the way.
 /// - `tls.ca_file` names a PEM file, resolved against the test file's
 ///   directory, whose certificates are trusted as well as the system's
 ///   roots. It is read once, while building. `tls.insecure` accepts any
@@ -320,9 +321,9 @@ impl Executor {
     /// Runs the rest of the hop until the hop's deadline, and reports a
     /// timeout in the stage the marker shows. The hop yields between decoding
     /// steps, so the deadline can fire while a body decodes. A hop that ends
-    /// `Ok` at or after its deadline still ran out of time, and reports a
-    /// timeout too (see [`settle`]). With no deadline, the hop never runs
-    /// out of time.
+    /// at or after its deadline, with `Ok` or a failure, still ran out of
+    /// time, and reports a timeout too (see [`settle`]). With no deadline,
+    /// the hop never runs out of time.
     async fn exchange(
         &self,
         client: &Client<Connector, CountingBody>,
@@ -619,10 +620,11 @@ fn wire_request(prepared: Prepared, sent: Arc<AtomicU64>) -> (Request<CountingBo
     (request, prepared.target)
 }
 
-/// The outcome of a hop that ended at `now`. An `Ok` reached at or after the
-/// `deadline` ran out of time all the same, so it becomes a timeout in
-/// `stage`, the stage the hop was in. A failure keeps its own kind, and with
-/// no deadline nothing changes.
+/// The outcome of a hop that ended at `now`. Any outcome reached at or after
+/// the `deadline`, `Ok` or failure, ran out of time all the same, so it
+/// becomes a timeout in `stage`, the stage the hop was in, whatever stage or
+/// kind a failure had. Before the deadline, and with no deadline, nothing
+/// changes.
 fn settle(
     outcome: Result<HttpResponse, Failure>,
     deadline: Option<Instant>,
@@ -630,7 +632,7 @@ fn settle(
     stage: FailureStage,
 ) -> Result<HttpResponse, Failure> {
     match outcome {
-        Ok(_) if deadline.is_some_and(|deadline| now >= deadline) => Err(timeout(stage)),
+        _ if deadline.is_some_and(|deadline| now >= deadline) => Err(timeout(stage)),
         outcome => outcome,
     }
 }
@@ -1076,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ok_at_or_after_the_deadline_is_a_timeout() {
+    fn an_outcome_at_or_after_the_deadline_is_a_timeout() {
         let ok = || {
             Ok(HttpResponse {
                 status: 200,
@@ -1089,20 +1091,40 @@ mod tests {
         let now = Instant::now();
         let later = now + Duration::from_secs(1);
         let body = FailureStage::Body;
-        assert_eq!(settle(ok(), Some(later), now, body), ok(), "before");
-        assert_eq!(settle(ok(), Some(now), now, body), Err(timeout(body)), "at");
-        assert_eq!(
-            settle(ok(), Some(now), later, FailureStage::Headers),
-            Err(timeout(FailureStage::Headers)),
-            "after, in the stage given"
-        );
+        let headers = FailureStage::Headers;
         let protocol = failure(FailureKind::Protocol, body);
+        assert_eq!(settle(ok(), Some(later), now, body), ok(), "ok before");
         assert_eq!(
-            settle(Err(protocol), Some(now), later, body),
+            settle(Err(protocol), Some(later), now, body),
             Err(protocol),
-            "a failure keeps its kind"
+            "err before"
         );
-        assert_eq!(settle(ok(), None, later, body), ok(), "no deadline");
+        assert_eq!(
+            settle(ok(), Some(now), now, body),
+            Err(timeout(body)),
+            "ok at"
+        );
+        assert_eq!(
+            settle(Err(protocol), Some(now), now, body),
+            Err(timeout(body)),
+            "err at"
+        );
+        assert_eq!(
+            settle(ok(), Some(now), later, headers),
+            Err(timeout(headers)),
+            "ok after, in the stage given"
+        );
+        assert_eq!(
+            settle(Err(protocol), Some(now), later, headers),
+            Err(timeout(headers)),
+            "err after, in the stage given, not the error's own"
+        );
+        assert_eq!(settle(ok(), None, later, body), ok(), "ok, no deadline");
+        assert_eq!(
+            settle(Err(protocol), None, later, body),
+            Err(protocol),
+            "err, no deadline"
+        );
     }
 
     #[test]
