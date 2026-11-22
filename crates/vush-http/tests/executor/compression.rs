@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -26,7 +27,7 @@ use vush_http::Executor;
 
 use crate::common::{
     BoxFuture, MIB, NO_DIR, failure, get, header_values, method, pairs, reply, response, send,
-    send_within, settings, spawn_auto, spawn_raw,
+    send_within, settings, spawn_auto, spawn_raw, write_all,
 };
 
 const HELLO: &[u8] = b"hello world";
@@ -310,52 +311,46 @@ async fn a_head_response_labelled_gzip_is_empty() {
     assert!(!got.truncated);
 }
 
-/// How many bytes the gzip body of [`stalled_gzip`] holds, decoded.
-const STALLED_DECODED: usize = 4 << 20;
+/// How many bytes the gzip body of [`stalled_gzip`] holds, decoded: 1 MiB,
+/// which is 16 decode steps.
+const STALLED_DECODED: usize = 1 << 20;
 
-/// The gzip stream [`stalled_gzip`] sends before it stalls.
-fn stalled_stream() -> Vec<u8> {
-    gzip(&vec![0; STALLED_DECODED])
+/// The gzip stream [`stalled_gzip`] sends before it stalls, compressed once.
+fn stalled_stream() -> &'static [u8] {
+    static STREAM: OnceLock<Vec<u8>> = OnceLock::new();
+    STREAM.get_or_init(|| gzip(&vec![0; STALLED_DECODED]))
 }
 
 /// Answers with a head that says `gzip` and a body of a billion bytes, sends
-/// a gzip stream that decodes to several MiB, then holds the connection
-/// open without ending the body.
+/// a gzip stream that decodes to 1 MiB, then holds the connection open
+/// without ending the body.
 fn stalled_gzip(stream: TcpStream) -> BoxFuture {
     Box::pin(async move {
         if !read_head(&stream).await {
             return;
         }
-        let mut reply =
-            b"HTTP/1.1 200 OK\r\ncontent-encoding: gzip\r\ncontent-length: 1000000000\r\n\r\n"
-                .to_vec();
-        reply.extend_from_slice(&stalled_stream());
-        let mut rest: &[u8] = &reply;
-        while !rest.is_empty() {
-            if stream.writable().await.is_err() {
-                return;
-            }
-            match stream.try_write(rest) {
-                Ok(written) => rest = &rest[written..],
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(_) => return,
-            }
-        }
+        write_all(
+            &stream,
+            b"HTTP/1.1 200 OK\r\ncontent-encoding: gzip\r\ncontent-length: 1000000000\r\n\r\n",
+        )
+        .await;
+        write_all(&stream, stalled_stream()).await;
         pending::<()>().await;
     })
 }
 
-/// Decoding is covered by the hop's timeout, and a body the deadline cuts
-/// short is a `timeout` in `body`, however fast the machine decodes. The
+/// Pins that a decoded body the deadline cuts short is a `timeout` in
+/// `body`, and that every compressed byte sent counts as received. The
 /// server sends a whole gzip stream and then stalls, so the hop can only end
-/// at its deadline, and every compressed byte sent counts as received.
+/// at its deadline. It doesn't show that decoding itself is preempted: the
+/// unit test of `settle` pins the rule for an outcome reached late.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_decoded_body_cut_by_the_deadline_is_a_timeout() {
     let addr = spawn_raw(stalled_gzip).await;
     let hop = send_within(
         &decoding(HttpVersion::Http1, true),
         &get(format!("http://{addr}/")),
-        Duration::from_millis(300),
+        Duration::from_secs(2),
     )
     .await;
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Body));
