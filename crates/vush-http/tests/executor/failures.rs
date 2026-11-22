@@ -12,10 +12,10 @@ use vush_http::Executor;
 
 use crate::common::{
     CountingListener, LOCALHOST, MIB, NO_DIR, TestCa, close_after_head, echo, executor, failure,
-    garbage_status, get, h2_reset_after_one_frame, hold, http10_to_close, hundred_and_one_headers,
-    hundred_headers, limited, malformed_chunk, pairs, refused_port, reply, send, send_within,
-    silent_after_head, spawn_auto, spawn_raw, spawn_tls, stalled_body, trusting,
-    two_mib_promised_then_stall,
+    garbage_status, get, h2_reset_after_one_frame, head_of_1_mb, head_of_400_kb, hold,
+    http10_to_close, hundred_and_one_headers, hundred_headers, limited, malformed_chunk, pairs,
+    refused_port, reply, send, send_within, silent_after_head, spawn_auto, spawn_raw, spawn_tls,
+    stalled_body, trusting, two_mib_promised_then_stall,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -165,7 +165,9 @@ async fn a_stall_past_the_limit_times_out_in_body() {
     )
     .await;
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Body));
-    assert!(hop.sizes.received >= 1024, "{}", hop.sizes.received);
+    // More than the kept bytes: the body counts what was read, not what
+    // was kept.
+    assert!(hop.sizes.received > 1024, "{}", hop.sizes.received);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -179,7 +181,8 @@ async fn an_http10_body_past_the_limit_reads_to_close() {
     let got = crate::common::response(&hop);
     assert_eq!(got.body.len(), 1024);
     assert!(got.truncated);
-    assert_eq!(hop.sizes.received, 4096);
+    // All 64 writes of 4096 are read, up to the close.
+    assert_eq!(hop.sizes.received, 64 * 4096);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -394,6 +397,32 @@ async fn a_head_of_100_headers_passes_and_101_is_too_large() {
     assert_eq!(response.status, 200);
 
     let addr = spawn_raw(hundred_and_one_headers).await;
+    let hop = send(&executor, &get(format!("http://{addr}/"))).await;
+    assert_eq!(
+        failure(&hop),
+        (FailureKind::Protocol, FailureStage::Headers)
+    );
+    let Err(failed) = &hop.outcome else {
+        unreachable!()
+    };
+    assert_eq!(failed.message, "the response head is too large");
+}
+
+/// The head buffer is 417,792 bytes. hyper reads into the buffer's spare
+/// capacity, which grows by doubling, so the edge is fuzzy: measured here, a
+/// 600 KB head still passes and an 840 KB one is too large. The two sizes
+/// are kept far apart, one under the limit and one well past that fuzz.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_of_400_kb_passes_and_1_mb_is_too_large() {
+    let executor = executor(HttpVersion::Http1);
+    let addr = spawn_raw(head_of_400_kb).await;
+    let hop = send(&executor, &get(format!("http://{addr}/"))).await;
+    let Ok(response) = &hop.outcome else {
+        panic!("a 400 KB head should pass: {:?}", hop.outcome)
+    };
+    assert_eq!(response.status, 200);
+
+    let addr = spawn_raw(head_of_1_mb).await;
     let hop = send(&executor, &get(format!("http://{addr}/"))).await;
     assert_eq!(
         failure(&hop),
