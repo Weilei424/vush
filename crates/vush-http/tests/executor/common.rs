@@ -46,6 +46,19 @@ use vush_http::Executor;
 
 pub const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const MIB: u64 = 1_048_576;
+
+// ---- One thread for reuse ----
+//
+// Why a test that asserts two sequential HTTP/1.1 hops share a connection
+// runs on `#[tokio::test(flavor = "current_thread")]`. hyper-util returns
+// an HTTP/1.1 connection to its pool from a spawned task, once the
+// connection is ready again. The next request races a pool checkout
+// against a brand-new connect, and on a multi-thread runtime under load a
+// loopback connect can win, so the two hops get different connections. On
+// one thread, the spawned task runs before the next request starts. HTTP/2
+// reuse is not affected, because hyper-util shares an HTTP/2 connection at
+// once.
+
 /// The hop timeout of every test that doesn't state its own.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 /// The test directory of executors that set no `tls.ca_file`.
