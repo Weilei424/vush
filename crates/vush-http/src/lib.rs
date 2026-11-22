@@ -8,9 +8,11 @@
 //! bounds, and the per-user session, which holds the user's cookie jar. A
 //! body is read to the end with at most `max_response_size` kept, and
 //! `decompress` decodes gzip and br within the same limit. Decoding runs in
-//! steps of at most 64 KiB of output, with a yield to the runtime after
-//! each, so the hop's timeout covers it and other tasks keep running. Every
-//! failure text is a constant in one module. It must not schedule work or
+//! steps, with a yield to the runtime after each, so the hop's timeout
+//! covers it and other tasks keep running. A step hands back at most 64 KiB
+//! of output, but a br step can decode up to the stream's window, at most
+//! 16 MiB, first, because brotli writes its ring buffer out only when it
+//! fills. Every failure text is a constant in one module. It must not schedule work or
 //! own global counters: scheduling belongs to `vush-core`, and aggregation
 //! to the metrics layer.
 //!
