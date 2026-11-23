@@ -11,7 +11,8 @@ use vush_core::protocol::{FailureKind, FailureStage, Outcome};
 use vush_core::runner::{StepPolicy, Timer, run_step};
 
 use crate::common::{
-    Echo, ReplyFuture, TIMEOUT, echo, executor, get, refused_port, reply, spawn_h1,
+    Echo, ReplyFuture, TIMEOUT, TestCa, echo, executor, get, refused_port, reply, spawn_gated_h1,
+    spawn_h1, trusting,
 };
 
 /// The real clock for `run_step`'s backoff.
@@ -35,28 +36,32 @@ fn policy(backoff: Duration) -> StepPolicy {
     }
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_503_then_a_200_takes_two_attempts_on_one_session() {
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = seen.clone();
-    let addr = spawn_h1(move |_request| {
-        let status = if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-            503
-        } else {
-            200
-        };
-        std::future::ready(reply(status, &[], "x"))
-    })
+    let ca = TestCa::generate();
+    let addr = spawn_gated_h1(
+        move |_request| {
+            let status = if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                503
+            } else {
+                200
+            };
+            std::future::ready(reply(status, &[], "x"))
+        },
+        &ca,
+        1,
+    )
     .await;
-    let executor = executor(HttpVersion::Auto);
+    let executor = trusting(&ca, HttpVersion::Auto);
     let mut session = executor.new_session();
 
     let result = run_step(
         &executor,
         &TokioSleep,
         &mut session,
-        get(format!("http://{addr}/")),
+        get(format!("https://{addr}/")),
         &policy(Duration::from_millis(10)),
     )
     .await;
