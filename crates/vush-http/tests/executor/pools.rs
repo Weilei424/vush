@@ -272,10 +272,10 @@ async fn a_vu_scope_never_joins_the_shared_pool() {
     );
     let shared = send(executors.scenario(0).unwrap(), &request).await;
     response(&shared);
-    let file = send(executors.file(), &request).await;
-    response(&file);
     let user = send(executors.scenario(1).unwrap(), &request).await;
     response(&user);
+    let file = send(executors.file(), &request).await;
+    response(&file);
     assert!(shared.connection.is_some());
     assert_eq!(file.connection, shared.connection);
     assert_ne!(user.connection, shared.connection);
