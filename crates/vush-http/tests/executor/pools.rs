@@ -16,13 +16,13 @@ use vush_http::{BuildError, CaFileProblem, Executor, Executors, Scope, Session};
 
 use crate::common::{
     CountingListener, LOCALHOST, MIB, NO_DIR, TIMEOUT, TempDir, TestCa, echo, failure, get, plan,
-    response, send, send_within, spawn_h1, spawn_tls,
+    response, send, send_within, spawn_gated_h1, spawn_h1, spawn_tls,
 };
 
 const FOREIGN: &str = "the session belongs to another executor";
 const H2_AND_H1: &[&[u8]] = &[b"h2", b"http/1.1"];
 
-fn pooled(pool: PoolScope) -> Executor {
+fn pooled(pool: PoolScope, roots: RootCertStore) -> Executor {
     let settings = HttpSettings {
         pool,
         ..crate::common::settings(vush_core::plan::HttpVersion::Auto, MIB)
@@ -31,7 +31,7 @@ fn pooled(pool: PoolScope) -> Executor {
         &settings,
         &ResourceLimits::default(),
         Path::new(NO_DIR),
-        RootCertStore::empty(),
+        roots,
     )
     .unwrap()
 }
@@ -45,12 +45,12 @@ async fn send_on(
     executor.send(session, request, timeout).await
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn vu_sessions_have_their_own_connections() {
-    let addr = spawn_h1(echo).await;
-    let request = get(format!("http://{addr}/"));
-    let executor = pooled(PoolScope::Vu);
+    let ca = TestCa::generate();
+    let addr = spawn_gated_h1(echo, &ca, 2).await;
+    let request = get(format!("https://{addr}/"));
+    let executor = pooled(PoolScope::Vu, ca.roots());
     let mut one = executor.new_session();
     let mut two = executor.new_session();
 
@@ -70,13 +70,13 @@ async fn vu_sessions_have_their_own_connections() {
     assert_eq!(first.connection, copied.connection);
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn sessions_of_a_pooled_executor_share_its_pool() {
+    let ca = TestCa::generate();
     for pool in [PoolScope::Shared, PoolScope::Scenario] {
-        let addr = spawn_h1(echo).await;
-        let request = get(format!("http://{addr}/"));
-        let executor = pooled(pool);
+        let addr = spawn_gated_h1(echo, &ca, 1).await;
+        let request = get(format!("https://{addr}/"));
+        let executor = pooled(pool, ca.roots());
         let mut one = executor.new_session();
         let mut two = executor.new_session();
         let first = send_on(&executor, &mut one, &request, TIMEOUT).await;
@@ -93,7 +93,10 @@ async fn a_session_from_another_executor_is_refused() {
     for pool in [PoolScope::Shared, PoolScope::Vu] {
         let listener = CountingListener::bind().await;
         let request = get(format!("http://{}/", listener.addr));
-        let (a, b) = (pooled(pool), pooled(pool));
+        let (a, b) = (
+            pooled(pool, RootCertStore::empty()),
+            pooled(pool, RootCertStore::empty()),
+        );
         let mut foreign = b.new_session();
         let hop = send_on(&a, &mut foreign, &request, TIMEOUT).await;
         assert_eq!(
@@ -112,7 +115,10 @@ async fn a_session_from_another_executor_is_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_foreign_session_is_refused_before_the_timeout_check() {
     let request = get("http://127.0.0.1:1/".to_owned());
-    let (a, b) = (pooled(PoolScope::Shared), pooled(PoolScope::Shared));
+    let (a, b) = (
+        pooled(PoolScope::Shared, RootCertStore::empty()),
+        pooled(PoolScope::Shared, RootCertStore::empty()),
+    );
     let mut foreign = b.new_session();
     let hop = a.send(&mut foreign, &request, Duration::ZERO).await;
     assert_eq!(
@@ -126,16 +132,17 @@ async fn a_foreign_session_is_refused_before_the_timeout_check() {
 
 #[test]
 fn vu_sessions_build_outside_a_runtime() {
-    let executor = pooled(PoolScope::Vu);
+    let executor = pooled(PoolScope::Vu, RootCertStore::empty());
     let session = executor.new_session();
     let _copy = session.clone();
 }
 
 // ---- A plan's executors ----
 
-/// A plan's executors, trusting no certificate, for plaintext servers.
-fn built(plan: &WorkloadPlan) -> Executors {
-    Executors::with_roots(plan, Path::new(NO_DIR), RootCertStore::empty()).unwrap()
+/// A plan's executors, trusting `roots`. Plaintext callers pass an empty
+/// store.
+fn built(plan: &WorkloadPlan, roots: RootCertStore) -> Executors {
+    Executors::with_roots(plan, Path::new(NO_DIR), roots).unwrap()
 }
 
 fn pool(pool: PoolScope) -> HttpSettings {
@@ -155,13 +162,16 @@ fn tls(ca_file: Option<&str>, insecure: bool) -> HttpSettings {
     }
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn shared_scopes_with_one_profile_reuse_a_connection() {
-    let addr = spawn_h1(echo).await;
-    let request = get(format!("http://{addr}/"));
+    let ca = TestCa::generate();
+    let addr = spawn_gated_h1(echo, &ca, 1).await;
+    let request = get(format!("https://{addr}/"));
     let default = HttpSettings::default();
-    let executors = built(&plan(default.clone(), vec![default.clone(), default]));
+    let executors = built(
+        &plan(default.clone(), vec![default.clone(), default]),
+        ca.roots(),
+    );
     let mut connections = Vec::new();
     for executor in [
         executors.file(),
@@ -186,7 +196,10 @@ async fn shared_scopes_with_different_versions_do_not_share() {
         ..HttpSettings::default()
     };
     let default = HttpSettings::default();
-    let executors = built(&plan(default.clone(), vec![default, http1]));
+    let executors = built(
+        &plan(default.clone(), vec![default, http1]),
+        RootCertStore::empty(),
+    );
     let auto = send(executors.scenario(0).unwrap(), &request).await;
     response(&auto);
     let only_http1 = send(executors.scenario(1).unwrap(), &request).await;
@@ -220,13 +233,13 @@ async fn shared_pools_keep_trust_apart() {
     }
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn scenario_pools_are_their_own() {
-    let addr = spawn_h1(echo).await;
-    let request = get(format!("http://{addr}/"));
+    let ca = TestCa::generate();
+    let addr = spawn_gated_h1(echo, &ca, 3).await;
+    let request = get(format!("https://{addr}/"));
     let file = pool(PoolScope::Scenario);
-    let executors = built(&plan(file.clone(), vec![file.clone(), file]));
+    let executors = built(&plan(file.clone(), vec![file.clone(), file]), ca.roots());
     let mut connections = Vec::new();
     for executor in [
         executors.file(),
@@ -247,13 +260,16 @@ async fn scenario_pools_are_their_own() {
     assert_eq!(again.connection, connections[1]);
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_vu_scope_never_joins_the_shared_pool() {
-    let addr = spawn_h1(echo).await;
-    let request = get(format!("http://{addr}/"));
+    let ca = TestCa::generate();
+    let addr = spawn_gated_h1(echo, &ca, 2).await;
+    let request = get(format!("https://{addr}/"));
     let default = HttpSettings::default();
-    let executors = built(&plan(default.clone(), vec![default, pool(PoolScope::Vu)]));
+    let executors = built(
+        &plan(default.clone(), vec![default, pool(PoolScope::Vu)]),
+        ca.roots(),
+    );
     let shared = send(executors.scenario(0).unwrap(), &request).await;
     response(&shared);
     let file = send(executors.file(), &request).await;
@@ -357,7 +373,10 @@ async fn background_connects_stop_at_the_pool_limit() {
         timeout: Duration::from_millis(200),
         ..HttpSettings::default()
     };
-    let executors = built(&plan(quick.clone(), vec![quick.clone(), quick]));
+    let executors = built(
+        &plan(quick.clone(), vec![quick.clone(), quick]),
+        RootCertStore::empty(),
+    );
     // The kernel completes the TCP connect and nobody answers the handshake.
     let hop = send_within(
         executors.scenario(0).unwrap(),
@@ -386,7 +405,10 @@ async fn a_shared_pool_takes_the_longest_limit() {
         timeout: Duration::from_secs(2),
         ..HttpSettings::default()
     };
-    let executors = built(&plan(quick.clone(), vec![quick, slow]));
+    let executors = built(
+        &plan(quick.clone(), vec![quick, slow]),
+        RootCertStore::empty(),
+    );
     // The kernel completes the TCP connect and nobody answers the handshake.
     let hop = send_within(
         executors.scenario(0).unwrap(),
@@ -415,7 +437,7 @@ fn executors_build_outside_a_runtime() {
         pool(PoolScope::Scenario),
         pool(PoolScope::Vu),
     ];
-    let executors = built(&plan(default, scenarios));
+    let executors = built(&plan(default, scenarios), RootCertStore::empty());
     for executor in [
         executors.file(),
         executors.scenario(0).unwrap(),
