@@ -286,12 +286,26 @@
     - Making the plaintext reuse tests deterministic moves to P2.6.
   - [x] Codex review round 5 fix (2026-11-22): the pool-key test pins that `decompress` doesn't change pool sharing.
   - [x] CI green on all four runners after the user pushes (plan Task 6). Run 45119738867 on `4517307`, 2026-11-22, then run 45130538974 on `1737c04` with the round 5 fix, covering every Codex fix.
-- [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
-  - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
-  - From P2.3: a hop that waits on a shared HTTP/2 connect that fails still reports `connect` in `connect` ("the shared connection attempt failed"). Decide whether to pass the connect's real kind, such as `tls`, on to the waiting hops.
-  - From P2.2: tests never ask a real resolver, so a `dns` failure from a real cause needs a controlled one. Decide whether the connector's private resolver seam becomes public.
-  - From P2.5: under load, back-to-back HTTP/1.1 hops on a multi-thread runtime can open a new connection instead of reusing the idle one. hyper-util returns it to the pool from a spawned task, and its checkout races a new connect. Decide whether Vush must guarantee HTTP/1.1 reuse, for example by owning the HTTP/1.1 pool. That is an architecture change.
-  - From P2.5 (Codex round 3): the plaintext HTTP/1.1 tests that assert reuse run on a current-thread runtime, where the pool return almost always wins the race, but not always. Make them deterministic. Over TLS, `spawn_tls` with `max_handshakes` never answers an extra handshake, so only the pooled connection can answer. Over plaintext, the kernel completes a new connect before the fixture accepts it, so a fixture can't hold it back. That needs a connector seam or a Vush-owned pool.
+- [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse (design approved 2026-11-23).
+  - Spec: `docs/superpowers/specs/2026-11-23-phase-2-6-executor-contract-suite-design.md` · Plan: `docs/superpowers/plans/2026-11-23-phase-2-6-executor-contract-suite.md` (local only).
+  - Decided 2026-11-23:
+    - **Keep hyper-util's pool** (answers P2.5's reuse note). Vush doesn't guarantee HTTP/1.1 reuse:
+      - a hop takes an idle connection if one is in its pool when it starts;
+      - otherwise it opens a new one while it waits, and takes whichever is ready first;
+      - Phase 7 measures the connections this opens (P7.2).
+    - **Hops waiting on a shared HTTP/2 connect report its real kind** (answers P2.3's note):
+      - each pool records its last failed connect;
+      - a waiting hop uses the record when it's for the hop's origin and came after the hop started;
+      - an abandoned connect, a failure in HTTP/2's own handshake, and a record another origin replaced still give `connect` with "the shared connection attempt failed".
+    - **The resolver hook stays private** (answers P2.2's note). The `dns` failure through `send`, its timing, and one plaintext reuse test live inside the crate.
+    - **Reuse tests are gated, not lucky** (answers Codex round 3's note on P2.5). The ten tests that ran on one thread switch to HTTP/1.1 over TLS, where the server answers only the handshakes the test expects.
+    - **One `contract.rs` walks the contract's eight points** (answers P2.1's note), with a failure-kind catalogue that gives every kind except `other` a real cause.
+  - [ ] Waiting hops report the shared connect's real kind (plan Task 1).
+  - [ ] Reuse tests that don't depend on scheduling (plan Task 2).
+  - [ ] The contract suite: one hop per call, finite time, cancel by drop, timing and reuse (plan Task 3).
+  - [ ] The failure-kind catalogue, the hostile responses, and `dns` through `send` (plan Task 4).
+  - [ ] CI green on all four runners after the user pushes, and Phase 2 marked complete (plan Task 5).
+
 ## Phase 3 Execution Checklist — Scenario interpreter
 
 - [ ] P3.1 Implement ordered step execution and fail-fast per-iteration policy.
@@ -344,6 +358,7 @@
 
 - [ ] P7.1 Implement reproducible controlled-target benchmark harness and reference workload fixtures.
 - [ ] P7.2 Compare to k6 with equivalent request loads, connections, protocol, hardware and warmup.
+  - From P2.6: count the connections Vush opens per VU in a back-to-back HTTP/1.1 run, against k6's. hyper-util returns an HTTP/1.1 connection to its pool from a task of its own, so a hop can open a new connection when the idle one isn't back yet. If Vush opens noticeably more than k6, reconsider owning the pool.
 - [ ] P7.3 Measure generator throughput, per-VU CPU/RSS, startup, latency accuracy and queue lag under saturation.
 - [ ] P7.4 Benchmark sleeping VUs at multiple scales, with 100K as aspirational if hardware allows.
 - [ ] P7.5 Profile and optimize measured hotspots with correctness/performance regression checks.
