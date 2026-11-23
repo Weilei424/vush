@@ -200,6 +200,12 @@ pub async fn send(executor: &Executor, request: &HttpRequest) -> HttpHop {
     send_within(executor, request, TIMEOUT).await
 }
 
+/// Polls `future` once and gives what that poll returned. The future keeps
+/// its progress, so a test can poll it again or drop it.
+pub async fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+    std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
+}
+
 pub async fn send_within(executor: &Executor, request: &HttpRequest, timeout: Duration) -> HttpHop {
     let mut session = executor.new_session();
     executor.send(&mut session, request, timeout).await
