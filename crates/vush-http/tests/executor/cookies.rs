@@ -17,7 +17,7 @@ use vush_http::{Executor, Session};
 use crate::common::{
     CountingListener, Echo, LOCALHOST, MIB, NO_DIR, ReplyFuture, TIMEOUT, TestCa,
     cookie_then_cut_body, echo, executor, failure, get, header_values, pairs, raw_cookie, reply,
-    response, settings, spawn_auto, spawn_h1, spawn_raw, spawn_tls, trusting,
+    response, settings, spawn_auto, spawn_gated_h1, spawn_h1, spawn_raw, spawn_tls, trusting,
 };
 
 const H2_AND_H1: &[&[u8]] = &[b"h2", b"http/1.1"];
@@ -143,23 +143,27 @@ async fn users_on_one_http2_connection_never_see_each_other() {
     assert_eq!(Echo::of(&hop_b).values("authorization"), ["Bearer b"]);
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn users_on_one_http1_pool_never_see_each_other() {
-    let addr = spawn_h1(cookie_routes(&[
-        ("/set-a", 200, &[("set-cookie", "who=a")]),
-        ("/set-b", 200, &[("set-cookie", "who=b")]),
-    ]))
+    let ca = TestCa::generate();
+    let addr = spawn_gated_h1(
+        cookie_routes(&[
+            ("/set-a", 200, &[("set-cookie", "who=a")]),
+            ("/set-b", 200, &[("set-cookie", "who=b")]),
+        ]),
+        &ca,
+        1,
+    )
     .await;
-    let executor = executor(HttpVersion::Http1);
+    let executor = trusting(&ca, HttpVersion::Http1);
     let mut a = executor.new_session();
     let mut b = executor.new_session();
-    response(&go(&executor, &mut a, format!("http://{addr}/set-a")).await);
-    response(&go(&executor, &mut b, format!("http://{addr}/set-b")).await);
+    response(&go(&executor, &mut a, format!("https://{addr}/set-a")).await);
+    response(&go(&executor, &mut b, format!("https://{addr}/set-b")).await);
 
-    let mut request_a = get(format!("http://{addr}/echo"));
+    let mut request_a = get(format!("https://{addr}/echo"));
     request_a.headers = pairs(&[("Authorization", "Bearer a")]);
-    let mut request_b = get(format!("http://{addr}/echo"));
+    let mut request_b = get(format!("https://{addr}/echo"));
     request_b.headers = pairs(&[("Authorization", "Bearer b")]);
     let hop_a = executor.send(&mut a, &request_a, TIMEOUT).await;
     let hop_b = executor.send(&mut b, &request_b, TIMEOUT).await;
