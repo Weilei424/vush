@@ -102,29 +102,42 @@ async fn a_hop_waiting_for_a_shared_http2_connect_times_out_in_connect() {
 }
 
 /// When the connect that hops share under `http2` fails, hyper-util cancels
-/// every hop waiting for it. Each of them fails as `tls`, never `other`: a
-/// waiting hop gets the kind through its pool's record, and a hop that
-/// started after the failure through its own connect.
+/// every hop waiting for it. Each of them fails as `tls`, never `other`. The
+/// five waiting hops get the kind through the pool's record, and the hop sent
+/// after the failure through its own connect.
+///
+/// The hops are ordered by hand: the first holds the shared connect, and each
+/// of the others is registered as a waiter before anything runs on, so each
+/// started before the failure.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_shared_http2_connect_fails_every_waiter_as_tls() {
     let leaf = TestCa::generate().leaf_for_ip(LOCALHOST);
     let addr = spawn_tls(echo, &[b"h2"], None, leaf).await;
-    let executor = Arc::new(trusting(&TestCa::generate(), HttpVersion::Http2));
-    let hops = [(); 6].map(|()| {
-        let executor = executor.clone();
-        let request = get(format!("https://{addr}/"));
-        tokio::spawn(async move { send(&executor, &request).await })
-    });
+    let executor = trusting(&TestCa::generate(), HttpVersion::Http2);
+    let request = get(format!("https://{addr}/"));
     let tls = Failure {
         kind: FailureKind::Tls,
         stage: FailureStage::Connect,
         message: "the TLS handshake failed",
     };
-    for hop in hops {
-        let hop = hop.await.unwrap();
+
+    let mut connecting = Box::pin(send(&executor, &request));
+    assert!(poll_once(&mut connecting).await.is_pending());
+    let mut waiting = [(); 5].map(|()| Box::pin(send(&executor, &request)));
+    for hop in &mut waiting {
+        assert!(poll_once(hop).await.is_pending());
+    }
+    let [w1, w2, w3, w4, w5] = waiting;
+    let hops = tokio::join!(connecting, w1, w2, w3, w4, w5);
+    let hops = [hops.0, hops.1, hops.2, hops.3, hops.4, hops.5];
+    for hop in &hops {
         assert_eq!(hop.connection, None);
         assert_eq!(*hop.outcome.as_ref().unwrap_err(), tls);
     }
+
+    let later = send(&executor, &request).await;
+    assert_eq!(later.connection, None);
+    assert_eq!(*later.outcome.as_ref().unwrap_err(), tls);
 }
 
 /// A hop that waits on a shared connect that is then abandoned has no failure
