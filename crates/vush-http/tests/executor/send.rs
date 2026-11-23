@@ -12,7 +12,8 @@ use vush_http::Executor;
 use crate::common::{
     Echo, LOCALHOST, MIB, NO_DIR, TestCa, echo, executor, failure, get, head_with_length,
     header_values, json_a_1, limited, method, no_content, pairs, raw_headers, redirecting,
-    response, send, settings, sized, spawn_auto, spawn_h1, spawn_raw, spawn_tls, trusting,
+    response, send, settings, sized, spawn_auto, spawn_gated_h1, spawn_h1, spawn_raw, spawn_tls,
+    trusting,
 };
 
 const H2_AND_H1: &[&[u8]] = &[b"h2", b"http/1.1"];
@@ -198,10 +199,10 @@ async fn bodies_over_the_limit_are_cut() {
     }
 }
 
-async fn cut_bodies_share_a_connection(addr: std::net::SocketAddr, executor: &Executor) {
+async fn cut_bodies_share_a_connection(base: &str, executor: &Executor) {
     let mut seen = Vec::new();
     for path in ["/fixed/2097152", "/fixed/2097152", "/chunked/2097152"] {
-        let hop = send(executor, &get(format!("http://{addr}{path}"))).await;
+        let hop = send(executor, &get(format!("{base}{path}"))).await;
         assert!(response(&hop).truncated, "{path}");
         assert_eq!(hop.sizes.received, 2_097_152, "{path}");
         seen.push(hop.connection.expect("a connection"));
@@ -209,11 +210,15 @@ async fn cut_bodies_share_a_connection(addr: std::net::SocketAddr, executor: &Ex
     assert!(seen.iter().all(|id| *id == seen[0]), "{seen:?}");
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_cut_body_keeps_its_connection_on_http1() {
-    let addr = spawn_h1(sized).await;
-    cut_bodies_share_a_connection(addr, &limited(HttpVersion::Http1, MIB)).await;
+    let ca = TestCa::generate();
+    let addr = spawn_gated_h1(sized, &ca, 1).await;
+    cut_bodies_share_a_connection(
+        &format!("https://{addr}"),
+        &trusting(&ca, HttpVersion::Http1),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -222,7 +227,8 @@ async fn a_cut_body_keeps_its_connection_on_http2() {
     // connection assertion would hold regardless. Only the `received`
     // assertion catches a regression.
     let addr = spawn_auto(sized).await;
-    cut_bodies_share_a_connection(addr, &limited(HttpVersion::Http2, MIB)).await;
+    cut_bodies_share_a_connection(&format!("http://{addr}"), &limited(HttpVersion::Http2, MIB))
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
