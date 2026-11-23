@@ -1,7 +1,7 @@
 //! Bodies under `http.decompress`: what is asked for, what is decoded, and
 //! what is kept raw.
 
-use std::future::{Future, pending};
+use std::future::{Future, Ready, pending, ready};
 use std::io::{self, Write as _};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -26,8 +26,8 @@ use vush_core::protocol::{FailureKind, FailureStage};
 use vush_http::Executor;
 
 use crate::common::{
-    BoxFuture, MIB, NO_DIR, failure, get, header_values, method, pairs, reply, response, send,
-    send_within, settings, spawn_auto, spawn_raw, write_all,
+    BoxFuture, MIB, NO_DIR, Reply, TestCa, failure, get, header_values, method, pairs, reply,
+    response, send, send_within, settings, spawn_auto, spawn_gated_h1, spawn_raw, write_all,
 };
 
 const HELLO: &[u8] = b"hello world";
@@ -44,8 +44,9 @@ fn gzip(data: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-/// A lone executor with a 1 MiB body limit and `decompress` as given.
-fn decoding(version: HttpVersion, decompress: bool) -> Executor {
+/// A lone executor with a 1 MiB body limit and `decompress` as given. It
+/// trusts `roots`; plaintext callers pass an empty store.
+fn decoding(version: HttpVersion, decompress: bool, roots: RootCertStore) -> Executor {
     let settings = HttpSettings {
         decompress,
         ..settings(version, MIB)
@@ -54,35 +55,39 @@ fn decoding(version: HttpVersion, decompress: bool) -> Executor {
         &settings,
         &ResourceLimits::default(),
         Path::new(NO_DIR),
-        RootCertStore::empty(),
+        roots,
     )
     .unwrap()
 }
 
-/// Serves HTTP/1.1 and h2c. It answers every request `200` with `body`,
-/// labelled with the `Content-Encoding` `encoding`, and with one
+/// The handler of every server here. It answers every request `200` with
+/// `body`, labelled with the `Content-Encoding` `encoding`, and with one
 /// `x-seen-accept-encoding` header for each `Accept-Encoding` value the
 /// request carried.
-async fn serve(encoding: &'static str, body: impl Into<Bytes>) -> SocketAddr {
+fn serving(
+    encoding: &'static str,
+    body: impl Into<Bytes>,
+) -> impl Fn(Request<Incoming>) -> Ready<Reply> + Send + Sync + 'static {
     let body = body.into();
-    spawn_auto(move |request: Request<Incoming>| {
-        let body = body.clone();
-        async move {
-            let seen: Vec<String> = request
-                .headers()
-                .get_all(ACCEPT_ENCODING)
-                .iter()
-                .map(|value| value.to_str().unwrap().to_owned())
-                .collect();
-            let mut headers = vec![("content-encoding", encoding)];
-            headers.extend(
-                seen.iter()
-                    .map(|value| ("x-seen-accept-encoding", value.as_str())),
-            );
-            reply(200, &headers, body)
-        }
-    })
-    .await
+    move |request: Request<Incoming>| {
+        let seen: Vec<String> = request
+            .headers()
+            .get_all(ACCEPT_ENCODING)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect();
+        let mut headers = vec![("content-encoding", encoding)];
+        headers.extend(
+            seen.iter()
+                .map(|value| ("x-seen-accept-encoding", value.as_str())),
+        );
+        ready(reply(200, &headers, body.clone()))
+    }
+}
+
+/// Serves `serving(encoding, body)` as HTTP/1.1 and h2c.
+async fn serve(encoding: &'static str, body: impl Into<Bytes>) -> SocketAddr {
+    spawn_auto(serving(encoding, body)).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -93,7 +98,7 @@ async fn gzip_and_br_bodies_are_decoded() {
     ] {
         for (encoding, body) in [("gzip", gzip(HELLO)), ("br", HELLO_BR.to_vec())] {
             let addr = serve(encoding, body).await;
-            let executor = decoding(version, true);
+            let executor = decoding(version, true, RootCertStore::empty());
             let hop = send(&executor, &get(format!("http://{addr}/"))).await;
             let got = response(&hop);
             assert_eq!(got.version, wire, "{encoding}");
@@ -118,22 +123,26 @@ async fn a_requests_own_accept_encoding_is_sent() {
     let addr = serve("gzip", gzip(HELLO)).await;
     let mut request = get(format!("http://{addr}/"));
     request.headers = pairs(&[("Accept-Encoding", "gzip")]);
-    let hop = send(&decoding(HttpVersion::Http1, true), &request).await;
+    let hop = send(
+        &decoding(HttpVersion::Http1, true, RootCertStore::empty()),
+        &request,
+    )
+    .await;
     let got = response(&hop);
     assert_eq!(header_values(got, "x-seen-accept-encoding"), [b"gzip"]);
     assert_eq!(got.body, HELLO);
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_bomb_is_kept_at_the_limit() {
     let bomb = gzip(&vec![0; 16 << 20]);
     let compressed = bomb.len() as u64;
-    let addr = serve("gzip", bomb).await;
-    let executor = decoding(HttpVersion::Http1, true);
+    let ca = TestCa::generate();
+    let addr = spawn_gated_h1(serving("gzip", bomb), &ca, 1).await;
+    let executor = decoding(HttpVersion::Http1, true, ca.roots());
     let mut seen = Vec::new();
     for _ in 0..2 {
-        let hop = send(&executor, &get(format!("http://{addr}/"))).await;
+        let hop = send(&executor, &get(format!("https://{addr}/"))).await;
         let got = response(&hop);
         assert_eq!(got.body.len() as u64, MIB);
         assert!(got.body.iter().all(|&byte| byte == 0));
@@ -220,7 +229,7 @@ async fn a_large_body_decodes_without_holding_the_thread() {
 async fn a_corrupt_body_is_a_protocol_failure() {
     let addr = serve("gzip", &b"this is not gzip at all"[..]).await;
     let hop = send(
-        &decoding(HttpVersion::Http1, true),
+        &decoding(HttpVersion::Http1, true, RootCertStore::empty()),
         &get(format!("http://{addr}/")),
     )
     .await;
@@ -234,7 +243,7 @@ async fn other_encodings_are_kept_raw() {
     let raw = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x01, 0xff, 0x7f];
     let addr = serve("zstd", raw.to_vec()).await;
     let hop = send(
-        &decoding(HttpVersion::Http1, true),
+        &decoding(HttpVersion::Http1, true, RootCertStore::empty()),
         &get(format!("http://{addr}/")),
     )
     .await;
@@ -248,7 +257,7 @@ async fn without_decompress_nothing_changes() {
     let stream = gzip(HELLO);
     let addr = serve("gzip", stream.clone()).await;
     let hop = send(
-        &decoding(HttpVersion::Http1, false),
+        &decoding(HttpVersion::Http1, false, RootCertStore::empty()),
         &get(format!("http://{addr}/")),
     )
     .await;
@@ -304,7 +313,11 @@ async fn a_head_response_labelled_gzip_is_empty() {
     let addr = spawn_raw(gzip_head).await;
     let mut request = get(format!("http://{addr}/"));
     request.method = method("HEAD");
-    let hop = send(&decoding(HttpVersion::Http1, true), &request).await;
+    let hop = send(
+        &decoding(HttpVersion::Http1, true, RootCertStore::empty()),
+        &request,
+    )
+    .await;
     let got = response(&hop);
     assert_eq!(got.status, 200);
     assert!(got.body.is_empty());
@@ -348,7 +361,7 @@ fn stalled_gzip(stream: TcpStream) -> BoxFuture {
 async fn a_decoded_body_cut_by_the_deadline_is_a_timeout() {
     let addr = spawn_raw(stalled_gzip).await;
     let hop = send_within(
-        &decoding(HttpVersion::Http1, true),
+        &decoding(HttpVersion::Http1, true, RootCertStore::empty()),
         &get(format!("http://{addr}/")),
         Duration::from_secs(2),
     )
