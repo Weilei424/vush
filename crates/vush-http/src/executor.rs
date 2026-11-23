@@ -208,7 +208,12 @@ pub(crate) enum Transport {
 ///   with other executors under `shared`. Under `vu`, each session holds its
 ///   own pool, with its own TLS session cache so users never resume each
 ///   other's sessions, and its clones share both. Every pool closes a
-///   connection that has been idle for 90 s.
+///   connection that has been idle for 90 s. A hop takes an idle connection
+///   from its pool if one is there when it starts. If none is, it opens a new
+///   one while it waits, and takes whichever is ready first: the new one, or
+///   one that comes back to the pool. A connection it doesn't take stays in
+///   the pool, so a hop isn't promised the previous hop's HTTP/1.1
+///   connection.
 /// - `cookies`, with the limits' `max_cookies`, sets whether each session
 ///   has a cookie jar and its size: none under `cookies: false` or
 ///   `max_cookies: 0`. A session reads every `Set-Cookie` of a response
@@ -687,6 +692,7 @@ mod tests {
     use std::convert::Infallible;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use bytes::Bytes;
     use http::Response;
@@ -715,8 +721,13 @@ mod tests {
     /// every name to 127.0.0.1 on the asked port, so no real resolver is
     /// asked.
     fn named() -> Executor {
-        let resolver: Resolver =
-            Arc::new(|_, port| Box::pin(async move { Ok(vec![SocketAddr::new(LOCALHOST, port)]) }));
+        resolving(Arc::new(|_, port| {
+            Box::pin(async move { Ok(vec![SocketAddr::new(LOCALHOST, port)]) })
+        }))
+    }
+
+    /// Like [`named`], with the resolver `resolver`.
+    fn resolving(resolver: Resolver) -> Executor {
         let tls = client_config(
             Verification::Roots(RootCertStore::empty()),
             HttpVersion::Auto,
@@ -820,6 +831,35 @@ mod tests {
     async fn cookie_seen(executor: &Executor, session: &mut Session, url: String) -> String {
         let hop = executor.send(session, &get(url, &[]), NAMED_TIMEOUT).await;
         seen(&hop.outcome.expect("the hop should succeed")).0
+    }
+
+    /// The second of two hops in a row takes the first one's connection. The
+    /// resolver answers only the first lookup, so a second connect can't
+    /// finish and only the pooled connection can serve the hop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plaintext_hops_in_a_row_share_a_connection() {
+        let port = cookie_server(|_| vec![]).await;
+        let answered = AtomicBool::new(false);
+        let executor = resolving(Arc::new(move |_, port| {
+            let first = !answered.swap(true, Ordering::SeqCst);
+            Box::pin(async move {
+                if first {
+                    Ok(vec![SocketAddr::new(LOCALHOST, port)])
+                } else {
+                    std::future::pending().await
+                }
+            })
+        }));
+        let mut session = executor.new_session();
+        let request = get(format!("http://reuse.vush.test:{port}/"), &[]);
+        let first = executor.send(&mut session, &request, NAMED_TIMEOUT).await;
+        first.outcome.as_ref().expect("the first hop succeeds");
+        let second = executor.send(&mut session, &request, NAMED_TIMEOUT).await;
+        second.outcome.as_ref().expect("the second hop succeeds");
+        assert!(first.timing.setup.is_some());
+        assert!(second.timing.setup.is_none());
+        assert!(first.connection.is_some());
+        assert_eq!(first.connection, second.connection);
     }
 
     #[tokio::test]
