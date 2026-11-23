@@ -9,6 +9,9 @@
 //! background after its hop took a pooled connection instead, so no hop's
 //! deadline bounds that connect.
 //!
+//! A failed connect is recorded in its pool's `LastFailure`, for the hops that
+//! waited on it.
+//!
 //! Its errors carry a kind and a fixed message, never a host, a port or a
 //! library's text.
 
@@ -71,6 +74,48 @@ impl fmt::Display for ConnectError {
 }
 
 impl std::error::Error for ConnectError {}
+
+/// A pool's last failed connect, for the hops that waited on it. Under
+/// `http2`, hyper-util hands those hops only a generic connect error, so the
+/// executor reads the cause here. One slot, shared by clones: a new failure
+/// replaces the old one. It holds a host, so it has no `Debug`.
+#[derive(Clone, Default)]
+pub(crate) struct LastFailure {
+    slot: Arc<Mutex<Option<Failed>>>,
+}
+
+struct Failed {
+    scheme: http::uri::Scheme,
+    authority: http::uri::Authority,
+    error: ConnectError,
+    at: Instant,
+}
+
+impl LastFailure {
+    /// Records that the connect for `uri` failed with `error` at `at`.
+    pub(crate) fn record(&self, uri: &Uri, error: ConnectError, at: Instant) {
+        let (Some(scheme), Some(authority)) = (uri.scheme(), uri.authority()) else {
+            return;
+        };
+        *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Failed {
+            scheme: scheme.clone(),
+            authority: authority.clone(),
+            error,
+            at,
+        });
+    }
+
+    /// The recorded failure, if it was for `uri`'s origin and came at or
+    /// after `start`, the start of the hop that asks.
+    pub(crate) fn for_hop(&self, uri: &Uri, start: Instant) -> Option<ConnectError> {
+        let slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let failed = slot.as_ref()?;
+        (uri.scheme() == Some(&failed.scheme)
+            && uri.authority() == Some(&failed.authority)
+            && failed.at >= start)
+            .then_some(failed.error)
+    }
+}
 
 const fn error(kind: FailureKind, message: &'static str) -> ConnectError {
     ConnectError { kind, message }
@@ -159,6 +204,7 @@ pub(crate) struct Connector {
     version: HttpVersion,
     limit: Duration,
     resolver: Resolver,
+    last_failure: LastFailure,
 }
 
 impl Connector {
@@ -171,6 +217,7 @@ impl Connector {
             version,
             limit,
             resolver: Arc::new(lookup),
+            last_failure: LastFailure::default(),
         }
     }
 
@@ -182,7 +229,14 @@ impl Connector {
             version: self.version,
             limit: self.limit,
             resolver: self.resolver.clone(),
+            last_failure: LastFailure::default(),
         }
+    }
+
+    /// The record of this connector's failed connects, shared with its
+    /// clones.
+    pub(crate) fn last_failure(&self) -> LastFailure {
+        self.last_failure.clone()
     }
 
     #[cfg(test)]
@@ -201,9 +255,14 @@ impl Connector {
     /// The whole connect, resolving, TCP and TLS, under the limit.
     async fn connect(self, uri: Uri) -> Result<Conn, ConnectError> {
         let limit = self.limit;
-        tokio::time::timeout(limit, self.open(uri))
+        let last_failure = self.last_failure.clone();
+        let result = tokio::time::timeout(limit, self.open(uri.clone()))
             .await
-            .unwrap_or(Err(TOO_LONG))
+            .unwrap_or(Err(TOO_LONG));
+        if let Err(error) = result {
+            last_failure.record(&uri, error, Instant::now());
+        }
+        result
     }
 
     async fn open(self, uri: Uri) -> Result<Conn, ConnectError> {
@@ -700,10 +759,67 @@ mod tests {
         );
         let mut connector = Connector::new(tls, HttpVersion::Auto, Duration::from_millis(200));
         let url = format!("https://{addr}/");
+        let before = Instant::now();
         let error = tokio::time::timeout(Duration::from_secs(5), connect_err(&mut connector, &url))
             .await
             .expect("the limit should end the connect");
         assert_eq!(error, TOO_LONG);
+        let uri: Uri = url.parse().unwrap();
+        assert_eq!(
+            connector.last_failure().for_hop(&uri, before),
+            Some(TOO_LONG)
+        );
+    }
+
+    #[test]
+    fn a_failure_counts_for_hops_to_its_origin_that_started_first() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_millis(5);
+        let t2 = t1 + Duration::from_millis(5);
+        let uri = |text: &str| text.parse::<Uri>().unwrap();
+        let (a, b) = (uri("https://a.test:8443/"), uri("https://b.test:8443/"));
+        let record = LastFailure::default();
+        assert_eq!(record.for_hop(&a, t0), None);
+        record.record(&a, HANDSHAKE, t1);
+        assert_eq!(record.for_hop(&a, t0), Some(HANDSHAKE));
+        assert_eq!(record.for_hop(&a, t1), Some(HANDSHAKE));
+        assert_eq!(record.for_hop(&a, t2), None);
+        assert_eq!(record.for_hop(&b, t0), None);
+        assert_eq!(record.for_hop(&uri("https://a.test:9443/"), t0), None);
+        assert_eq!(record.for_hop(&uri("http://a.test:8443/"), t0), None);
+        assert_eq!(
+            record.for_hop(&uri("https://A.TEST:8443/other?q=1"), t0),
+            Some(HANDSHAKE)
+        );
+        record.record(&b, REFUSED, t1);
+        assert_eq!(record.for_hop(&a, t0), None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_connect_is_recorded_for_its_pool_only() {
+        let before = Instant::now();
+        let url = "http://unresolvable.test/";
+        let uri: Uri = url.parse().unwrap();
+        let mut connector = resolving(failing_resolver());
+        assert_eq!(connect_err(&mut connector, url).await, UNRESOLVED);
+        assert_eq!(
+            connector.last_failure().for_hop(&uri, before),
+            Some(UNRESOLVED)
+        );
+        assert_eq!(
+            connector.clone().last_failure().for_hop(&uri, before),
+            Some(UNRESOLVED)
+        );
+        assert_eq!(
+            connector.for_user().last_failure().for_hop(&uri, before),
+            None
+        );
+
+        let ok = format!("http://{}/", tcp_server().await);
+        let ok_uri: Uri = ok.parse().unwrap();
+        let mut fresh = plain();
+        connect(&mut fresh, &ok).await.unwrap();
+        assert_eq!(fresh.last_failure().for_hop(&ok_uri, before), None);
     }
 
     #[tokio::test]
