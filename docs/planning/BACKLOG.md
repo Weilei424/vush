@@ -247,7 +247,7 @@
   - [x] The guarantee end to end, and the docs (plan Task 6).
   - [x] Final-review fixes (2026-11-20): the jar ignores a cookie whose stored path or domain is over 1024 bytes, the eviction tests now tell least recently used from oldest, and the schema's cookie rules are corrected.
   - [x] CI green on all four runners after the user pushes (plan Task 6). Run 44788773613 on `b2fd04b`, 2026-11-20.
-- [ ] P2.5 Implement bounded body capture and safe error diagnostics (design approved 2026-11-21).
+- [x] P2.5 Implement bounded body capture and safe error diagnostics (design approved 2026-11-21).
   - Spec: `docs/superpowers/specs/2026-11-21-phase-2-5-body-capture-diagnostics-design.md` · Plan: `docs/superpowers/plans/2026-11-21-phase-2-5-body-capture-diagnostics.md` (local only).
   - Decided 2026-11-21:
     - **Read to the end, keep the limit** (answers P2.1's drain-or-close question):
@@ -284,7 +284,7 @@
   - [x] Codex review round 3 fixes (decided 2026-11-22):
     - `connections_are_reused_without_a_race` runs on a multi-thread runtime again. Its fixture never answers a second TLS handshake, so only the pooled connection can answer, whatever the scheduling.
     - Making the plaintext reuse tests deterministic moves to P2.6.
-  - [ ] CI green on all four runners after the user pushes (plan Task 6).
+  - [x] CI green on all four runners after the user pushes (plan Task 6). Run 45119738867 on `4517307`, 2026-11-22, including all three rounds of Codex fixes.
 - [ ] P2.6 Add local test-server integration tests for success, failure, delay, redirect, oversized body, TLS and reuse.
   - From P2.1: test the `HttpExecutor` contract against the real executor. Every failure kind needs a real cause, and no fixture case may be reported as `other`.
   - From P2.3: a hop that waits on a shared HTTP/2 connect that fails still reports `connect` in `connect` ("the shared connection attempt failed"). Decide whether to pass the connect's real kind, such as `tls`, on to the waiting hops.
