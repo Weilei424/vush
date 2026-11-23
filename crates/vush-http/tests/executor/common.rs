@@ -2,8 +2,11 @@
 //! to build executors, plans and requests.
 //!
 //! Servers stay up until the test's runtime ends. A server that stalls awaits
-//! `std::future::pending()`, so no test races a sleep.
+//! `std::future::pending()`. A server that delays a reply sleeps, and a test
+//! checks only that the hop took at least that long, so no assertion races a
+//! sleep.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::future::{Future, pending};
@@ -12,8 +15,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -31,6 +34,7 @@ use rcgen::{
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Barrier, oneshot};
 use tokio_rustls::TlsAcceptor;
 use vush_core::plan::{
     ByteSize, ClosedStop, ClosedVusLoad, Expect, HttpMethod, HttpSettings, HttpVersion, JsonNumber,
@@ -519,6 +523,39 @@ where
     .await
 }
 
+/// A plaintext HTTP/1.1 server that counts the requests that reach its
+/// handler, by path. `/moved` answers `302` with `location: /target`,
+/// `/busy` answers `503`, and any other path answers `200`.
+pub struct CountingServer {
+    pub addr: SocketAddr,
+    hits: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl CountingServer {
+    pub async fn spawn() -> Self {
+        let hits = Arc::new(Mutex::new(HashMap::new()));
+        let seen = hits.clone();
+        let addr = spawn_h1(move |request: Request<Incoming>| {
+            let path = request.uri().path().to_owned();
+            *seen.lock().unwrap().entry(path.clone()).or_default() += 1;
+            async move {
+                match path.as_str() {
+                    "/moved" => reply(302, &[("location", "/target")], ""),
+                    "/busy" => reply(503, &[], ""),
+                    _ => reply(200, &[], ""),
+                }
+            }
+        })
+        .await;
+        Self { addr, hits }
+    }
+
+    /// How many requests for `path` reached the handler.
+    pub fn hits(&self, path: &str) -> usize {
+        self.hits.lock().unwrap().get(path).copied().unwrap_or(0)
+    }
+}
+
 // ---- Handlers ----
 
 pub fn full(body: impl Into<Bytes>) -> ReplyBody {
@@ -588,6 +625,19 @@ pub fn redirecting(
                 reply(status, &[("location", &location)], "")
             }),
         }
+    }
+}
+
+/// Holds each request until two have arrived, then echoes it. Two hops
+/// can both be answered only if the client has them in flight together.
+pub fn after_two_arrivals() -> impl Fn(Request<Incoming>) -> ReplyFuture + Send + Sync + 'static {
+    let barrier = Arc::new(Barrier::new(2));
+    move |request| {
+        let barrier = barrier.clone();
+        Box::pin(async move {
+            barrier.wait().await;
+            echo(request).await
+        }) as ReplyFuture
     }
 }
 
@@ -826,6 +876,44 @@ pub fn stalled_body(stream: TcpStream) -> BoxFuture {
     answer(stream, b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
 }
 
+/// Reads the request head, answers `103 Early Hints` and then `200` with
+/// the body `ok`, and holds the connection.
+pub fn early_hints_then_ok(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        read_head(&stream).await;
+        write_all(
+            &stream,
+            b"HTTP/1.1 103 Early Hints\r\nlink: </s.css>\r\n\r\n\
+              HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
+        )
+        .await;
+        pending::<()>().await;
+    })
+}
+
+/// How long [`slow_reply`] waits before its head.
+pub const HEAD_DELAY: Duration = Duration::from_millis(150);
+/// How long [`slow_reply`] waits between the two halves of its body.
+pub const BODY_DELAY: Duration = Duration::from_millis(150);
+
+/// Reads the request head, waits [`HEAD_DELAY`], sends a head promising 10
+/// bytes and `hello`, waits [`BODY_DELAY`], sends `world`, and holds the
+/// connection.
+pub fn slow_reply(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        read_head(&stream).await;
+        tokio::time::sleep(HEAD_DELAY).await;
+        write_all(
+            &stream,
+            b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nhello",
+        )
+        .await;
+        tokio::time::sleep(BODY_DELAY).await;
+        write_all(&stream, b"world").await;
+        pending::<()>().await;
+    })
+}
+
 /// Promises 2 MiB, sends 1 MiB, then holds the connection.
 pub fn two_mib_promised_then_stall(stream: TcpStream) -> BoxFuture {
     Box::pin(async move {
@@ -998,4 +1086,181 @@ pub fn h2_reset_after_one_frame(stream: TcpStream) -> BoxFuture {
         write_all(&stream, frames).await;
         pending::<()>().await;
     })
+}
+
+// ---- Droppers ----
+//
+// A hop is cancelled by dropping its future. A dropper tells a test when the
+// first hop is at the point it will drop, so the drop never races the hop.
+
+/// How many body bytes a dropper sends before it signals `reached` in the
+/// body. The sockets and windows between server and hop hold far less, and
+/// the executor reads a body to the end, so the hop is reading the body by
+/// then.
+const SENT_BEFORE_REACHED: usize = 32 << 20;
+const FRAME: usize = 64 * 1024;
+
+/// Where the first hop is when a [`Dropper`] signals `reached`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropAt {
+    /// The server has the request and has sent nothing.
+    BeforeHead,
+    /// The server has sent a head and 32 MiB of a larger body.
+    InBody,
+}
+
+/// A server that holds its first request open, so a test can drop the hop
+/// that sent it.
+pub struct Dropper {
+    pub addr: SocketAddr,
+    accepted: Arc<AtomicUsize>,
+    reached: oneshot::Receiver<()>,
+    closed: Option<oneshot::Receiver<()>>,
+}
+
+impl Dropper {
+    /// Waits until the first hop is at its [`DropAt`] point.
+    pub async fn reached(&mut self) {
+        (&mut self.reached).await.expect("the server ended");
+    }
+
+    /// Waits until the client closed the first connection. Only the HTTP/1.1
+    /// dropper has one.
+    pub async fn closed(&mut self) {
+        let closed = self.closed.as_mut().expect("this dropper has no closed");
+        closed.await.expect("the server ended");
+    }
+
+    /// The connections accepted so far by the HTTP/1.1 dropper, or the
+    /// requests that reached the HTTP/2 one.
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+/// Serves HTTP/1.1 in plaintext. Its first connection reads the request and
+/// then stays at `at` until the client closes it. Every later connection
+/// answers `200` with an empty body.
+pub async fn spawn_h1_dropper(at: DropAt) -> Dropper {
+    let listener = bind().await;
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (reached_tx, reached) = oneshot::channel();
+    let (closed_tx, closed) = oneshot::channel();
+    let count = accepted.clone();
+    tokio::spawn(async move {
+        let mut first = Some((reached_tx, closed_tx));
+        while let Ok((tcp, _)) = listener.accept().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            match first.take() {
+                Some((reached, closed)) => {
+                    tokio::spawn(hold_first(tcp, at, reached, closed));
+                }
+                None => {
+                    tokio::spawn(answer(tcp, b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"));
+                }
+            }
+        }
+    });
+    Dropper {
+        addr,
+        accepted,
+        reached,
+        closed: Some(closed),
+    }
+}
+
+/// The first connection of [`spawn_h1_dropper`]. A read error counts as the
+/// client closing: closing with unread data can arrive as a reset.
+async fn hold_first(
+    stream: TcpStream,
+    at: DropAt,
+    reached: oneshot::Sender<()>,
+    closed: oneshot::Sender<()>,
+) {
+    read_head(&stream).await;
+    if at == DropAt::InBody {
+        write_all(
+            &stream,
+            b"HTTP/1.1 200 OK\r\ncontent-length: 67108864\r\n\r\n",
+        )
+        .await;
+        let chunk = [b'x'; FRAME];
+        for _ in 0..SENT_BEFORE_REACHED / FRAME {
+            write_all(&stream, &chunk).await;
+        }
+    }
+    let _ = reached.send(());
+    let mut buf = [0; 4096];
+    while read_some(&stream, &mut buf).await > 0 {}
+    let _ = closed.send(());
+}
+
+/// A body that sends 32 MiB in 64 KiB frames, signals `reached`, and then
+/// never ends. A server polls a body only as the client's window allows, so
+/// the signal means the hop has read most of what was sent.
+struct SentThenStalled {
+    left: usize,
+    reached: Option<oneshot::Sender<()>>,
+}
+
+impl hyper::body::Body for SentThenStalled {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        if self.left == 0 {
+            if let Some(reached) = self.reached.take() {
+                let _ = reached.send(());
+            }
+            return Poll::Pending;
+        }
+        self.left -= FRAME;
+        Poll::Ready(Some(Ok(Frame::data(Bytes::from(vec![b'x'; FRAME])))))
+    }
+}
+
+/// Serves HTTP/2 over TLS, offering only `h2`, and answers one handshake. Its
+/// first request stays at `at`: it is never answered, or it gets a head and a
+/// body that never ends. Every later request gets `200` with an empty body.
+pub async fn spawn_h2_dropper(at: DropAt, ca: &TestCa) -> Dropper {
+    let (reached_tx, reached) = oneshot::channel();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = accepted.clone();
+    let first = Mutex::new(Some(reached_tx));
+    let addr = spawn_tls(
+        move |_request| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let reached = first.lock().unwrap().take();
+            async move {
+                match (reached, at) {
+                    (None, _) => reply(200, &[], ""),
+                    (Some(reached), DropAt::BeforeHead) => {
+                        let _ = reached.send(());
+                        pending::<Reply>().await
+                    }
+                    (Some(reached), DropAt::InBody) => Response::new(
+                        SentThenStalled {
+                            left: SENT_BEFORE_REACHED,
+                            reached: Some(reached),
+                        }
+                        .boxed(),
+                    ),
+                }
+            }
+        },
+        &[b"h2"],
+        Some(1),
+        ca.leaf_for_ip(LOCALHOST),
+    )
+    .await;
+    Dropper {
+        addr,
+        accepted,
+        reached,
+        closed: None,
+    }
 }
