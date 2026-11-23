@@ -47,18 +47,20 @@ use vush_http::Executor;
 pub const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const MIB: u64 = 1_048_576;
 
-// ---- One thread for reuse ----
+// ---- Gated reuse ----
 //
-// Why a test that asserts two sequential HTTP/1.1 hops share a connection
-// runs on `#[tokio::test(flavor = "current_thread")]`. hyper-util returns
-// an HTTP/1.1 connection to its pool from a spawned task, once the
-// connection is ready again. The next request races a pool checkout
-// against a brand-new connect, and on a multi-thread runtime under load a
-// loopback connect can win, so the two hops get different connections. On
-// one thread, the spawned task almost always runs before the next request
-// starts. HTTP/2
-// reuse is not affected, because hyper-util shares an HTTP/2 connection at
-// once.
+// hyper-util returns an HTTP/1.1 connection to its pool from a task of its
+// own, so a hop that starts right after another races a new connect
+// against that return.
+//
+// A test that asserts two hops share a connection makes the race
+// impossible. Its server answers only as many TLS handshakes as
+// connections the test expects, so an extra connect waits in its
+// handshake and never finishes, and only the pooled connection can serve
+// the hop. Count the connections the test opens, and open them all before
+// its first reuse hop.
+//
+// HTTP/2 isn't affected, because hyper-util shares its connection at once.
 
 /// The hop timeout of every test that doesn't state its own.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
@@ -499,6 +501,22 @@ where
         }
     });
     addr
+}
+
+/// Serves HTTP/1.1 over TLS and answers only `handshakes` handshakes, so a
+/// test can count on its connections being the only ones.
+pub async fn spawn_gated_h1<H, F>(handler: H, ca: &TestCa, handshakes: usize) -> SocketAddr
+where
+    H: Fn(Request<Incoming>) -> F + Send + Sync + 'static,
+    F: Future<Output = Reply> + Send + 'static,
+{
+    spawn_tls(
+        handler,
+        &[b"http/1.1"],
+        Some(handshakes),
+        ca.leaf_for_ip(LOCALHOST),
+    )
+    .await
 }
 
 // ---- Handlers ----
