@@ -185,9 +185,10 @@ pub(crate) enum Transport {
 ///   speaks only HTTP/1.1, and `http2` speaks only HTTP/2, with prior
 ///   knowledge in plaintext. Under `http2`, one hop per origin connects at a
 ///   time and the others wait for it. When that connect fails, the waiting
-///   hops report its kind and text. A connect that was abandoned, or that
-///   failed in HTTP/2's own handshake, leaves them with `connect` and "the
-///   shared connection attempt failed".
+///   hops report its kind and text. Three cases leave them with `connect` and
+///   "the shared connection attempt failed": the connect was abandoned, it
+///   failed in HTTP/2's own handshake, or another origin's failure replaced
+///   it in the pool's record (each pool keeps only its last failure).
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
