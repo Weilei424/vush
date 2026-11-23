@@ -14,8 +14,8 @@ use crate::common::{
     CountingListener, HEAD_BUFFER_BYTES, LOCALHOST, MIB, NO_DIR, TestCa, close_after_head, echo,
     executor, failure, garbage_status, get, h2_reset_after_one_frame, head_of_1_mb, head_of_len,
     head_of_the_buffer, hold, http10_to_close, hundred_and_one_headers, hundred_headers, limited,
-    malformed_chunk, pairs, refused_port, reply, send, send_within, silent_after_head, spawn_auto,
-    spawn_raw, spawn_tls, stalled_body, trusting, two_mib_promised_then_stall,
+    malformed_chunk, pairs, poll_once, refused_port, reply, send, send_within, silent_after_head,
+    spawn_auto, spawn_raw, spawn_tls, stalled_body, trusting, two_mib_promised_then_stall,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -102,13 +102,11 @@ async fn a_hop_waiting_for_a_shared_http2_connect_times_out_in_connect() {
 }
 
 /// When the connect that hops share under `http2` fails, hyper-util cancels
-/// every hop waiting for it. Those hops fail as `connect`, never `other`.
-///
-/// A hop can start just after the shared connect failed. It then opens a
-/// connect of its own, which fails as `tls` too, so more than one hop can
-/// fail as `tls`.
+/// every hop waiting for it. Each of them fails as `tls`, never `other`: a
+/// waiting hop gets the kind through its pool's record, and a hop that
+/// started after the failure through its own connect.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_shared_http2_connect_fails_every_waiter_as_connect() {
+async fn a_failed_shared_http2_connect_fails_every_waiter_as_tls() {
     let leaf = TestCa::generate().leaf_for_ip(LOCALHOST);
     let addr = spawn_tls(echo, &[b"h2"], None, leaf).await;
     let executor = Arc::new(trusting(&TestCa::generate(), HttpVersion::Http2));
@@ -117,26 +115,47 @@ async fn a_failed_shared_http2_connect_fails_every_waiter_as_connect() {
         let request = get(format!("https://{addr}/"));
         tokio::spawn(async move { send(&executor, &request).await })
     });
-    let shared = Failure {
-        kind: FailureKind::Connect,
+    let tls = Failure {
+        kind: FailureKind::Tls,
         stage: FailureStage::Connect,
-        message: "the shared connection attempt failed",
+        message: "the TLS handshake failed",
     };
-    let mut handshakes = 0;
     for hop in hops {
         let hop = hop.await.unwrap();
         assert_eq!(hop.connection, None);
-        let error = hop.outcome.as_ref().unwrap_err();
-        if error.kind == FailureKind::Tls {
-            assert_eq!(error.stage, FailureStage::Connect);
-            handshakes += 1;
-        } else {
-            assert_eq!(*error, shared);
-        }
+        assert_eq!(*hop.outcome.as_ref().unwrap_err(), tls);
     }
-    assert!(
-        handshakes >= 1,
-        "the hop that opened the connect fails as tls"
+}
+
+/// A hop that waits on a shared connect that is then abandoned has no failure
+/// to report, so it keeps `connect`, even though an earlier connect failed
+/// as `tls`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abandoned_shared_http2_connect_leaves_its_waiter_with_connect() {
+    let leaf = TestCa::generate().leaf_for_ip(LOCALHOST);
+    // The server answers one handshake, so the second connect's is held.
+    let addr = spawn_tls(echo, &[b"h2"], Some(1), leaf).await;
+    let executor = trusting(&TestCa::generate(), HttpVersion::Http2);
+    let url = format!("https://{addr}/");
+    let first = send(&executor, &get(url.clone())).await;
+    assert_eq!(failure(&first), (FailureKind::Tls, FailureStage::Connect));
+
+    let request = get(url);
+    let mut connecting = Box::pin(send(&executor, &request));
+    assert!(poll_once(&mut connecting).await.is_pending());
+    let mut waiting = Box::pin(send(&executor, &request));
+    assert!(poll_once(&mut waiting).await.is_pending());
+    drop(connecting);
+
+    let hop = waiting.await;
+    assert_eq!(hop.connection, None);
+    assert_eq!(
+        *hop.outcome.as_ref().unwrap_err(),
+        Failure {
+            kind: FailureKind::Connect,
+            stage: FailureStage::Connect,
+            message: "the shared connection attempt failed",
+        }
     );
 }
 
