@@ -5,6 +5,7 @@
 
 mod common;
 mod compression;
+mod contract;
 mod cookies;
 mod diagnostics;
 mod failures;
