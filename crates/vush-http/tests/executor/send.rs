@@ -263,8 +263,7 @@ async fn response_headers_keep_repeats_and_raw_bytes() {
     assert_eq!(header_values(got, "x-raw"), [b"\xff\xfe".as_slice()]);
 }
 
-// Reuse needs one thread: see "One thread for reuse" in common.rs.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn connections_are_reused_without_a_race() {
     let ca = TestCa::generate();
 
