@@ -203,6 +203,7 @@ mod tests {
                 "max_response_size",
                 with(|s| s.max_response_size = ByteSize(1)),
             ),
+            ("decompress", with(|s| s.decompress = true)),
         ];
         for (what, changed) in &same {
             assert_eq!(key(a, &base), key(b, changed), "{what}");
