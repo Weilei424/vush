@@ -21,8 +21,8 @@ use vush_core::protocol::{BodySizes, Failure, FailureKind, FailureStage, HopTimi
 
 use crate::body::CountingBody;
 use crate::capture::Capture;
-use crate::classify::{classify, failure, timeout};
-use crate::connector::{ConnInfo, Connector};
+use crate::classify::{classify, connector_failure, failure, is_shared_connect, timeout};
+use crate::connector::{ConnInfo, Connector, LastFailure};
 use crate::cookie::{Jar, Target};
 use crate::decode;
 use crate::executors::{SystemRoots, build};
@@ -112,7 +112,7 @@ static NEXT_EXECUTOR: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct Session {
     owner: u64,
-    client: Option<Client<Connector, CountingBody>>,
+    pool: Option<Pool>,
     jar: Option<Jar>,
 }
 
@@ -132,19 +132,30 @@ pub(crate) const HEAD_BUFFER_BYTES: usize = 417_792;
 /// client advertises it, so a server that honors it sends no more.
 pub(crate) const H2_HEADER_LIST_BYTES: u32 = 16_384;
 
+/// A pool of connections and the record of its failed connects. A clone
+/// shares both.
+#[derive(Clone)]
+pub(crate) struct Pool {
+    client: Client<Connector, CountingBody>,
+    last_failure: LastFailure,
+}
+
 /// Builds a pool. Every pool, pooled or per user, is built here, so each
-/// closes its idle connections after [`IDLE_TIMEOUT`].
-pub(crate) fn client(
-    connector: Connector,
-    version: HttpVersion,
-) -> Client<Connector, CountingBody> {
-    Client::builder(TokioExecutor::new())
+/// closes its idle connections after [`IDLE_TIMEOUT`]. It takes the record of
+/// failed connects from `connector`, whose clones all share it.
+pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
+    let last_failure = connector.last_failure();
+    let client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(IDLE_TIMEOUT)
         .pool_timer(TokioTimer::new())
         .http2_only(version == HttpVersion::Http2)
         .http1_max_buf_size(HEAD_BUFFER_BYTES)
         .http2_max_header_list_size(H2_HEADER_LIST_BYTES)
-        .build(connector)
+        .build(connector);
+    Pool {
+        client,
+        last_failure,
+    }
 }
 
 /// Where an executor's connections live. A clone of a pooled transport
@@ -152,8 +163,8 @@ pub(crate) fn client(
 #[derive(Clone)]
 pub(crate) enum Transport {
     /// One pool for every session of the executor.
-    /// Boxed, because a client is much larger than a connector.
-    Pooled(Box<Client<Connector, CountingBody>>),
+    /// Boxed, because a pool is much larger than a connector.
+    Pooled(Box<Pool>),
     /// Each session builds its own pool from this connector.
     PerSession {
         connector: Connector,
@@ -172,7 +183,11 @@ pub(crate) enum Transport {
 /// How the [`HttpSettings`] are read:
 /// - `version` sets the version mode: `auto` negotiates over TLS, `http1`
 ///   speaks only HTTP/1.1, and `http2` speaks only HTTP/2, with prior
-///   knowledge in plaintext.
+///   knowledge in plaintext. Under `http2`, one hop per origin connects at a
+///   time and the others wait for it. When that connect fails, the waiting
+///   hops report its kind and text. A connect that was abandoned, or that
+///   failed in HTTP/2's own handshake, leaves them with `connect` and "the
+///   shared connection attempt failed".
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
@@ -304,16 +319,13 @@ impl Executor {
     /// The pool a session's requests go through: its own, `own`, under
     /// `pool: vu`, the executor's otherwise. It takes the session's pool
     /// alone, so the session's jar can be borrowed beside it.
-    fn client_of<'a>(
-        &'a self,
-        own: Option<&'a Client<Connector, CountingBody>>,
-    ) -> &'a Client<Connector, CountingBody> {
+    fn pool_of<'a>(&'a self, own: Option<&'a Pool>) -> &'a Pool {
         match &self.transport {
-            Transport::Pooled(client) => client,
+            Transport::Pooled(pool) => pool,
             // The owner check passed, so this executor made the session, and
-            // it gave the session a client.
+            // it gave the session a pool.
             Transport::PerSession { .. } => own.unwrap_or_else(|| {
-                unreachable!("a session of a per-session executor holds a client")
+                unreachable!("a session of a per-session executor holds a pool")
             }),
         }
     }
@@ -326,7 +338,7 @@ impl Executor {
     /// the hop never runs out of time.
     async fn exchange(
         &self,
-        client: &Client<Connector, CountingBody>,
+        pool: &Pool,
         request: Request<CountingBody>,
         capture: &mut CaptureConnection,
         deadline: Option<Instant>,
@@ -338,7 +350,7 @@ impl Executor {
         // which hyper-util shares without running the connector for this hop.
         let marker = StageMarker::new();
         marker.set(FailureStage::Connect);
-        let hop = self.drive(client, request, capture, &marker, progress, jar);
+        let hop = self.drive(pool, request, capture, &marker, progress, jar);
         let outcome = match deadline {
             None => hop.await,
             Some(deadline) => match tokio::time::timeout_at(deadline.into(), hop).await {
@@ -365,14 +377,15 @@ impl Executor {
     /// timeout cuts short still counts whole.
     async fn drive(
         &self,
-        client: &Client<Connector, CountingBody>,
+        pool: &Pool,
         request: Request<CountingBody>,
         capture: &mut CaptureConnection,
         marker: &StageMarker,
         progress: &mut Progress,
         jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
-        let mut response = client.request(request);
+        let uri = request.uri().clone();
+        let mut response = pool.client.request(request);
         // The hop is in `connect` until hyper-util assigns it a connection,
         // new or pooled. Only that tells this hop apart: a connect that loses
         // to a pooled connection finishes on another task.
@@ -397,7 +410,15 @@ impl Executor {
             Ok(head) => head,
             Err(error) => {
                 progress.error_connection = error.connect_info().and_then(conn_info);
-                return Err(classify(&error, marker.get()));
+                let failed = classify(&error, marker.get());
+                // A hop that waited on another hop's connect learns why it
+                // failed from the pool's record, if the failure fits.
+                if is_shared_connect(&failed)
+                    && let Some(cause) = pool.last_failure.for_hop(&uri, progress.start)
+                {
+                    return Err(connector_failure(cause));
+                }
+                return Err(failed);
             }
         };
         progress.to_headers = Some(progress.start.elapsed());
@@ -468,12 +489,12 @@ impl HttpExecutor for Executor {
         let client = match &self.transport {
             Transport::Pooled(_) => None,
             Transport::PerSession { connector, version } => {
-                Some(client(connector.for_user(), *version))
+                Some(new_pool(connector.for_user(), *version))
             }
         };
         Session {
             owner: self.id,
-            client,
+            pool: client,
             jar: self.cookies.map(Jar::new),
         }
     }
@@ -499,14 +520,14 @@ impl HttpExecutor for Executor {
             Err(timeout(FailureStage::Prepare))
         } else {
             // The pool is borrowed apart from the jar, which the hop changes.
-            let Session { client, jar, .. } = session;
+            let Session { pool, jar, .. } = session;
             match ready(request, jar.as_mut(), deadline, self.decompress) {
                 Err(failure) => Err(failure),
                 Ok(prepared) => {
                     let (mut request, target) = wire_request(prepared, sent.clone());
                     let capture = capture.insert(capture_connection(&mut request));
                     self.exchange(
-                        self.client_of(client.as_ref()),
+                        self.pool_of(pool.as_ref()),
                         request,
                         capture,
                         deadline,
@@ -701,7 +722,7 @@ mod tests {
         );
         let connector = Connector::with_resolver(tls, HttpVersion::Auto, NAMED_TIMEOUT, resolver);
         Executor::from_parts(
-            Transport::Pooled(Box::new(client(connector, HttpVersion::Auto))),
+            Transport::Pooled(Box::new(new_pool(connector, HttpVersion::Auto))),
             1_048_576,
             NonZeroU32::new(64),
             false,
