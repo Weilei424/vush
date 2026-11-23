@@ -8,7 +8,7 @@ use rustls::RootCertStore;
 use vush_core::plan::{HttpVersion, PoolScope, WorkloadPlan};
 
 use crate::connector::Connector;
-use crate::executor::{BuildError, Executor, Scope, Transport, client, jar_limit};
+use crate::executor::{BuildError, Executor, Scope, Transport, jar_limit, new_pool};
 use crate::pool::{PoolKey, ScopeView, limit, pool_key, scopes};
 use crate::tls::{Trust, Verification, add_ca_file, client_config, system_roots};
 
@@ -159,7 +159,7 @@ pub(crate) fn build(
                     version: spec.version,
                 }
             } else {
-                Transport::Pooled(Box::new(client(connector, spec.version)))
+                Transport::Pooled(Box::new(new_pool(connector, spec.version)))
             }
         })
         .collect();
