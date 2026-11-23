@@ -301,7 +301,7 @@
     - **Reuse tests are gated, not lucky** (answers Codex round 3's note on P2.5). The ten tests that ran on one thread switch to HTTP/1.1 over TLS, where the server answers only the handshakes the test expects.
     - **One `contract.rs` walks the contract's eight points** (answers P2.1's note), with a failure-kind catalogue that gives every kind except `other` a real cause.
   - [x] Waiting hops report the shared connect's real kind (plan Task 1).
-  - [ ] Reuse tests that don't depend on scheduling (plan Task 2).
+  - [x] Reuse tests that don't depend on scheduling (plan Task 2).
   - [ ] The contract suite: one hop per call, finite time, cancel by drop, timing and reuse (plan Task 3).
   - [ ] The failure-kind catalogue, the hostile responses, and `dns` through `send` (plan Task 4).
   - [ ] CI green on all four runners after the user pushes, and Phase 2 marked complete (plan Task 5).
