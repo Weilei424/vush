@@ -369,7 +369,10 @@ async fn drop_hop_when_reached(
 ) {
     let request = get(url.to_owned());
     let hop = executor.send(session, &request, TIMEOUT);
+    // Biased: a hop that has finished always wins, so it fails the test
+    // even when the dropper's signal is ready too.
     tokio::select! {
+        biased;
         _ = hop => panic!("the hop finished before the server held it"),
         () = dropper.reached() => {}
     }
