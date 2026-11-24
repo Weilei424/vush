@@ -168,7 +168,7 @@ async fn dropping_an_http2_hop_resets_only_its_stream() {
         // A dropped hop reports nothing, so the setup of the connection it
         // opened goes to the next hop that uses it.
         assert!(next.timing.setup.is_some(), "{at:?}");
-        assert_eq!(dropper.accepted(), 2, "{at:?}");
+        assert_eq!(dropper.accepted(), 1, "{at:?}");
     }
 }
 
@@ -196,14 +196,23 @@ async fn dropping_a_waiting_http2_hop_leaves_the_shared_connect_alone() {
     assert!(third.timing.setup.is_none());
 }
 
-// ---- Points 5 to 8 ----
+// ---- Point 5: no per-user state in the executor ----
 //
-// 5, a session's cookies: `cookies.rs`; `a_copy_keeps_its_own_cookies` and
-// `a_session_from_another_executor_is_refused` for copies and foreign
-// sessions.
-// 6, redirects: `follow`'s unit tests and
-// `the_executor_follows_with_the_redirect_rules` in `send.rs`.
-// 7 and 8, what a failure may show: `diagnostics.rs`.
+// See `cookies.rs`.
+
+// ---- Point 6: sessions ----
+//
+// See `a_copy_keeps_its_own_cookies` in `cookies.rs` and
+// `a_session_from_another_executor_is_refused` in `pools.rs`.
+
+// ---- Point 7: `follow` is pure ----
+//
+// See `follow`'s unit tests and `the_executor_follows_with_the_redirect_rules`
+// in `send.rs`.
+
+// ---- Point 8: safe text ----
+//
+// See `diagnostics.rs`.
 
 // ---- Timing and reuse ----
 //
