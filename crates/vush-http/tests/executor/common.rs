@@ -475,6 +475,21 @@ where
     H: Fn(Request<Incoming>) -> F + Send + Sync + 'static,
     F: Future<Output = Reply> + Send + 'static,
 {
+    spawn_counted_tls(handler, alpn, max_handshakes, leaf, Arc::default()).await
+}
+
+/// Like [`spawn_tls`], and adds each accepted connection to `accepted`.
+async fn spawn_counted_tls<H, F>(
+    handler: H,
+    alpn: &[&[u8]],
+    max_handshakes: Option<usize>,
+    leaf: Leaf,
+    accepted: Arc<AtomicUsize>,
+) -> SocketAddr
+where
+    H: Fn(Request<Incoming>) -> F + Send + Sync + 'static,
+    F: Future<Output = Reply> + Send + 'static,
+{
     let handler = boxed(handler);
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
@@ -488,9 +503,8 @@ where
     let listener = bind().await;
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let mut accepted = 0;
         while let Ok((tcp, _)) = listener.accept().await {
-            accepted += 1;
+            let accepted = accepted.fetch_add(1, Ordering::SeqCst) + 1;
             if max_handshakes.is_some_and(|max| accepted > max) {
                 tokio::spawn(hold(tcp));
                 continue;
@@ -1131,8 +1145,7 @@ impl Dropper {
         closed.await.expect("the server ended");
     }
 
-    /// The connections accepted so far by the HTTP/1.1 dropper, or the
-    /// requests that reached the HTTP/2 one.
+    /// The TCP connections the server has accepted so far.
     pub fn accepted(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
     }
@@ -1229,11 +1242,9 @@ impl hyper::body::Body for SentThenStalled {
 pub async fn spawn_h2_dropper(at: DropAt, ca: &TestCa) -> Dropper {
     let (reached_tx, reached) = oneshot::channel();
     let accepted = Arc::new(AtomicUsize::new(0));
-    let count = accepted.clone();
     let first = Mutex::new(Some(reached_tx));
-    let addr = spawn_tls(
+    let addr = spawn_counted_tls(
         move |_request| {
-            count.fetch_add(1, Ordering::SeqCst);
             let reached = first.lock().unwrap().take();
             async move {
                 match (reached, at) {
@@ -1255,6 +1266,7 @@ pub async fn spawn_h2_dropper(at: DropAt, ca: &TestCa) -> Dropper {
         &[b"h2"],
         Some(1),
         ca.leaf_for_ip(LOCALHOST),
+        accepted.clone(),
     )
     .await;
     Dropper {
