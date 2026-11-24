@@ -9,12 +9,13 @@
 //! background after its hop took a pooled connection instead, so no hop's
 //! deadline bounds that connect.
 //!
-//! A failed connect is recorded in its pool's `LastFailure`, for the hops that
-//! waited on it.
+//! A failed connect is recorded in its pool's `FailedConnects`, for the hops
+//! that waited on it.
 //!
 //! Its errors carry a kind and a fixed message, never a host, a port or a
 //! library's text.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -75,45 +76,92 @@ impl fmt::Display for ConnectError {
 
 impl std::error::Error for ConnectError {}
 
-/// A pool's last failed connect, for the hops that waited on it. Under
+/// A pool's recent failed connects, for the hops that waited on them. Under
 /// `http2`, hyper-util hands those hops only a generic connect error, so the
-/// executor reads the cause here. One slot, shared by clones: a new failure
-/// replaces the old one. It holds a host, so it has no `Debug`.
+/// executor reads the cause here. It keeps the last [`KEPT_FAILURES`]
+/// failures, numbered in the order they were recorded, and clones share it.
+/// It holds a host, so it has no `Debug`.
 #[derive(Clone, Default)]
-pub(crate) struct LastFailure {
-    slot: Arc<Mutex<Option<Failed>>>,
+pub(crate) struct FailedConnects {
+    inner: Arc<FailedInner>,
+}
+
+/// How many failed connects a pool's record keeps.
+const KEPT_FAILURES: usize = 8;
+
+#[derive(Default)]
+struct FailedInner {
+    /// Every failure recorded so far.
+    count: AtomicU64,
+    /// The last [`KEPT_FAILURES`] failures, oldest first.
+    kept: Mutex<VecDeque<Failed>>,
 }
 
 struct Failed {
+    /// Its place in the count, starting at 1.
+    number: u64,
     scheme: http::uri::Scheme,
     authority: http::uri::Authority,
     error: ConnectError,
-    at: Instant,
 }
 
-impl LastFailure {
-    /// Records that the connect for `uri` failed with `error` at `at`.
-    pub(crate) fn record(&self, uri: &Uri, error: ConnectError, at: Instant) {
+impl FailedConnects {
+    /// The number of failures recorded so far. A hop reads it before it asks
+    /// its pool for a connection.
+    pub(crate) fn count(&self) -> u64 {
+        self.inner.count.load(Ordering::SeqCst)
+    }
+
+    /// Records that the connect for `uri` failed with `error`.
+    pub(crate) fn record(&self, uri: &Uri, error: ConnectError) {
         let (Some(scheme), Some(authority)) = (uri.scheme(), uri.authority()) else {
             return;
         };
-        *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Failed {
+        let mut kept = self
+            .inner
+            .kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Taken under the lock, so numbers enter the deque in order.
+        let number = self.inner.count.fetch_add(1, Ordering::SeqCst) + 1;
+        kept.push_back(Failed {
+            number,
             scheme: scheme.clone(),
             authority: authority.clone(),
             error,
-            at,
         });
+        if kept.len() > KEPT_FAILURES {
+            kept.pop_front();
+        }
     }
 
-    /// The recorded failure, if it was for `uri`'s origin and came at or
-    /// after `start`, the start of the hop that asks.
-    pub(crate) fn for_hop(&self, uri: &Uri, start: Instant) -> Option<ConnectError> {
-        let slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-        let failed = slot.as_ref()?;
-        (uri.scheme() == Some(&failed.scheme)
-            && uri.authority() == Some(&failed.authority)
-            && failed.at >= start)
-            .then_some(failed.error)
+    /// The first failure for `uri`'s origin numbered after `after`, a count
+    /// the hop read before it asked its pool for a connection. The first one
+    /// is the right one because, under `http2`, one connect per origin runs
+    /// at a time: the connect a waiting hop waited on is the first to fail
+    /// after its count. The one exception is a connect that ended in the
+    /// microseconds between the hop's count and its turn at the pool. It
+    /// comes first, if a new connect then starts and the hop waits on that.
+    ///
+    /// It gives `None` when no such failure is kept, and also when the
+    /// record dropped failures numbered after `after`: an older one for this
+    /// origin might have been among them.
+    pub(crate) fn for_hop(&self, uri: &Uri, after: u64) -> Option<ConnectError> {
+        let kept = self
+            .inner
+            .kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if kept.front()?.number > after + 1 {
+            return None;
+        }
+        kept.iter()
+            .find(|failed| {
+                failed.number > after
+                    && uri.scheme() == Some(&failed.scheme)
+                    && uri.authority() == Some(&failed.authority)
+            })
+            .map(|failed| failed.error)
     }
 }
 
@@ -204,7 +252,7 @@ pub(crate) struct Connector {
     version: HttpVersion,
     limit: Duration,
     resolver: Resolver,
-    last_failure: LastFailure,
+    failed_connects: FailedConnects,
 }
 
 impl Connector {
@@ -217,7 +265,7 @@ impl Connector {
             version,
             limit,
             resolver: Arc::new(lookup),
-            last_failure: LastFailure::default(),
+            failed_connects: FailedConnects::default(),
         }
     }
 
@@ -229,14 +277,14 @@ impl Connector {
             version: self.version,
             limit: self.limit,
             resolver: self.resolver.clone(),
-            last_failure: LastFailure::default(),
+            failed_connects: FailedConnects::default(),
         }
     }
 
     /// The record of this connector's failed connects, shared with its
     /// clones.
-    pub(crate) fn last_failure(&self) -> LastFailure {
-        self.last_failure.clone()
+    pub(crate) fn failed_connects(&self) -> FailedConnects {
+        self.failed_connects.clone()
     }
 
     #[cfg(test)]
@@ -255,12 +303,12 @@ impl Connector {
     /// The whole connect, resolving, TCP and TLS, under the limit.
     async fn connect(self, uri: Uri) -> Result<Conn, ConnectError> {
         let limit = self.limit;
-        let last_failure = self.last_failure.clone();
+        let failed_connects = self.failed_connects.clone();
         let result = tokio::time::timeout(limit, self.open(uri.clone()))
             .await
             .unwrap_or(Err(TOO_LONG));
         if let Err(error) = result {
-            last_failure.record(&uri, error, Instant::now());
+            failed_connects.record(&uri, error);
         }
         result
     }
@@ -760,67 +808,87 @@ mod tests {
         );
         let mut connector = Connector::new(tls, HttpVersion::Auto, Duration::from_millis(200));
         let url = format!("https://{addr}/");
-        let before = Instant::now();
+        let before = connector.failed_connects().count();
         let error = tokio::time::timeout(Duration::from_secs(5), connect_err(&mut connector, &url))
             .await
             .expect("the limit should end the connect");
         assert_eq!(error, TOO_LONG);
         let uri: Uri = url.parse().unwrap();
         assert_eq!(
-            connector.last_failure().for_hop(&uri, before),
+            connector.failed_connects().for_hop(&uri, before),
             Some(TOO_LONG)
         );
     }
 
     #[test]
-    fn a_failure_counts_for_hops_to_its_origin_that_started_first() {
-        let t0 = Instant::now();
-        let t1 = t0 + Duration::from_millis(5);
-        let t2 = t1 + Duration::from_millis(5);
+    fn a_hop_gets_the_first_failure_for_its_origin_after_its_count() {
         let uri = |text: &str| text.parse::<Uri>().unwrap();
         let (a, b) = (uri("https://a.test:8443/"), uri("https://b.test:8443/"));
-        let record = LastFailure::default();
-        assert_eq!(record.for_hop(&a, t0), None);
-        record.record(&a, HANDSHAKE, t1);
-        assert_eq!(record.for_hop(&a, t0), Some(HANDSHAKE));
-        assert_eq!(record.for_hop(&a, t1), Some(HANDSHAKE));
-        assert_eq!(record.for_hop(&a, t2), None);
-        assert_eq!(record.for_hop(&b, t0), None);
-        assert_eq!(record.for_hop(&uri("https://a.test:9443/"), t0), None);
-        assert_eq!(record.for_hop(&uri("http://a.test:8443/"), t0), None);
+        let record = FailedConnects::default();
+        let start = record.count();
+        assert_eq!(record.for_hop(&a, start), None);
+        record.record(&a, HANDSHAKE);
+        let after_a = record.count();
+        assert_eq!(record.for_hop(&a, start), Some(HANDSHAKE));
+        assert_eq!(record.for_hop(&a, after_a), None);
+        record.record(&b, REFUSED);
+        record.record(&a, UNRESOLVED);
+        // Neither another origin nor a later failure replaces it.
+        assert_eq!(record.for_hop(&a, start), Some(HANDSHAKE));
+        assert_eq!(record.for_hop(&a, after_a), Some(UNRESOLVED));
+        assert_eq!(record.for_hop(&b, start), Some(REFUSED));
+        assert_eq!(record.for_hop(&uri("https://a.test:9443/"), start), None);
+        assert_eq!(record.for_hop(&uri("http://a.test:8443/"), start), None);
         assert_eq!(
-            record.for_hop(&uri("https://A.TEST:8443/other?q=1"), t0),
+            record.for_hop(&uri("https://A.TEST:8443/other?q=1"), start),
             Some(HANDSHAKE)
         );
-        record.record(&b, REFUSED, t1);
-        assert_eq!(record.for_hop(&a, t0), None);
+    }
+
+    #[test]
+    fn a_hop_whose_failures_were_dropped_keeps_none() {
+        let uri = |text: &str| text.parse::<Uri>().unwrap();
+        let (a, b) = (uri("https://a.test:8443/"), uri("https://b.test:8443/"));
+        let record = FailedConnects::default();
+        let start = record.count();
+        record.record(&a, HANDSHAKE);
+        for _ in 0..7 {
+            record.record(&b, REFUSED);
+        }
+        assert_eq!(record.for_hop(&a, start), Some(HANDSHAKE));
+        record.record(&b, REFUSED);
+        // Failure 1 was dropped, so neither origin can be sure.
+        assert_eq!(record.for_hop(&a, start), None);
+        assert_eq!(record.for_hop(&b, start), None);
+        assert_eq!(record.for_hop(&b, start + 1), Some(REFUSED));
     }
 
     #[tokio::test]
     async fn a_failed_connect_is_recorded_for_its_pool_only() {
-        let before = Instant::now();
         let url = "http://unresolvable.test/";
         let uri: Uri = url.parse().unwrap();
         let mut connector = resolving(failing_resolver());
+        let before = connector.failed_connects().count();
         assert_eq!(connect_err(&mut connector, url).await, UNRESOLVED);
         assert_eq!(
-            connector.last_failure().for_hop(&uri, before),
+            connector.failed_connects().for_hop(&uri, before),
             Some(UNRESOLVED)
         );
         assert_eq!(
-            connector.clone().last_failure().for_hop(&uri, before),
+            connector.clone().failed_connects().for_hop(&uri, before),
             Some(UNRESOLVED)
         );
         assert_eq!(
-            connector.for_user().last_failure().for_hop(&uri, before),
+            connector.for_user().failed_connects().for_hop(&uri, before),
             None
         );
 
         let ok = format!("http://{}/", tcp_server().await);
         let ok_uri: Uri = ok.parse().unwrap();
         let mut fresh = plain();
+        let before = fresh.failed_connects().count();
         connect(&mut fresh, &ok).await.unwrap();
-        assert_eq!(fresh.last_failure().for_hop(&ok_uri, before), None);
+        assert_eq!(fresh.failed_connects().for_hop(&ok_uri, before), None);
     }
 
     #[tokio::test]
