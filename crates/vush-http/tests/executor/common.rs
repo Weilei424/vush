@@ -715,22 +715,27 @@ pub async fn spawn_raw(behavior: fn(TcpStream) -> BoxFuture) -> SocketAddr {
     addr
 }
 
-/// A port on 127.0.0.1 that refuses every connection. The guard holds a
-/// socket that is bound to it and never listens, so a connect to the port
-/// is refused. It is also not a source port any connect can pick: Linux
-/// never gives a connect a port that `bind` made, so a client can't connect
-/// to itself through it.
+/// A port on 127.0.0.1 that refuses every connection. It is the port a
+/// listener bound, and the guard keeps a connected pair on it open while it
+/// lives. The listener is dropped, so nothing listens and a connect gets a
+/// reset. The pair also keeps other tests from binding the port. A socket
+/// that is only bound won't do: Linux refuses a connect to it, but macOS
+/// drops it unanswered. The port is one `bind` made, so on Linux no connect
+/// can take it as its source port and reach itself.
 pub struct RefusedPort {
-    _socket: tokio::net::TcpSocket,
+    _client: std::net::TcpStream,
+    _server: std::net::TcpStream,
     pub addr: SocketAddr,
 }
 
 pub fn refused_port() -> RefusedPort {
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.bind(SocketAddr::new(LOCALHOST, 0)).unwrap();
-    let addr = socket.local_addr().unwrap();
+    let listener = std::net::TcpListener::bind((LOCALHOST, 0)).unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    let addr = server.local_addr().unwrap();
     RefusedPort {
-        _socket: socket,
+        _client: client,
+        _server: server,
         addr,
     }
 }
