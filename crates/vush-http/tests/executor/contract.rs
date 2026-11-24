@@ -98,8 +98,15 @@ async fn a_stalled_upload_times_out_in_headers() {
 // See `invalid_requests_send_nothing` and
 // `a_request_with_too_many_headers_fails_in_prepare` in `failures.rs`.
 
-/// One catalogue row: the kind it proves, and the failure the cause gave.
-fn row(kind: FailureKind, hop_failure: &Failure, stage: FailureStage, message: &'static str) {
+/// One catalogue row: checks that the cause gave `kind` with this stage and
+/// text, and records `kind` as covered.
+fn row(
+    covered: &mut Vec<FailureKind>,
+    kind: FailureKind,
+    hop_failure: &Failure,
+    stage: FailureStage,
+    message: &'static str,
+) {
     assert_eq!(hop_failure.kind, kind, "{kind:?}");
     assert_eq!(
         hop_failure,
@@ -110,6 +117,7 @@ fn row(kind: FailureKind, hop_failure: &Failure, stage: FailureStage, message: &
         },
         "{kind:?}"
     );
+    covered.push(kind);
 }
 
 fn failed(hop: &HttpHop) -> &Failure {
@@ -127,13 +135,13 @@ async fn every_failure_kind_has_a_real_cause() {
     bad.headers = pairs(&[("x-bad", "a\r\nb")]);
     let hop = send(&executor(HttpVersion::Auto), &bad).await;
     row(
+        &mut covered,
         FailureKind::InvalidRequest,
         failed(&hop),
         FailureStage::Prepare,
         "a header value holds a control character",
     );
     assert_eq!(server.hits("/probe"), 0);
-    covered.push(FailureKind::InvalidRequest);
 
     // `connect`: nothing listens on the port.
     let refused = refused_port();
@@ -143,12 +151,12 @@ async fn every_failure_kind_has_a_real_cause() {
     )
     .await;
     row(
+        &mut covered,
         FailureKind::Connect,
         failed(&hop),
         FailureStage::Connect,
         "the connection was refused or unreachable",
     );
-    covered.push(FailureKind::Connect);
 
     // `tls`: the server's certificate is from a CA the client doesn't trust.
     let addr = spawn_tls(
@@ -164,12 +172,12 @@ async fn every_failure_kind_has_a_real_cause() {
     )
     .await;
     row(
+        &mut covered,
         FailureKind::Tls,
         failed(&hop),
         FailureStage::Connect,
         "the TLS handshake failed",
     );
-    covered.push(FailureKind::Tls);
 
     // `timeout`: the server reads the request and says nothing.
     let addr = spawn_raw(silent_after_head).await;
@@ -180,12 +188,12 @@ async fn every_failure_kind_has_a_real_cause() {
     )
     .await;
     row(
+        &mut covered,
         FailureKind::Timeout,
         failed(&hop),
         FailureStage::Headers,
         "the hop ran out of time",
     );
-    covered.push(FailureKind::Timeout);
 
     // `connection_closed`: the server closes after the request head.
     let addr = spawn_raw(close_after_head).await;
@@ -195,12 +203,12 @@ async fn every_failure_kind_has_a_real_cause() {
     )
     .await;
     row(
+        &mut covered,
         FailureKind::ConnectionClosed,
         failed(&hop),
         FailureStage::Headers,
         "the connection closed before the response was complete",
     );
-    covered.push(FailureKind::ConnectionClosed);
 
     // `protocol`: the status line isn't HTTP.
     let addr = spawn_raw(garbage_status).await;
@@ -210,12 +218,12 @@ async fn every_failure_kind_has_a_real_cause() {
     )
     .await;
     row(
+        &mut covered,
         FailureKind::Protocol,
         failed(&hop),
         FailureStage::Headers,
         "the response broke HTTP rules",
     );
-    covered.push(FailureKind::Protocol);
 
     // `invalid_redirect`: a `302` to an `ftp` URL.
     let addr = spawn_h1(redirecting(&[("/", 302, "ftp://h/")])).await;
@@ -227,12 +235,12 @@ async fn every_failure_kind_has_a_real_cause() {
         .follow(&get("http://127.0.0.1/".to_owned()), moved)
         .expect_err("an ftp redirect can't be followed");
     row(
+        &mut covered,
         FailureKind::InvalidRedirect,
         &error,
         FailureStage::Prepare,
         "the redirect goes to an unsupported scheme",
     );
-    covered.push(FailureKind::InvalidRedirect);
 
     // `too_many_redirects`: a path that redirects to itself, with 2 allowed.
     let addr = spawn_h1(redirecting(&[("/loop", 302, "/loop")])).await;
