@@ -955,6 +955,50 @@ pub fn garbage_status(stream: TcpStream) -> BoxFuture {
     answer(stream, b"HELLO\r\n\r\n")
 }
 
+/// Two `Content-Length` headers that disagree, and two body bytes.
+pub fn two_content_lengths(stream: TcpStream) -> BoxFuture {
+    answer(
+        stream,
+        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\ncontent-length: 3\r\n\r\nok",
+    )
+}
+
+/// A `Content-Length` that isn't a number.
+pub fn bad_content_length(stream: TcpStream) -> BoxFuture {
+    answer(stream, b"HTTP/1.1 200 OK\r\ncontent-length: ten\r\n\r\n")
+}
+
+/// Promises 10 body bytes, sends 3, then closes.
+pub fn short_body_then_close(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        read_head(&stream).await;
+        write_all(&stream, b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc").await;
+    })
+}
+
+/// Both `Transfer-Encoding: chunked` and a `Content-Length`. The body is
+/// `ok` in one chunk.
+pub fn both_framings(stream: TcpStream) -> BoxFuture {
+    answer(
+        stream,
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ncontent-length: 5\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+    )
+}
+
+/// Answers whatever arrives, which is a TLS hello and no request head, with
+/// a plain HTTP `400`, then closes.
+pub fn http_reply_to_tls(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        let mut buf = [0; 4096];
+        read_some(&stream, &mut buf).await;
+        write_all(
+            &stream,
+            b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n",
+        )
+        .await;
+    })
+}
+
 /// A chunked body whose second chunk has a size line that isn't hex.
 pub fn malformed_chunk(stream: TcpStream) -> BoxFuture {
     answer(
@@ -1068,18 +1112,8 @@ pub fn no_content(stream: TcpStream) -> BoxFuture {
 /// so its head could be lost and the reset land before it.
 pub fn h2_reset_after_one_frame(stream: TcpStream) -> BoxFuture {
     Box::pin(async move {
-        // The client's preface, then its frames up to the request's HEADERS.
-        read_exact(&stream, 24).await;
-        loop {
-            let header = read_exact(&stream, 9).await;
-            if header.len() < 9 {
-                return;
-            }
-            let len = u32::from_be_bytes([0, header[0], header[1], header[2]]);
-            read_exact(&stream, len as usize).await;
-            if header[3] == 0x1 {
-                break;
-            }
+        if !read_to_request_headers(&stream).await {
+            return;
         }
         #[rustfmt::skip]
         let frames: &[u8] = &[
@@ -1093,6 +1127,67 @@ pub fn h2_reset_after_one_frame(stream: TcpStream) -> BoxFuture {
             0, 0, 5, 0x0, 0x0, 0, 0, 0, 1, b'f', b'i', b'r', b's', b't',
             // RST_STREAM on stream 1: INTERNAL_ERROR
             0, 0, 4, 0x3, 0x0, 0, 0, 0, 1, 0, 0, 0, 0x2,
+        ];
+        write_all(&stream, frames).await;
+        pending::<()>().await;
+    })
+}
+
+/// Reads the client's preface, then its frames up to the request's
+/// `HEADERS`. Gives `false` if the client ended first.
+async fn read_to_request_headers(stream: &TcpStream) -> bool {
+    read_exact(stream, 24).await;
+    loop {
+        let header = read_exact(stream, 9).await;
+        if header.len() < 9 {
+            return false;
+        }
+        let len = u32::from_be_bytes([0, header[0], header[1], header[2]]);
+        read_exact(stream, len as usize).await;
+        if header[3] == 0x1 {
+            return true;
+        }
+    }
+}
+
+/// Reads like [`h2_reset_after_one_frame`] up to the request's `HEADERS`,
+/// then answers with `SETTINGS`, a `SETTINGS` ACK and a `GOAWAY` for last
+/// stream 0 with `NO_ERROR`. The request is never answered.
+pub fn h2_goaway_before_response(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        if !read_to_request_headers(&stream).await {
+            return;
+        }
+        #[rustfmt::skip]
+        let frames: &[u8] = &[
+            // SETTINGS, empty
+            0, 0, 0, 0x4, 0x0, 0, 0, 0, 0,
+            // SETTINGS with ACK, for the client's
+            0, 0, 0, 0x4, 0x1, 0, 0, 0, 0,
+            // GOAWAY: last stream 0, NO_ERROR
+            0, 0, 8, 0x7, 0x0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        write_all(&stream, frames).await;
+        pending::<()>().await;
+    })
+}
+
+/// Reads like [`h2_reset_after_one_frame`] up to the request's `HEADERS`,
+/// then sends `SETTINGS`, a `SETTINGS` ACK and a `DATA` frame on stream 0,
+/// which HTTP/2 forbids.
+pub fn h2_data_on_stream_zero(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        if !read_to_request_headers(&stream).await {
+            return;
+        }
+        #[rustfmt::skip]
+        let frames: &[u8] = &[
+            // SETTINGS, empty
+            0, 0, 0, 0x4, 0x0, 0, 0, 0, 0,
+            // SETTINGS with ACK, for the client's
+            0, 0, 0, 0x4, 0x1, 0, 0, 0, 0,
+            // DATA on stream 0: "x"
+            0, 0, 1, 0x0, 0x0, 0, 0, 0, 0, b'x',
         ];
         write_all(&stream, frames).await;
         pending::<()>().await;
