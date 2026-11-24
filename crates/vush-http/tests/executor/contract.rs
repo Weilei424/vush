@@ -431,9 +431,9 @@ async fn dropping_an_http2_hop_resets_only_its_stream() {
         // serve this hop: it ran on the same connection.
         let next = executor.send(&mut session, &get(url), TIMEOUT).await;
         assert_eq!(response(&next).status, 200, "{at:?}");
-        // A dropped hop reports nothing, so the setup of the connection it
-        // opened goes to the next hop that uses it.
-        assert!(next.timing.setup.is_some(), "{at:?}");
+        // The dropped hop took the setup of the connection it opened when it
+        // got the connection, so the next hop that uses it has none.
+        assert!(next.timing.setup.is_none(), "{at:?}");
         assert_eq!(dropper.accepted(), 1, "{at:?}");
     }
 }
