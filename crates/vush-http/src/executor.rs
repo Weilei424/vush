@@ -1205,4 +1205,41 @@ mod tests {
             .collect();
         assert_eq!(values, [b"a=1".as_slice(), b"b=2".as_slice()]);
     }
+
+    /// A lookup that fails fails the hop as `dns` at connect, before any
+    /// connection or time to headers exists. A test through the public
+    /// executor can't cause it, because it needs the private resolver hook.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_lookup_fails_the_hop_as_dns() {
+        let executor = resolving(Arc::new(|_, _| {
+            Box::pin(async { Err(std::io::Error::other("no such host")) })
+        }));
+        let mut session = executor.new_session();
+        let request = get("http://missing.vush.test/".to_owned(), &[]);
+        let hop = executor.send(&mut session, &request, NAMED_TIMEOUT).await;
+        assert_eq!(
+            hop.outcome.as_ref().unwrap_err(),
+            &Failure {
+                kind: FailureKind::Dns,
+                stage: FailureStage::Connect,
+                message: "the host name didn't resolve",
+            }
+        );
+        assert_eq!(hop.connection, None);
+        assert_eq!(hop.timing.setup, None);
+        assert_eq!(hop.timing.to_headers, None);
+    }
+
+    /// A named host's connection setup includes its lookup time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_named_host_times_its_lookup() {
+        let port = cookie_server(|_| vec![]).await;
+        let executor = named();
+        let mut session = executor.new_session();
+        let request = get(format!("http://api.vush.test:{port}/"), &[]);
+        let hop = executor.send(&mut session, &request, NAMED_TIMEOUT).await;
+        hop.outcome.as_ref().expect("the hop should succeed");
+        let setup = hop.timing.setup.expect("a new connection");
+        assert!(setup.dns.is_some());
+    }
 }
