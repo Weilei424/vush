@@ -17,7 +17,9 @@ use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::RootCertStore;
 use vush_core::plan::{HttpSettings, HttpVersion, ResourceLimits};
 use vush_core::protocol::http::{HttpExecutor, HttpHop, HttpRequest, HttpResponse, WireVersion};
-use vush_core::protocol::{BodySizes, Failure, FailureKind, FailureStage, HopTiming};
+use vush_core::protocol::{
+    BodySizes, ConnectionId, ConnectionSetup, Failure, FailureKind, FailureStage, HopTiming,
+};
 
 use crate::body::CountingBody;
 use crate::capture::Capture;
@@ -401,6 +403,7 @@ impl Executor {
             assigned = connection_assigned(capture) => {
                 if assigned {
                     marker.set(FailureStage::Headers);
+                    progress.take_setup_from(capture);
                 }
                 response.await
             }
@@ -409,6 +412,7 @@ impl Executor {
         // got there before the marker moved.
         if capture.connection_metadata().is_some() {
             marker.set(FailureStage::Headers);
+            progress.take_setup_from(capture);
         }
         // A failure before the head is in the marker's stage, unless its
         // cause places it.
@@ -550,7 +554,14 @@ impl HttpExecutor for Executor {
             .and_then(|capture| capture.connection_metadata().as_ref().and_then(conn_info))
             .or(progress.error_connection);
         let connection = info.as_ref().map(|info| info.id);
-        let setup = info.and_then(|info| info.take_setup());
+        // The setup the hop took when it got its connection. Otherwise the
+        // error named a connection, or hyper-util moved the hop to another
+        // one (it retries on a second connection only after a reused one
+        // closed before the request went out), so take that one's setup now.
+        let setup = match progress.setup.take() {
+            Some((id, setup)) if Some(id) == connection => Some(setup),
+            _ => info.and_then(|info| info.take_setup()),
+        };
         let received = progress.capture.as_ref().map_or(0, Capture::received);
         HttpHop {
             timing: HopTiming {
@@ -586,6 +597,11 @@ struct Progress {
     capture: Option<Capture>,
     /// The connection a hyper-util error names, if any.
     error_connection: Option<Arc<ConnInfo>>,
+    /// The setup the hop took from its connection, with that connection's
+    /// ID. It is taken when hyper-util assigns the connection, not at the
+    /// end, so a hop dropped after it got its connection takes the setup
+    /// with it.
+    setup: Option<(ConnectionId, ConnectionSetup)>,
 }
 
 impl Progress {
@@ -595,7 +611,23 @@ impl Progress {
             to_headers: None,
             capture: None,
             error_connection: None,
+            setup: None,
         }
+    }
+
+    /// Takes the setup of the connection `capture` names, unless the hop
+    /// already holds one. A pooled connection has none left, and then the
+    /// hop stores nothing.
+    fn take_setup_from(&mut self, capture: &CaptureConnection) {
+        if self.setup.is_some() {
+            return;
+        }
+        let taken = capture
+            .connection_metadata()
+            .as_ref()
+            .and_then(conn_info)
+            .and_then(|info| info.take_setup().map(|setup| (info.id, setup)));
+        self.setup = taken;
     }
 }
 
