@@ -8,15 +8,19 @@ use std::time::Duration;
 
 use rustls::RootCertStore;
 use vush_core::plan::{HttpSettings, HttpVersion, PoolScope, ResourceLimits};
-use vush_core::protocol::http::{HttpBody, HttpExecutor};
-use vush_core::protocol::{FailureKind, FailureStage};
+use vush_core::protocol::http::{HttpBody, HttpExecutor, HttpHop};
+use vush_core::protocol::{Failure, FailureKind, FailureStage, Outcome};
+use vush_core::runner::run_attempt;
 use vush_http::Executor;
 
 use crate::common::{
     BODY_DELAY, CountingServer, DropAt, Dropper, HEAD_DELAY, LOCALHOST, MIB, NO_DIR, TIMEOUT,
-    TestCa, after_two_arrivals, early_hints_then_ok, echo, executor, failure, get, method,
-    poll_once, response, send, send_within, settings, silent_after_head, slow_reply, spawn_h1,
-    spawn_h1_dropper, spawn_h2_dropper, spawn_raw, spawn_tls, trusting,
+    TestCa, after_two_arrivals, bad_content_length, both_framings, close_after_head,
+    early_hints_then_ok, echo, executor, failure, garbage_status, get, h2_data_on_stream_zero,
+    h2_goaway_before_response, http_reply_to_tls, method, pairs, poll_once, redirecting,
+    refused_port, response, send, send_within, settings, short_body_then_close, silent_after_head,
+    slow_reply, spawn_h1, spawn_h1_dropper, spawn_h2_dropper, spawn_raw, spawn_tls, trusting,
+    two_content_lengths,
 };
 
 // ---- Point 1: one hop per call ----
@@ -93,6 +97,257 @@ async fn a_stalled_upload_times_out_in_headers() {
 //
 // See `invalid_requests_send_nothing` and
 // `a_request_with_too_many_headers_fails_in_prepare` in `failures.rs`.
+
+/// One catalogue row: the kind it proves, and the failure the cause gave.
+fn row(kind: FailureKind, hop_failure: &Failure, stage: FailureStage, message: &'static str) {
+    assert_eq!(hop_failure.kind, kind, "{kind:?}");
+    assert_eq!(
+        hop_failure,
+        &Failure {
+            kind,
+            stage,
+            message
+        },
+        "{kind:?}"
+    );
+}
+
+fn failed(hop: &HttpHop) -> &Failure {
+    hop.outcome.as_ref().expect_err("the hop should fail")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_failure_kind_has_a_real_cause() {
+    let mut covered = Vec::new();
+
+    // `invalid_request`: a header value with a control character reaches
+    // no server.
+    let server = CountingServer::spawn().await;
+    let mut bad = get(format!("http://{}/probe", server.addr));
+    bad.headers = pairs(&[("x-bad", "a\r\nb")]);
+    let hop = send(&executor(HttpVersion::Auto), &bad).await;
+    row(
+        FailureKind::InvalidRequest,
+        failed(&hop),
+        FailureStage::Prepare,
+        "a header value holds a control character",
+    );
+    assert_eq!(server.hits("/probe"), 0);
+    covered.push(FailureKind::InvalidRequest);
+
+    // `connect`: nothing listens on the port.
+    let refused = refused_port();
+    let hop = send(
+        &executor(HttpVersion::Auto),
+        &get(format!("http://{}/", refused.addr)),
+    )
+    .await;
+    row(
+        FailureKind::Connect,
+        failed(&hop),
+        FailureStage::Connect,
+        "the connection was refused or unreachable",
+    );
+    covered.push(FailureKind::Connect);
+
+    // `tls`: the server's certificate is from a CA the client doesn't trust.
+    let addr = spawn_tls(
+        echo,
+        &[b"h2", b"http/1.1"],
+        None,
+        TestCa::generate().leaf_for_ip(LOCALHOST),
+    )
+    .await;
+    let hop = send(
+        &trusting(&TestCa::generate(), HttpVersion::Auto),
+        &get(format!("https://{addr}/")),
+    )
+    .await;
+    row(
+        FailureKind::Tls,
+        failed(&hop),
+        FailureStage::Connect,
+        "the TLS handshake failed",
+    );
+    covered.push(FailureKind::Tls);
+
+    // `timeout`: the server reads the request and says nothing.
+    let addr = spawn_raw(silent_after_head).await;
+    let hop = send_within(
+        &executor(HttpVersion::Auto),
+        &get(format!("http://{addr}/")),
+        Duration::from_millis(300),
+    )
+    .await;
+    row(
+        FailureKind::Timeout,
+        failed(&hop),
+        FailureStage::Headers,
+        "the hop ran out of time",
+    );
+    covered.push(FailureKind::Timeout);
+
+    // `connection_closed`: the server closes after the request head.
+    let addr = spawn_raw(close_after_head).await;
+    let hop = send(
+        &executor(HttpVersion::Auto),
+        &get(format!("http://{addr}/")),
+    )
+    .await;
+    row(
+        FailureKind::ConnectionClosed,
+        failed(&hop),
+        FailureStage::Headers,
+        "the connection closed before the response was complete",
+    );
+    covered.push(FailureKind::ConnectionClosed);
+
+    // `protocol`: the status line isn't HTTP.
+    let addr = spawn_raw(garbage_status).await;
+    let hop = send(
+        &executor(HttpVersion::Auto),
+        &get(format!("http://{addr}/")),
+    )
+    .await;
+    row(
+        FailureKind::Protocol,
+        failed(&hop),
+        FailureStage::Headers,
+        "the response broke HTTP rules",
+    );
+    covered.push(FailureKind::Protocol);
+
+    // `invalid_redirect`: a `302` to an `ftp` URL.
+    let addr = spawn_h1(redirecting(&[("/", 302, "ftp://h/")])).await;
+    let executor = executor(HttpVersion::Auto);
+    let hop = send(&executor, &get(format!("http://{addr}/"))).await;
+    let moved = response(&hop);
+    assert_eq!(moved.status, 302);
+    let error = executor
+        .follow(&get("http://127.0.0.1/".to_owned()), moved)
+        .expect_err("an ftp redirect can't be followed");
+    row(
+        FailureKind::InvalidRedirect,
+        &error,
+        FailureStage::Prepare,
+        "the redirect goes to an unsupported scheme",
+    );
+    covered.push(FailureKind::InvalidRedirect);
+
+    // `too_many_redirects`: a path that redirects to itself, with 2 allowed.
+    let addr = spawn_h1(redirecting(&[("/loop", 302, "/loop")])).await;
+    let mut session = executor.new_session();
+    let result = run_attempt(
+        &executor,
+        &mut session,
+        get(format!("http://{addr}/loop")),
+        TIMEOUT,
+        2,
+    )
+    .await;
+    assert_eq!(
+        result.record.outcome(),
+        Outcome::Failed {
+            kind: FailureKind::TooManyRedirects,
+            stage: FailureStage::Prepare,
+        }
+    );
+    covered.push(FailureKind::TooManyRedirects);
+
+    // `dns` has no row. Its cause needs the private resolver hook, so
+    // `a_failed_lookup_fails_the_hop_as_dns` in `src/executor.rs` takes it
+    // through `send`. `other` is a kind no cause should reach.
+    assert!(!covered.contains(&FailureKind::Other));
+    for kind in FailureKind::ALL {
+        if kind != FailureKind::Dns && kind != FailureKind::Other {
+            assert!(covered.contains(&kind), "no row for {kind:?}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hostile_responses_get_a_kind_that_fits() {
+    const PROTOCOL: (FailureKind, FailureStage, &str) = (
+        FailureKind::Protocol,
+        FailureStage::Headers,
+        "the response broke HTTP rules",
+    );
+    const CLOSED: (FailureKind, FailureStage, &str) = (
+        FailureKind::ConnectionClosed,
+        FailureStage::Headers,
+        "the connection closed before the response was complete",
+    );
+    let plain = executor(HttpVersion::Auto);
+    let h2 = executor(HttpVersion::Http2);
+
+    let mut cases = Vec::new();
+    for (name, fixture, executor, expected) in [
+        (
+            "two content-lengths",
+            two_content_lengths as fn(_) -> _,
+            &plain,
+            PROTOCOL,
+        ),
+        ("a bad content-length", bad_content_length, &plain, PROTOCOL),
+        (
+            "a short body",
+            short_body_then_close,
+            &plain,
+            (FailureKind::ConnectionClosed, FailureStage::Body, CLOSED.2),
+        ),
+        ("a goaway", h2_goaway_before_response, &h2, CLOSED),
+        ("data on stream zero", h2_data_on_stream_zero, &h2, PROTOCOL),
+    ] {
+        let addr = spawn_raw(fixture).await;
+        let hop = send(executor, &get(format!("http://{addr}/"))).await;
+        cases.push((name, hop, expected));
+    }
+
+    let ca = TestCa::generate();
+    let addr = spawn_raw(http_reply_to_tls).await;
+    let hop = send(
+        &trusting(&ca, HttpVersion::Auto),
+        &get(format!("https://{addr}/")),
+    )
+    .await;
+    cases.push((
+        "an http reply to tls",
+        hop,
+        (
+            FailureKind::Tls,
+            FailureStage::Connect,
+            "the TLS handshake failed",
+        ),
+    ));
+
+    for (name, hop, (kind, stage, message)) in &cases {
+        let got = failed(hop);
+        assert_ne!(got.kind, FailureKind::Other, "{name}");
+        assert_eq!(
+            got,
+            &Failure {
+                kind: *kind,
+                stage: *stage,
+                message
+            },
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_response_with_both_framings_is_read_as_chunked() {
+    // RFC 9112 section 6.3: `Transfer-Encoding` wins over `Content-Length`.
+    let addr = spawn_raw(both_framings).await;
+    let hop = send(
+        &executor(HttpVersion::Auto),
+        &get(format!("http://{addr}/")),
+    )
+    .await;
+    let got = response(&hop);
+    assert_eq!(got.status, 200);
+    assert_eq!(got.body, b"ok");
+}
 
 // ---- Point 4: cancel by drop ----
 
