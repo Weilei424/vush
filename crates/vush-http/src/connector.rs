@@ -589,12 +589,13 @@ mod tests {
         addr
     }
 
-    /// A port on 127.0.0.1 that refuses every connection at once. It is the
-    /// client end of a loopback connection that stays open while the guard
-    /// lives. Nothing listens on it, so a connect gets a reset, and its
-    /// socket keeps other tests from binding the port. A socket that is only
-    /// bound won't do: Linux refuses a connect to it, but macOS drops it
-    /// unanswered.
+    /// A port on 127.0.0.1 that refuses every connection. It is the port a
+    /// listener bound, and the guard keeps a connected pair on it open while
+    /// it lives. The listener is dropped, so nothing listens and a connect
+    /// gets a reset. The pair also keeps other tests from binding the port.
+    /// A socket that is only bound won't do: Linux refuses a connect to it,
+    /// but macOS drops it unanswered. The port is one `bind` made, so on
+    /// Linux no connect can take it as its source port and reach itself.
     struct RefusedPort {
         _client: std::net::TcpStream,
         _server: std::net::TcpStream,
@@ -605,7 +606,7 @@ mod tests {
         let listener = std::net::TcpListener::bind((LOCALHOST, 0)).unwrap();
         let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _) = listener.accept().unwrap();
-        let addr = client.local_addr().unwrap();
+        let addr = server.local_addr().unwrap();
         RefusedPort {
             _client: client,
             _server: server,
