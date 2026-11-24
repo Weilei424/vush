@@ -136,16 +136,22 @@ impl FailedConnects {
     }
 
     /// The first failure for `uri`'s origin numbered after `after`, a count
-    /// the hop read before it asked its pool for a connection. The first one
-    /// is the right one because, under `http2`, one connect per origin runs
-    /// at a time: the connect a waiting hop waited on is the first to fail
-    /// after its count. The one exception is a connect that ended in the
-    /// microseconds between the hop's count and its turn at the pool. It
-    /// comes first, if a new connect then starts and the hop waits on that.
+    /// the hop read before it asked its pool for a connection. Under `http2`,
+    /// one connect per origin runs at a time, so this is the failure of the
+    /// connect a waiting hop waited on, with two exceptions that give an
+    /// earlier connect's failure instead:
+    /// - a connect ended in the microseconds between the hop's count and its
+    ///   turn at the pool, and the hop then waited on a new one;
+    /// - hyper-util sent the hop back to wait again, because the connection
+    ///   it got closed before the request went out, and another connect for
+    ///   the origin failed in between.
     ///
-    /// It gives `None` when no such failure is kept, and also when the
-    /// record dropped failures numbered after `after`: an older one for this
-    /// origin might have been among them.
+    /// It gives `None` when no such failure is kept. It also gives `None`
+    /// when the record dropped any failure numbered after `after`, even if
+    /// the hop's own is still kept, since an older one for this origin might
+    /// have been among them. And a connect whose failure came in the
+    /// microseconds before the hop read its count, while it still held the
+    /// pool's connecting lock, gives `None` to the hops that waited on it.
     pub(crate) fn for_hop(&self, uri: &Uri, after: u64) -> Option<ConnectError> {
         let kept = self
             .inner
