@@ -296,7 +296,7 @@
     - **Hops waiting on a shared HTTP/2 connect report its real kind** (answers P2.3's note):
       - each pool records its last 8 failed connects, in order;
       - a waiting hop uses the first one for its origin after it asked for a connection;
-      - an abandoned connect, a failure in HTTP/2's own handshake, and a failure the record dropped for newer ones still give `connect` with "the shared connection attempt failed".
+      - an abandoned connect, a failure in HTTP/2's own handshake, and a failure the record can't single out still give `connect` with "the shared connection attempt failed".
     - **The resolver hook stays private** (answers P2.2's note). The `dns` failure through `send`, its timing, and one plaintext reuse test live inside the crate.
     - **Reuse tests are gated, not lucky** (answers Codex round 3's note on P2.5). The ten tests that ran on one thread switch to HTTP/1.1 over TLS, where the server answers only the handshakes the test expects.
     - **One `contract.rs` walks the contract's eight points** (answers P2.1's note), with a failure-kind catalogue that gives every kind except `other` a real cause.
