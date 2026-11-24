@@ -24,7 +24,7 @@ use vush_core::protocol::{
 use crate::body::CountingBody;
 use crate::capture::Capture;
 use crate::classify::{classify, connector_failure, failure, is_shared_connect, timeout};
-use crate::connector::{ConnInfo, Connector, LastFailure};
+use crate::connector::{ConnInfo, Connector, FailedConnects};
 use crate::cookie::{Jar, Target};
 use crate::decode;
 use crate::executors::{SystemRoots, build};
@@ -139,14 +139,14 @@ pub(crate) const H2_HEADER_LIST_BYTES: u32 = 16_384;
 #[derive(Clone)]
 pub(crate) struct Pool {
     client: Client<Connector, CountingBody>,
-    last_failure: LastFailure,
+    failed_connects: FailedConnects,
 }
 
 /// Builds a pool. Every pool, pooled or per user, is built here, so each
 /// closes its idle connections after [`IDLE_TIMEOUT`]. It takes the record of
 /// failed connects from `connector`, whose clones all share it.
 pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
-    let last_failure = connector.last_failure();
+    let failed_connects = connector.failed_connects();
     let client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(IDLE_TIMEOUT)
         .pool_timer(TokioTimer::new())
@@ -156,7 +156,7 @@ pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
         .build(connector);
     Pool {
         client,
-        last_failure,
+        failed_connects,
     }
 }
 
@@ -189,8 +189,9 @@ pub(crate) enum Transport {
 ///   time and the others wait for it. When that connect fails, the waiting
 ///   hops report its kind and text. Three cases leave them with `connect` and
 ///   "the shared connection attempt failed": the connect was abandoned, it
-///   failed in HTTP/2's own handshake, or another origin's failure replaced
-///   it in the pool's record (each pool keeps only its last failure).
+///   failed in HTTP/2's own handshake, or the pool's record, which keeps its
+///   last 8 failed connects, dropped it for newer ones before the waiting
+///   hop read it.
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
@@ -393,6 +394,9 @@ impl Executor {
         jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
         let uri = request.uri().clone();
+        // A waiting hop's connect fails after this point, and under `http2`
+        // it is the first failure for the hop's origin after it.
+        let failures_before = pool.failed_connects.count();
         let mut response = pool.client.request(request);
         // The hop is in `connect` until hyper-util assigns it a connection,
         // new or pooled. Only that tells this hop apart: a connect that loses
@@ -424,7 +428,7 @@ impl Executor {
                 // A hop that waited on another hop's connect learns why it
                 // failed from the pool's record, if the failure fits.
                 if is_shared_connect(&failed)
-                    && let Some(cause) = pool.last_failure.for_hop(&uri, progress.start)
+                    && let Some(cause) = pool.failed_connects.for_hop(&uri, failures_before)
                 {
                     return Err(connector_failure(cause));
                 }
@@ -1273,5 +1277,87 @@ mod tests {
         hop.outcome.as_ref().expect("the hop should succeed");
         let setup = hop.timing.setup.expect("a new connection");
         assert!(setup.dns.is_some());
+    }
+
+    /// Polls `future` once, so it runs as far as it can without waiting.
+    async fn poll_once<F: Future + Unpin>(future: &mut F) -> std::task::Poll<F::Output> {
+        std::future::poll_fn(|cx| std::task::Poll::Ready(std::pin::Pin::new(&mut *future).poll(cx)))
+            .await
+    }
+
+    /// A pooled `http2` executor whose first lookup never ends and whose
+    /// later lookups all fail at once. Its connector gives up after 100 ms.
+    fn flaky_http2() -> Executor {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver: Resolver = Arc::new(move |_, _| {
+            let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if first {
+                    std::future::pending().await
+                } else {
+                    Err(std::io::Error::other("no such host"))
+                }
+            })
+        });
+        let tls = client_config(
+            Verification::Roots(RootCertStore::empty()),
+            HttpVersion::Http2,
+        );
+        let connector = Connector::with_resolver(
+            tls,
+            HttpVersion::Http2,
+            Duration::from_millis(100),
+            resolver,
+        );
+        Executor::from_parts(
+            Transport::Pooled(Box::new(new_pool(connector, HttpVersion::Http2))),
+            1_048_576,
+            NonZeroU32::new(64),
+            false,
+        )
+    }
+
+    /// The waiting hop is woken when the shared connect fails, but it isn't
+    /// polled until after a later connect for the same origin has failed
+    /// too. It still reports the connect it waited on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_later_failure_doesnt_replace_the_one_a_hop_waited_on() {
+        let executor = flaky_http2();
+        let request = get("http://flaky.vush.test/".to_owned(), &[]);
+        let (mut s1, mut s2, mut s3) = (
+            executor.new_session(),
+            executor.new_session(),
+            executor.new_session(),
+        );
+        // Its connect waits on the lookup that never ends.
+        let mut connecting = Box::pin(executor.send(&mut s1, &request, NAMED_TIMEOUT));
+        assert!(poll_once(&mut connecting).await.is_pending());
+        // A waiter, because `connecting` holds the connecting lock.
+        let mut waiting = Box::pin(executor.send(&mut s2, &request, NAMED_TIMEOUT));
+        assert!(poll_once(&mut waiting).await.is_pending());
+
+        let first = connecting.await;
+        let timed_out = Failure {
+            kind: FailureKind::Timeout,
+            stage: FailureStage::Connect,
+            message: "the connection took too long",
+        };
+        assert_eq!(first.outcome.as_ref().unwrap_err(), &timed_out);
+        assert_eq!(first.connection, None);
+
+        // This hop takes the free lock, and its lookup fails at once.
+        let later = executor.send(&mut s3, &request, NAMED_TIMEOUT).await;
+        assert_eq!(
+            later.outcome.as_ref().unwrap_err(),
+            &Failure {
+                kind: FailureKind::Dns,
+                stage: FailureStage::Connect,
+                message: "the host name didn't resolve",
+            }
+        );
+
+        let waited = waiting.await;
+        assert_eq!(waited.outcome.as_ref().unwrap_err(), &timed_out);
+        assert_eq!(waited.connection, None);
     }
 }
