@@ -25,6 +25,7 @@ pub(crate) fn follow(
     request: &HttpRequest,
     response: &HttpResponse,
 ) -> Result<Option<HttpRequest>, Failure> {
+    // Only these five redirect. 300, 304 and the rest of 3xx are final.
     if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
         return Ok(None);
     }
