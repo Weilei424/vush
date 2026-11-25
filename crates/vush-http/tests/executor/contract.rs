@@ -102,6 +102,38 @@ async fn a_stalled_upload_times_out_in_headers() {
     assert!(stopped.read >= MIB, "{}", stopped.read);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_upload_closes_its_connection() {
+    let mut staller = spawn_upload_staller().await;
+    let mut request = get(format!("http://{}/", staller.addr));
+    request.method = method("POST");
+    request.body = Some(HttpBody::Text("x".repeat(32 << 20)));
+    // The pool's longest timeout, so its writes may stall this long.
+    let limit = Duration::from_millis(500);
+    let settings = HttpSettings {
+        timeout: limit,
+        ..settings(HttpVersion::Http1, MIB)
+    };
+    let executor = Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        RootCertStore::empty(),
+    )
+    .unwrap();
+
+    let hop = send_within(&executor, &request, limit).await;
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Headers));
+
+    // The server can't see the client close without reading, so it waits
+    // past the limit before it reads again.
+    tokio::time::sleep(2 * limit).await;
+    let total = tokio::time::timeout(TIMEOUT, staller.rest())
+        .await
+        .expect("the client closed the connection");
+    assert!(total < 32 << 20, "{total}");
+}
+
 // ---- Point 3: no panics ----
 //
 // See `invalid_requests_send_nothing` and
