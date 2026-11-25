@@ -87,8 +87,10 @@ pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Fa
     // waiter gets a connect error that no connector error caused. Such a
     // waiting hop's failure comes back as `connect` here, and the executor
     // replaces it with the failure its pool's log ties to the hop, if any.
-    // The hop isn't sent again: the waiters would queue behind each new
-    // connect, and a cascade would settle only one of them per round.
+    // Under `auto` over TLS, a connect that ALPN turns into HTTP/2 releases,
+    // the same way, the hops that were running their own connects. The hop
+    // isn't sent again: the waiters would queue behind each new connect, and
+    // a cascade would settle only one of them per round.
     if chain(error)
         .filter_map(|e| e.downcast_ref::<ClientError>())
         .any(ClientError::is_connect)
