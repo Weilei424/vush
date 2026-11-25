@@ -19,8 +19,8 @@ use crate::common::{
     early_hints_then_ok, echo, executor, failure, garbage_status, get, h2_data_on_stream_zero,
     h2_goaway_before_response, http_reply_to_tls, method, pairs, poll_once, redirecting,
     refused_port, response, send, send_within, settings, short_body_then_close, silent_after_head,
-    slow_reply, spawn_h1, spawn_h1_dropper, spawn_h2_dropper, spawn_raw, spawn_tls, trusting,
-    two_content_lengths,
+    slow_reply, spawn_h1, spawn_h1_dropper, spawn_h2_dropper, spawn_h2_mover, spawn_raw, spawn_tls,
+    spawn_upload_staller, trusting, two_content_lengths,
 };
 
 // ---- Point 1: one hop per call ----
@@ -80,8 +80,8 @@ async fn a_slow_response_still_succeeds_and_times_its_parts() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_upload_times_out_in_headers() {
-    let addr = spawn_raw(silent_after_head).await;
-    let mut request = get(format!("http://{addr}/"));
+    let mut staller = spawn_upload_staller().await;
+    let mut request = get(format!("http://{}/", staller.addr));
     request.method = method("POST");
     request.body = Some(HttpBody::Text("x".repeat(32 << 20)));
     let timeout = Duration::from_millis(500);
@@ -91,6 +91,14 @@ async fn a_stalled_upload_times_out_in_headers() {
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Headers));
     assert_eq!(hop.timing.to_headers, None);
     assert!(hop.timing.total >= timeout, "{:?}", hop.timing);
+    // The server had read part of the body, and had stopped reading, when the
+    // hop ended: the body was being sent, and the upload was incomplete.
+    let stopped = staller
+        .stopped()
+        .expect("the server read part of the body first");
+    assert_eq!(stopped.declared, 32 << 20);
+    assert!(stopped.read >= MIB, "{}", stopped.read);
+    assert!(stopped.read < stopped.declared, "{}", stopped.read);
 }
 
 // ---- Point 3: no panics ----
@@ -427,6 +435,13 @@ async fn dropping_an_http2_hop_resets_only_its_stream() {
 
         drop_hop_when_reached(&executor, &mut session, &url, &mut dropper).await;
 
+        // hyper's server drops the first request's handler, or its body, when
+        // the client resets the stream. The connection stays open below, so
+        // nothing else dropped it.
+        tokio::time::timeout(TIMEOUT, dropper.reset())
+            .await
+            .unwrap_or_else(|_| panic!("the stream wasn't reset: {at:?}"));
+
         // The server answers one handshake, so a second connection can't
         // serve this hop: it ran on the same connection.
         let next = executor.send(&mut session, &get(url), TIMEOUT).await;
@@ -460,6 +475,52 @@ async fn dropping_a_waiting_http2_hop_leaves_the_shared_connect_alone() {
     response(&third);
     assert_eq!(third.connection, connected.connection);
     assert!(third.timing.setup.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_hop_takes_the_setup_of_the_connection_it_was_moved_to() {
+    let mut mover = spawn_h2_mover().await;
+    let request = get(format!("http://{}/", mover.addr));
+    let executor = executor(HttpVersion::Http2);
+
+    // The server's SETTINGS, one stream at a time, came before this response.
+    let warm = send(&executor, &request).await;
+    response(&warm);
+    assert!(warm.timing.setup.is_some());
+
+    // `holding` takes the connection's one stream. `pending` waits in h2 for
+    // it, which stops the connection taking more, so `moved` waits in
+    // hyper's queue. Cutting the connection hands `moved` back, and
+    // hyper-util sends it on a new connection.
+    let (mut one, mut two, mut three) = (
+        executor.new_session(),
+        executor.new_session(),
+        executor.new_session(),
+    );
+    let mut holding = Box::pin(executor.send(&mut one, &request, TIMEOUT));
+    tokio::select! {
+        biased;
+        _ = &mut holding => panic!("the first hop finished before the server held it"),
+        () = mover.held() => {}
+    }
+    let mut pending = Box::pin(executor.send(&mut two, &request, TIMEOUT));
+    assert!(matches!(poll_once(&mut pending).await, Poll::Pending));
+    let mut moved = Box::pin(executor.send(&mut three, &request, TIMEOUT));
+    assert!(matches!(poll_once(&mut moved).await, Poll::Pending));
+    mover.cut();
+    tokio::select! {
+        biased;
+        _ = &mut moved => panic!("the moved hop finished before the server held it"),
+        () = mover.held() => {}
+    }
+    assert_eq!(mover.accepted(), 2);
+    drop((moved, pending, holding));
+
+    // The dropped hop took the new connection's setup with it.
+    let next = send(&executor, &request).await;
+    response(&next);
+    assert_eq!(mover.accepted(), 2);
+    assert!(next.timing.setup.is_none());
 }
 
 // ---- Point 5: no per-user state in the executor ----
