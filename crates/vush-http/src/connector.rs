@@ -131,6 +131,7 @@ impl ConnectLog {
             authority: authority.clone(),
             failed: None,
         });
+        // Drop the oldest, so the log never holds more than `KEPT_CONNECTS`.
         if kept.len() > KEPT_CONNECTS {
             kept.pop_front();
         }
