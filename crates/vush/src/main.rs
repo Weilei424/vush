@@ -35,6 +35,7 @@ fn main() -> ExitCode {
             if validate::run(&files, &mut io::stdout(), &mut io::stderr()) {
                 ExitCode::SUCCESS
             } else {
+                // 2: at least one file isn't valid, as `AFTER_HELP` says.
                 ExitCode::from(2)
             }
         }
