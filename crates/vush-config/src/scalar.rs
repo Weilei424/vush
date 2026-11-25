@@ -25,6 +25,7 @@ impl NumberProblem {
 /// `None` when `text` isn't in JSON's number grammar.
 pub(crate) fn parse_number(text: &str) -> Option<Result<JsonNumber, NumberProblem>> {
     let bytes = text.as_bytes();
+    // One optional minus sign. JSON's grammar has no leading plus.
     let mut i = usize::from(bytes.first() == Some(&b'-'));
     match bytes.get(i)? {
         b'0' => i += 1,
