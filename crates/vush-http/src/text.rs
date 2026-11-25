@@ -32,8 +32,9 @@ pub(crate) const HANDSHAKE_FAILED: &str = "the TLS handshake failed";
 pub(crate) const NO_HTTP2: &str = "the server didn't agree to HTTP/2";
 pub(crate) const CONNECTION_TOOK_TOO_LONG: &str = "the connection took too long";
 // Under `http2`, a hop that waited for another hop's connect gets this when
-// that connect was abandoned or failed in HTTP/2's own handshake, or when the
-// pool's record can't single out that connect's failure.
+// the pool's log can't tie a connector failure to that connect: it was
+// abandoned or failed in HTTP/2's own handshake, or the log can't single it
+// out (see `ConnectLog::waited_on`).
 pub(crate) const SHARED_CONNECT_FAILED: &str = "the shared connection attempt failed";
 
 // The rest, from `classify`.
