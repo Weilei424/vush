@@ -353,7 +353,7 @@ impl Executor {
         &self,
         pool: &Pool,
         request: Request<CountingBody>,
-        capture: &mut CaptureConnection,
+        capture: &CaptureConnection,
         deadline: Option<Instant>,
         progress: &mut Progress,
         jar: Option<(&mut Jar, &Target)>,
@@ -392,7 +392,7 @@ impl Executor {
         &self,
         pool: &Pool,
         request: Request<CountingBody>,
-        capture: &mut CaptureConnection,
+        capture: &CaptureConnection,
         marker: &StageMarker,
         progress: &mut Progress,
         jar: Option<(&mut Jar, &Target)>,
@@ -628,9 +628,9 @@ impl Progress {
     }
 
     /// Takes the setup of the connection `capture` names, unless the hop
-    /// already holds that connection's. A pooled connection has none left,
-    /// and a moved-off connection's setup is dropped, so the hop then holds
-    /// none.
+    /// already holds that connection's. The setup of a connection the hop
+    /// was moved off is dropped. A pooled connection has none left, and then
+    /// the hop holds none.
     fn take_setup_from(&mut self, capture: &CaptureConnection) {
         let Some(info) = capture.connection_metadata().as_ref().and_then(conn_info) else {
             return;
