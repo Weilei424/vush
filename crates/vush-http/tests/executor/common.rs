@@ -1243,8 +1243,9 @@ impl Dropper {
         closed.await.expect("the server ended");
     }
 
-    /// Waits until the server saw the first request's stream reset. Only the
-    /// HTTP/2 dropper has one.
+    /// Waits until the server dropped the first request's stream, which it
+    /// does when the stream is reset or the connection goes. Only the HTTP/2
+    /// dropper has one.
     pub async fn reset(&mut self) {
         let reset = self.reset.as_mut().expect("this dropper has no reset");
         reset.await.expect("the server ended");
