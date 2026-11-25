@@ -193,7 +193,9 @@ pub(crate) enum Transport {
 ///   it out of the log, when it started or failed during the hop's first
 ///   poll, a window of microseconds, and when hyper-util sent the hop back to
 ///   wait again, because the connection it got closed before its request
-///   went out.
+///   went out. Under `auto` over TLS, a connect that ALPN turns into HTTP/2
+///   can release hops that were running their own connects. They keep
+///   `connect` too, since only `http2` connects are logged.
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
@@ -435,8 +437,12 @@ impl Executor {
                 let failed = classify(&error, marker.get());
                 // A hop that waited on another hop's connect learns why it
                 // failed from the pool's log, when the log can tie a failure
-                // to that connect.
+                // to that connect. A hop that got a connection was sent back
+                // to wait again, so the connect its first poll saw may not be
+                // the one that released it, and it keeps `connect`.
+                let got_connection = capture.connection_metadata().is_some();
                 if is_shared_connect(&failed)
+                    && !got_connection
                     && let Some(cause) = pool.connects.waited_on(&uri, before, after)
                 {
                     return Err(connector_failure(cause));
