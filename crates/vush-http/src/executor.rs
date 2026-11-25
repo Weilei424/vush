@@ -2,10 +2,13 @@
 //! through its pool, or under `pool: vu` through the session's.
 
 use std::fmt;
+use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime};
 
 use http::header::{COOKIE, SET_COOKIE};
@@ -24,7 +27,7 @@ use vush_core::protocol::{
 use crate::body::CountingBody;
 use crate::capture::Capture;
 use crate::classify::{classify, connector_failure, failure, is_shared_connect, timeout};
-use crate::connector::{ConnInfo, Connector, FailedConnects};
+use crate::connector::{ConnInfo, ConnectLog, Connector};
 use crate::cookie::{Jar, Target};
 use crate::decode;
 use crate::executors::{SystemRoots, build};
@@ -134,19 +137,18 @@ pub(crate) const HEAD_BUFFER_BYTES: usize = 417_792;
 /// client advertises it, so a server that honors it sends no more.
 pub(crate) const H2_HEADER_LIST_BYTES: u32 = 16_384;
 
-/// A pool of connections and the record of its failed connects. A clone
-/// shares both.
+/// A pool of connections and the log of its connects. A clone shares both.
 #[derive(Clone)]
 pub(crate) struct Pool {
     client: Client<Connector, CountingBody>,
-    failed_connects: FailedConnects,
+    connects: ConnectLog,
 }
 
 /// Builds a pool. Every pool, pooled or per user, is built here, so each
-/// closes its idle connections after [`IDLE_TIMEOUT`]. It takes the record of
-/// failed connects from `connector`, whose clones all share it.
+/// closes its idle connections after [`IDLE_TIMEOUT`]. It takes the log of
+/// its connects from `connector`, whose clones all share it.
 pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
-    let failed_connects = connector.failed_connects();
+    let connects = connector.connects();
     let client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(IDLE_TIMEOUT)
         .pool_timer(TokioTimer::new())
@@ -154,10 +156,7 @@ pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
         .http1_max_buf_size(HEAD_BUFFER_BYTES)
         .http2_max_header_list_size(H2_HEADER_LIST_BYTES)
         .build(connector);
-    Pool {
-        client,
-        failed_connects,
-    }
+    Pool { client, connects }
 }
 
 /// Where an executor's connections live. A clone of a pooled transport
@@ -187,15 +186,14 @@ pub(crate) enum Transport {
 ///   speaks only HTTP/1.1, and `http2` speaks only HTTP/2, with prior
 ///   knowledge in plaintext. Under `http2`, one hop per origin connects at a
 ///   time and the others wait for it. When that connect fails, the waiting
-///   hops report its kind and text, read from the pool's record of its last
-///   8 failed connects. They keep `connect` and "the shared connection
-///   attempt failed" when the connect was abandoned, when it failed in
-///   HTTP/2's own handshake, and when the record can't single out its
-///   failure: newer failures pushed out one that came after the hop asked
-///   for a connection, or the failure came in the microseconds before the
-///   hop asked. A hop that hyper-util sends back to wait again, because the
-///   connection it got closed before its request went out, can report an
-///   earlier connect's failure.
+///   hops report its kind and text, found in the pool's log of its last 8
+///   connects, and never another connect's failure. They keep `connect` and
+///   "the shared connection attempt failed" when the connect was abandoned,
+///   when it failed in HTTP/2's own handshake, when 8 newer connects pushed
+///   it out of the log, when it started or failed during the hop's first
+///   poll, a window of microseconds, and when hyper-util sent the hop back to
+///   wait again, because the connection it got closed before its request
+///   went out.
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
@@ -398,23 +396,29 @@ impl Executor {
         jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
         let uri = request.uri().clone();
-        // A waiting hop's connect fails after this point, and under `http2`
-        // it is the first failure for the hop's origin after it.
-        let failures_before = pool.failed_connects.count();
         let mut response = pool.client.request(request);
+        // hyper-util makes a waiting hop a waiter in its first poll. The
+        // pool's event count on both sides of that poll tells which connect
+        // the hop waited on.
+        let before = pool.connects.events();
+        let first = poll_once(&mut response).await;
+        let after = pool.connects.events();
         // The hop is in `connect` until hyper-util assigns it a connection,
         // new or pooled. Only that tells this hop apart: a connect that loses
         // to a pooled connection finishes on another task.
-        let head = tokio::select! {
-            biased;
-            head = &mut response => head,
-            assigned = connection_assigned(capture) => {
-                if assigned {
-                    marker.set(FailureStage::Headers);
-                    progress.take_setup_from(capture);
+        let head = match first {
+            Poll::Ready(head) => head,
+            Poll::Pending => tokio::select! {
+                biased;
+                head = &mut response => head,
+                assigned = connection_assigned(capture) => {
+                    if assigned {
+                        marker.set(FailureStage::Headers);
+                        progress.take_setup_from(capture);
+                    }
+                    response.await
                 }
-                response.await
-            }
+            },
         };
         // A head that failed in the same poll that assigned its connection
         // got there before the marker moved.
@@ -430,9 +434,10 @@ impl Executor {
                 progress.error_connection = error.connect_info().and_then(conn_info);
                 let failed = classify(&error, marker.get());
                 // A hop that waited on another hop's connect learns why it
-                // failed from the pool's record, if the failure fits.
+                // failed from the pool's log, when the log can tie a failure
+                // to that connect.
                 if is_shared_connect(&failed)
-                    && let Some(cause) = pool.failed_connects.for_hop(&uri, failures_before)
+                    && let Some(cause) = pool.connects.waited_on(&uri, before, after)
                 {
                     return Err(connector_failure(cause));
                 }
@@ -708,6 +713,11 @@ fn settle(
 /// pooled. It gives `false` if the request was dropped without one.
 async fn connection_assigned(capture: &mut CaptureConnection) -> bool {
     capture.wait_for_connection_metadata().await.is_some()
+}
+
+/// Polls `future` once, with the caller's waker.
+async fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+    std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
 }
 
 /// The info the connector attached to a connection.
@@ -1283,15 +1293,10 @@ mod tests {
         assert!(setup.dns.is_some());
     }
 
-    /// Polls `future` once, so it runs as far as it can without waiting.
-    async fn poll_once<F: Future + Unpin>(future: &mut F) -> std::task::Poll<F::Output> {
-        std::future::poll_fn(|cx| std::task::Poll::Ready(std::pin::Pin::new(&mut *future).poll(cx)))
-            .await
-    }
-
     /// A pooled `http2` executor whose first lookup never ends and whose
-    /// later lookups all fail at once. Its connector gives up after 100 ms.
-    fn flaky_http2() -> Executor {
+    /// later lookups all fail at once. Its connector gives up on a connect
+    /// after `limit`.
+    fn flaky_http2(limit: Duration) -> Executor {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let resolver: Resolver = Arc::new(move |_, _| {
             let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
@@ -1307,12 +1312,7 @@ mod tests {
             Verification::Roots(RootCertStore::empty()),
             HttpVersion::Http2,
         );
-        let connector = Connector::with_resolver(
-            tls,
-            HttpVersion::Http2,
-            Duration::from_millis(100),
-            resolver,
-        );
+        let connector = Connector::with_resolver(tls, HttpVersion::Http2, limit, resolver);
         Executor::from_parts(
             Transport::Pooled(Box::new(new_pool(connector, HttpVersion::Http2))),
             1_048_576,
@@ -1326,7 +1326,7 @@ mod tests {
     /// too. It still reports the connect it waited on.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_later_failure_doesnt_replace_the_one_a_hop_waited_on() {
-        let executor = flaky_http2();
+        let executor = flaky_http2(Duration::from_millis(100));
         let request = get("http://flaky.vush.test/".to_owned(), &[]);
         let (mut s1, mut s2, mut s3) = (
             executor.new_session(),
@@ -1362,6 +1362,48 @@ mod tests {
 
         let waited = waiting.await;
         assert_eq!(waited.outcome.as_ref().unwrap_err(), &timed_out);
+        assert_eq!(waited.connection, None);
+    }
+
+    /// The first connect is abandoned while a hop waits on it, which logs no
+    /// failure. A third hop then takes the free lock and fails as `dns`. The
+    /// waiting hop is woken but not polled until after that, and it keeps
+    /// `connect`, not the `dns` of a connect it didn't wait on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hop_whose_connect_was_abandoned_doesnt_take_a_later_failure() {
+        let executor = flaky_http2(Duration::from_secs(60));
+        let request = get("http://flaky.vush.test/".to_owned(), &[]);
+        let (mut s1, mut s2, mut s3) = (
+            executor.new_session(),
+            executor.new_session(),
+            executor.new_session(),
+        );
+        let mut connecting = Box::pin(executor.send(&mut s1, &request, NAMED_TIMEOUT));
+        assert!(poll_once(&mut connecting).await.is_pending());
+        let mut waiting = Box::pin(executor.send(&mut s2, &request, NAMED_TIMEOUT));
+        assert!(poll_once(&mut waiting).await.is_pending());
+        // The connect ends by being dropped, and logs nothing.
+        drop(connecting);
+
+        let later = executor.send(&mut s3, &request, NAMED_TIMEOUT).await;
+        assert_eq!(
+            later.outcome.as_ref().unwrap_err(),
+            &Failure {
+                kind: FailureKind::Dns,
+                stage: FailureStage::Connect,
+                message: "the host name didn't resolve",
+            }
+        );
+
+        let waited = waiting.await;
+        assert_eq!(
+            waited.outcome.as_ref().unwrap_err(),
+            &Failure {
+                kind: FailureKind::Connect,
+                stage: FailureStage::Connect,
+                message: "the shared connection attempt failed",
+            }
+        );
         assert_eq!(waited.connection, None);
     }
 }
