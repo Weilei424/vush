@@ -9,6 +9,14 @@
 //! background after its hop took a pooled connection instead, so no hop's
 //! deadline bounds that connect.
 //!
+//! An HTTP/1.1 connection fails when a write-side call has waited longer than
+//! the same limit with nothing written, and every later write-side call
+//! fails too. Without this, hyper would keep flushing the body of a hop that
+//! timed out or was dropped, to a peer that never reads it. No live hop is
+//! cut short: the connection carries one exchange at a time, and that hop
+//! started before the wait did, so its timeout has passed. HTTP/2
+//! connections have no such limit, because a dropped stream frees its data.
+//!
 //! Under `http2`, each connect's start, and its failure if it fails, is
 //! logged in its pool's `ConnectLog`, for the hops that waited on it.
 //!
@@ -285,7 +293,8 @@ pub(crate) struct Connector {
 impl Connector {
     /// A connector that uses `tls` for `https` and the system's resolver.
     /// `version` must be the one `tls` was built for. A connect that takes
-    /// longer than `limit` fails as a timeout.
+    /// longer than `limit` fails as a timeout, and so does an HTTP/1.1 write that
+    /// waits longer than `limit` with nothing written.
     pub(crate) fn new(tls: Arc<ClientConfig>, version: HttpVersion, limit: Duration) -> Self {
         Self {
             tls: TlsConnector::from(tls),
@@ -394,6 +403,9 @@ impl Connector {
             stream,
             info: Arc::new(info),
             h2,
+            stall_limit: (!(h2 || self.version == HttpVersion::Http2)).then_some(self.limit),
+            stall: None,
+            stalled: false,
         })
     }
 
@@ -450,11 +462,51 @@ impl tower_service::Service<Uri> for Connector {
     }
 }
 
-/// A connection the connector opened.
+/// A connection the connector opened. Under HTTP/1.1, a write-side call that
+/// waits too long, with nothing written, fails the connection.
 pub(crate) struct Conn {
     stream: Stream,
     info: Arc<ConnInfo>,
     h2: bool,
+    /// How long a write-side call may wait, with nothing written, before the
+    /// connection fails. `None` under HTTP/2.
+    stall_limit: Option<Duration>,
+    /// The wait in progress, from the first `Pending` since a call was `Ready`.
+    stall: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// Set once a wait reached the limit: every later write-side call fails.
+    stalled: bool,
+}
+
+impl Conn {
+    /// Passes a write-side result through the stall limit. `Ready` ends the
+    /// wait. A `Pending` starts it, or checks it, and fails once it is over.
+    fn limited<T>(
+        &mut self,
+        cx: &mut Context<'_>,
+        polled: Poll<io::Result<T>>,
+    ) -> Poll<io::Result<T>> {
+        let Some(limit) = self.stall_limit else {
+            return polled;
+        };
+        if polled.is_ready() {
+            self.stall = None;
+            return polled;
+        }
+        let wait = self
+            .stall
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(limit)));
+        if wait.as_mut().poll(cx).is_ready() {
+            self.stall = None;
+            self.stalled = true;
+            return Poll::Ready(Err(io::Error::from(io::ErrorKind::TimedOut)));
+        }
+        polled
+    }
+}
+
+/// What a write-side call gives once the connection has stalled.
+fn stalled_error<T>() -> Poll<io::Result<T>> {
+    Poll::Ready(Err(io::Error::from(io::ErrorKind::TimedOut)))
 }
 
 enum Stream {
@@ -493,24 +545,39 @@ impl Write for Conn {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match &mut self.get_mut().stream {
+        let this = self.get_mut();
+        if this.stalled {
+            return stalled_error();
+        }
+        let polled = match &mut this.stream {
             Stream::Plain(io) => Pin::new(io).poll_write(cx, buf),
             Stream::Tls(io) => Pin::new(&mut **io).poll_write(cx, buf),
-        }
+        };
+        this.limited(cx, polled)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut self.get_mut().stream {
+        let this = self.get_mut();
+        if this.stalled {
+            return stalled_error();
+        }
+        let polled = match &mut this.stream {
             Stream::Plain(io) => Pin::new(io).poll_flush(cx),
             Stream::Tls(io) => Pin::new(&mut **io).poll_flush(cx),
-        }
+        };
+        this.limited(cx, polled)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut self.get_mut().stream {
+        let this = self.get_mut();
+        if this.stalled {
+            return stalled_error();
+        }
+        let polled = match &mut this.stream {
             Stream::Plain(io) => Pin::new(io).poll_shutdown(cx),
             Stream::Tls(io) => Pin::new(&mut **io).poll_shutdown(cx),
-        }
+        };
+        this.limited(cx, polled)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -525,10 +592,15 @@ impl Write for Conn {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        match &mut self.get_mut().stream {
+        let this = self.get_mut();
+        if this.stalled {
+            return stalled_error();
+        }
+        let polled = match &mut this.stream {
             Stream::Plain(io) => Pin::new(io).poll_write_vectored(cx, bufs),
             Stream::Tls(io) => Pin::new(&mut **io).poll_write_vectored(cx, bufs),
-        }
+        };
+        this.limited(cx, polled)
     }
 }
 
@@ -1158,5 +1230,110 @@ mod tests {
                 assert!(!shown.contains(port.as_str()), "{shown}");
             }
         }
+    }
+
+    /// The limit of the stall tests' connectors.
+    const STALL: Duration = Duration::from_millis(200);
+
+    fn stalling(version: HttpVersion) -> Connector {
+        let tls = client_config(Verification::Roots(RootCertStore::empty()), version);
+        Connector::new(tls, version, STALL)
+    }
+
+    /// Accepts one connection and never reads from it.
+    async fn deaf_server() -> SocketAddr {
+        tcp_server().await
+    }
+
+    /// Accepts one connection and reads up to 1 MiB from it every 50 ms. A
+    /// socket reports itself writable only once a good part of its buffer is
+    /// free, so a smaller read would leave a write waiting past the limit.
+    async fn slow_server() -> SocketAddr {
+        let listener = TcpListener::bind((LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0; 1 << 20];
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+                    .await
+                    .unwrap_or(0)
+                    == 0
+                {
+                    return;
+                }
+            }
+        });
+        addr
+    }
+
+    async fn write_chunk(conn: &mut Conn) -> io::Result<usize> {
+        let chunk = [0; 64 * 1024];
+        std::future::poll_fn(|cx| Pin::new(&mut *conn).poll_write(cx, &chunk)).await
+    }
+
+    /// Writes 64 KiB chunks until a write fails. It never ends if none does.
+    async fn write_until_error(conn: &mut Conn) -> io::Error {
+        loop {
+            if let Err(error) = write_chunk(conn).await {
+                return error;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_stalled_past_the_limit_fails() {
+        let url = format!("http://{}/", deaf_server().await);
+        let mut conn = connect(&mut stalling(HttpVersion::Http1), &url)
+            .await
+            .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), write_until_error(&mut conn))
+            .await
+            .expect("the stalled write failed");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+        // Every later write-side call fails at once.
+        let soon = Duration::from_millis(50);
+        let write = tokio::time::timeout(soon, write_chunk(&mut conn))
+            .await
+            .expect("a later write failed at once");
+        assert_eq!(write.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        let flush = tokio::time::timeout(
+            soon,
+            std::future::poll_fn(|cx| Pin::new(&mut conn).poll_flush(cx)),
+        )
+        .await
+        .expect("a later flush failed at once");
+        assert_eq!(flush.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn a_slow_write_that_keeps_moving_doesnt_fail() {
+        let url = format!("http://{}/", slow_server().await);
+        let mut conn = connect(&mut stalling(HttpVersion::Http1), &url)
+            .await
+            .unwrap();
+
+        let start = Instant::now();
+        while start.elapsed() < 3 * STALL {
+            write_chunk(&mut conn)
+                .await
+                .expect("a write that keeps moving doesn't fail");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_http2_connection_has_no_stall_limit() {
+        let url = format!("http://{}/", deaf_server().await);
+        let mut conn = connect(&mut stalling(HttpVersion::Http2), &url)
+            .await
+            .unwrap();
+
+        let ended = tokio::time::timeout(3 * STALL, write_until_error(&mut conn)).await;
+        assert!(ended.is_err(), "the stalled write was still waiting");
     }
 }
