@@ -98,6 +98,7 @@ mod tests {
             assert!(!text.contains(['{', '}']), "{text}");
             assert!(seen.insert(*text), "duplicate: {text}");
         }
+        // Update the count when a text is added to or removed from `ALL`.
         assert_eq!(ALL.len(), 29);
     }
 }
