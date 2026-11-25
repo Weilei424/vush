@@ -74,10 +74,11 @@ pub(crate) fn pool_key(view: &ScopeView<'_>, test_dir: &Path) -> PoolKey {
     }
 }
 
-/// How long a background connect for `view` may take: the longest attempt
-/// timeout of its requests, inside every `if` and `repeat`, and at least its
-/// `http.timeout`. No hop's own deadline is later, so the limit never cuts a
-/// hop short.
+/// How long a background connect for `view` may take, and how long one of its
+/// HTTP/1.1 writes may wait with nothing written: the longest attempt timeout
+/// of its requests, inside every `if` and `repeat`, and at least its
+/// `http.timeout`. No hop's own deadline is later, so the limit doesn't cut a
+/// hop short, except in the case `connector` describes.
 pub(crate) fn limit(view: &ScopeView<'_>) -> Duration {
     let mut longest = view.settings.timeout;
     // A stack of the lists left to walk, so nesting can't grow the call
