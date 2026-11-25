@@ -86,9 +86,9 @@ pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Fa
     // and the others wait for it. When that connect fails or goes away, each
     // waiter gets a connect error that no connector error caused. Such a
     // waiting hop's failure comes back as `connect` here, and the executor
-    // replaces it with its pool's record when one fits. The hop isn't sent
-    // again: the waiters would queue behind each new connect, and a cascade
-    // would settle only one of them per round.
+    // replaces it with the failure its pool's log ties to the hop, if any.
+    // The hop isn't sent again: the waiters would queue behind each new
+    // connect, and a cascade would settle only one of them per round.
     if chain(error)
         .filter_map(|e| e.downcast_ref::<ClientError>())
         .any(ClientError::is_connect)
