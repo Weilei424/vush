@@ -12,10 +12,15 @@
 //! An HTTP/1.1 connection fails when a write-side call has waited longer than
 //! the same limit with nothing written, and every later write-side call
 //! fails too. Without this, hyper would keep flushing the body of a hop that
-//! timed out or was dropped, to a peer that never reads it. No live hop is
-//! cut short: the connection carries one exchange at a time, and that hop
-//! started before the wait did, so its timeout has passed. HTTP/2
-//! connections have no such limit, because a dropped stream frees its data.
+//! timed out or was dropped, to a peer that never reads it. A write waits
+//! only for the exchange it belongs to, whose hop started before the wait,
+//! so that hop's deadline has passed by then. The exception is a server that
+//! answered early, before reading the whole request, and then stopped
+//! reading. hyper may hand the connection to the next hop while those bytes
+//! still wait, and that hop can fail before its deadline. Its request is
+//! stuck behind bytes the server never read, so no conforming server could
+//! answer it. The hop fails as `timeout`. HTTP/2 connections have no such
+//! limit, because a dropped stream frees its data.
 //!
 //! Under `http2`, each connect's start, and its failure if it fails, is
 //! logged in its pool's `ConnectLog`, for the hops that waited on it.
@@ -498,15 +503,28 @@ impl Conn {
         if wait.as_mut().poll(cx).is_ready() {
             self.stall = None;
             self.stalled = true;
-            return Poll::Ready(Err(io::Error::from(io::ErrorKind::TimedOut)));
+            return stalled_error();
         }
         polled
     }
 }
 
+/// What a stalled HTTP/1.1 write fails with, inside its `io::Error`, so
+/// `classify` can tell it apart. It holds no text of the peer's.
+#[derive(Debug)]
+pub(crate) struct WriteStalled;
+
+impl fmt::Display for WriteStalled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the write stalled")
+    }
+}
+
+impl std::error::Error for WriteStalled {}
+
 /// What a write-side call gives once the connection has stalled.
 fn stalled_error<T>() -> Poll<io::Result<T>> {
-    Poll::Ready(Err(io::Error::from(io::ErrorKind::TimedOut)))
+    Poll::Ready(Err(io::Error::new(io::ErrorKind::TimedOut, WriteStalled)))
 }
 
 enum Stream {
@@ -1240,7 +1258,7 @@ mod tests {
         Connector::new(tls, version, STALL)
     }
 
-    /// Accepts one connection and never reads from it.
+    /// Accepts connections and never reads from them.
     async fn deaf_server() -> SocketAddr {
         tcp_server().await
     }
@@ -1332,6 +1350,21 @@ mod tests {
         let mut conn = connect(&mut stalling(HttpVersion::Http2), &url)
             .await
             .unwrap();
+
+        let ended = tokio::time::timeout(3 * STALL, write_until_error(&mut conn)).await;
+        assert!(ended.is_err(), "the stalled write was still waiting");
+    }
+
+    #[tokio::test]
+    async fn an_alpn_h2_connection_has_no_stall_limit() {
+        let (roots, ca) = ca();
+        let addr = tls_server(leaf(&ca, &localhost_san()), &[b"h2"]).await;
+        let tls = client_config(Verification::Roots(roots), HttpVersion::Auto);
+        let mut connector = Connector::new(tls, HttpVersion::Auto, STALL);
+        let mut conn = connect(&mut connector, &format!("https://{addr}/"))
+            .await
+            .unwrap();
+        assert!(conn.connected().is_negotiated_h2());
 
         let ended = tokio::time::timeout(3 * STALL, write_until_error(&mut conn)).await;
         assert!(ended.is_err(), "the stalled write was still waiting");
