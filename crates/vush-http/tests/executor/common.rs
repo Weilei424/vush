@@ -1495,11 +1495,13 @@ pub struct UploadRead {
     pub read: u64,
 }
 
-/// A server that reads 1 MiB of a request body and then stops reading. See
-/// [`spawn_upload_staller`].
+/// A server that reads 1 MiB of a request body and then stops reading, until
+/// told to read again. See [`spawn_upload_staller`].
 pub struct UploadStaller {
     pub addr: SocketAddr,
     stopped: oneshot::Receiver<UploadRead>,
+    resume: Option<oneshot::Sender<()>>,
+    total: oneshot::Receiver<u64>,
 }
 
 impl UploadStaller {
@@ -1507,15 +1509,29 @@ impl UploadStaller {
     pub fn stopped(&mut self) -> Option<UploadRead> {
         self.stopped.try_recv().ok()
     }
+
+    /// Lets the server read again, to the end of the stream or of the
+    /// declared body, and gives how many body bytes arrived in all.
+    pub async fn rest(&mut self) -> u64 {
+        if let Some(resume) = self.resume.take() {
+            let _ = resume.send(());
+        }
+        (&mut self.total)
+            .await
+            .expect("the server reports its total")
+    }
 }
 
 /// Serves one plaintext HTTP/1.1 connection. It reads the request head and
 /// its `content-length`, then at least 1 MiB of the body, and stops reading
-/// without a word.
+/// without a word. It reads again only when [`UploadStaller::rest`] is
+/// called, and then reads to the end of the stream or of the declared body.
 pub async fn spawn_upload_staller() -> UploadStaller {
     let listener = bind().await;
     let addr = listener.local_addr().unwrap();
     let (stopped_tx, stopped) = oneshot::channel();
+    let (resume, resumed) = oneshot::channel();
+    let (total_tx, total) = oneshot::channel();
     tokio::spawn(async move {
         let Ok((stream, _)) = listener.accept().await else {
             return;
@@ -1531,9 +1547,25 @@ pub async fn spawn_upload_staller() -> UploadStaller {
             read += got as u64;
         }
         let _ = stopped_tx.send(UploadRead { declared, read });
+        if resumed.await.is_err() {
+            return;
+        }
+        while read < declared {
+            let got = read_some(&stream, &mut buf).await;
+            if got == 0 {
+                break;
+            }
+            read += got as u64;
+        }
+        let _ = total_tx.send(read);
         pending::<()>().await;
     });
-    UploadStaller { addr, stopped }
+    UploadStaller {
+        addr,
+        stopped,
+        resume: Some(resume),
+        total,
+    }
 }
 
 /// Reads until the end of a request head, or until the stream ends. It gives
