@@ -110,6 +110,7 @@ mod tests {
 
     /// The default `http.timeout`.
     const FLOOR: Duration = Duration::from_secs(30);
+    /// A step timeout longer than `FLOOR`.
     const LONG: Duration = Duration::from_secs(45);
 
     fn request(timeout: Duration) -> Step {
