@@ -9,8 +9,8 @@
 //! background after its hop took a pooled connection instead, so no hop's
 //! deadline bounds that connect.
 //!
-//! Each connect's start, and its failure if it fails, is logged in its pool's
-//! `ConnectLog`, for the hops that waited on it.
+//! Under `http2`, each connect's start, and its failure if it fails, is
+//! logged in its pool's `ConnectLog`, for the hops that waited on it.
 //!
 //! Its errors carry a kind and a fixed message, never a host, a port or a
 //! library's text.
@@ -76,9 +76,10 @@ impl fmt::Display for ConnectError {
 
 impl std::error::Error for ConnectError {}
 
-/// A pool's last [`KEPT_CONNECTS`] connects, for the hops that waited on
-/// them. Under `http2`, hyper-util hands those hops only a generic connect
-/// error, so the executor reads the cause here. Clones share it. It holds a
+/// A pool's last [`KEPT_CONNECTS`] connects under `http2`, for the hops that
+/// waited on them. Under `http2`, hyper-util hands those hops only a generic
+/// connect error, so the executor reads the cause here. Other pools' logs
+/// stay empty. Clones share it. It holds a
 /// host, so it has no `Debug`.
 #[derive(Clone, Default)]
 pub(crate) struct ConnectLog {
@@ -167,8 +168,9 @@ impl ConnectLog {
     ///   no failure was logged;
     /// - the log no longer holds the connect;
     /// - the connect started or failed during the poll;
-    /// - hyper-util sent the hop back to wait again, so the connect its first
-    ///   poll waited on, if any, didn't fail.
+    /// - hyper-util sent the hop back to wait again after the connect its
+    ///   first poll waited on succeeded. A hop that got a connection never
+    ///   asks: the executor keeps `connect` for it.
     pub(crate) fn waited_on(&self, uri: &Uri, before: u64, after: u64) -> Option<ConnectError> {
         let kept = self
             .inner
@@ -434,9 +436,15 @@ impl tower_service::Service<Uri> for Connector {
     }
 
     fn call(&mut self, uri: Uri) -> Self::Future {
-        // hyper-util calls this right after it takes the origin's connecting
-        // lock, so the start is logged while the lock is held.
-        let started = self.connects.start(&uri);
+        // Only `http2` connects are logged. Under `http2`, hyper-util calls
+        // this right after it takes the origin's connecting lock, so the
+        // start is logged while the lock is held. Under `auto`, a connect
+        // that ALPN turns into HTTP/2 takes that lock only after its TLS
+        // handshake, and the hops it can release ran connects of their own,
+        // so no log could say which failure is theirs.
+        let started = (self.version == HttpVersion::Http2)
+            .then(|| self.connects.start(&uri))
+            .flatten();
         Box::pin(self.clone().connect(uri, started))
     }
 }
@@ -704,11 +712,12 @@ mod tests {
     }
 
     fn resolving(resolver: Resolver) -> Connector {
-        let tls = client_config(
-            Verification::Roots(RootCertStore::empty()),
-            HttpVersion::Auto,
-        );
-        Connector::with_resolver(tls, HttpVersion::Auto, LIMIT, resolver)
+        resolving_for(HttpVersion::Auto, resolver)
+    }
+
+    fn resolving_for(version: HttpVersion, resolver: Resolver) -> Connector {
+        let tls = client_config(Verification::Roots(RootCertStore::empty()), version);
+        Connector::with_resolver(tls, version, LIMIT, resolver)
     }
 
     fn failing_resolver() -> Resolver {
@@ -830,9 +839,9 @@ mod tests {
         let addr = tcp_server().await;
         let tls = client_config(
             Verification::Roots(RootCertStore::empty()),
-            HttpVersion::Auto,
+            HttpVersion::Http2,
         );
-        let mut connector = Connector::new(tls, HttpVersion::Auto, Duration::from_millis(200));
+        let mut connector = Connector::new(tls, HttpVersion::Http2, Duration::from_millis(200));
         let url = format!("https://{addr}/");
         let uri: Uri = url.parse().unwrap();
         let connecting = connector.call(uri.clone());
@@ -960,10 +969,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_an_http2_connector_logs_its_connects() {
+        let uri = uri("http://unresolvable.test/");
+        for (version, logs) in [
+            (HttpVersion::Auto, false),
+            (HttpVersion::Http1, false),
+            (HttpVersion::Http2, true),
+        ] {
+            let mut connector = resolving_for(version, failing_resolver());
+            let connecting = connector.call(uri.clone());
+            let (before, after) = (connector.connects().events(), connector.connects().events());
+            assert_eq!(connecting.await.err(), Some(UNRESOLVED));
+            let log = connector.connects();
+            assert_eq!(log.events(), if logs { 2 } else { 0 }, "{version:?}");
+            assert_eq!(
+                log.waited_on(&uri, before, after),
+                logs.then_some(UNRESOLVED),
+                "{version:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_connect_is_logged_for_its_pool_only() {
         let url = "http://unresolvable.test/";
         let uri: Uri = url.parse().unwrap();
-        let mut connector = resolving(failing_resolver());
+        let mut connector = resolving_for(HttpVersion::Http2, failing_resolver());
         let connecting = connector.call(uri.clone());
         let (before, after) = (connector.connects().events(), connector.connects().events());
         assert_eq!(connecting.await.err(), Some(UNRESOLVED));
@@ -984,7 +1015,7 @@ mod tests {
         // A successful connect logs only its start.
         let ok = format!("http://{}/", tcp_server().await);
         let ok_uri: Uri = ok.parse().unwrap();
-        let mut fresh = plain();
+        let mut fresh = resolving_for(HttpVersion::Http2, Arc::new(lookup));
         let connecting = fresh.call(ok_uri.clone());
         let (before, after) = (fresh.connects().events(), fresh.connects().events());
         connecting.await.unwrap();
