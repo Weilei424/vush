@@ -308,6 +308,7 @@
     - A hop takes its connection's setup times when it gets the connection, so a dropped `http2` hop takes them with it and the next hop on that connection has none.
     - A later failure for the same origin no longer replaces one a waiting hop waited on. The second review found the cases this missed.
   - [x] Fixes from Codex's second review (2026-11-24): a waiting hop is tied to the connect that held its origin's connecting lock through its first poll, so it never reports another connect's failure, even after an abandoned connect or a failure logged just before it asked. The spec and plan were revised first, with the user's approval. Only `http2` pools log connects, so `auto` hops that an ALPN-upgraded connect releases keep `connect`, and so does a hop that got a connection before it was sent back to wait.
+  - [x] Fixes from Codex's third review (2026-11-25): a hop that hyper-util moves to a new connection, after a reused one closed before its request went out, takes the new connection's setup times, so a dropped hop never leaves them to the next. The HTTP/2 cancellation test checks the server saw the stream reset, and the stalled-upload test checks the server had part of the 32 MiB body, and had stopped reading, when the hop ended.
   - [ ] CI green on all four runners after the user pushes, and Phase 2 marked complete (plan Task 5).
 
 ## Phase 3 Execution Checklist — Scenario interpreter
