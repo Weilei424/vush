@@ -34,7 +34,7 @@ use rcgen::{
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Barrier, oneshot};
+use tokio::sync::{Barrier, mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
 use vush_core::plan::{
     ByteSize, ClosedStop, ClosedVusLoad, Expect, HttpMethod, HttpSettings, HttpVersion, JsonNumber,
@@ -1227,6 +1227,7 @@ pub struct Dropper {
     accepted: Arc<AtomicUsize>,
     reached: oneshot::Receiver<()>,
     closed: Option<oneshot::Receiver<()>>,
+    reset: Option<oneshot::Receiver<()>>,
 }
 
 impl Dropper {
@@ -1240,6 +1241,13 @@ impl Dropper {
     pub async fn closed(&mut self) {
         let closed = self.closed.as_mut().expect("this dropper has no closed");
         closed.await.expect("the server ended");
+    }
+
+    /// Waits until the server saw the first request's stream reset. Only the
+    /// HTTP/2 dropper has one.
+    pub async fn reset(&mut self) {
+        let reset = self.reset.as_mut().expect("this dropper has no reset");
+        reset.await.expect("the server ended");
     }
 
     /// The TCP connections the server has accepted so far.
@@ -1277,6 +1285,7 @@ pub async fn spawn_h1_dropper(at: DropAt) -> Dropper {
         accepted,
         reached,
         closed: Some(closed),
+        reset: None,
     }
 }
 
@@ -1306,12 +1315,24 @@ async fn hold_first(
     let _ = closed.send(());
 }
 
+/// Sends on its channel when dropped.
+struct SignalOnDrop(Option<oneshot::Sender<()>>);
+
+impl Drop for SignalOnDrop {
+    fn drop(&mut self) {
+        if let Some(signal) = self.0.take() {
+            let _ = signal.send(());
+        }
+    }
+}
+
 /// A body that sends 32 MiB in 64 KiB frames, signals `reached`, and then
 /// never ends. A server polls a body only as the client's window allows, so
 /// the signal means the hop has read most of what was sent.
 struct SentThenStalled {
     left: usize,
     reached: Option<oneshot::Sender<()>>,
+    _reset: SignalOnDrop,
 }
 
 impl hyper::body::Body for SentThenStalled {
@@ -1336,24 +1357,28 @@ impl hyper::body::Body for SentThenStalled {
 /// Serves HTTP/2 over TLS, offering only `h2`, and answers one handshake. Its
 /// first request stays at `at`: it is never answered, or it gets a head and a
 /// body that never ends. Every later request gets `200` with an empty body.
+/// The first request's stream signals `reset` when the server drops it.
 pub async fn spawn_h2_dropper(at: DropAt, ca: &TestCa) -> Dropper {
     let (reached_tx, reached) = oneshot::channel();
+    let (reset_tx, reset) = oneshot::channel();
     let accepted = Arc::new(AtomicUsize::new(0));
-    let first = Mutex::new(Some(reached_tx));
+    let first = Mutex::new(Some((reached_tx, reset_tx)));
     let addr = spawn_counted_tls(
         move |_request| {
-            let reached = first.lock().unwrap().take();
+            let first = first.lock().unwrap().take();
             async move {
-                match (reached, at) {
+                match (first, at) {
                     (None, _) => reply(200, &[], ""),
-                    (Some(reached), DropAt::BeforeHead) => {
+                    (Some((reached, reset)), DropAt::BeforeHead) => {
+                        let _reset = SignalOnDrop(Some(reset));
                         let _ = reached.send(());
                         pending::<Reply>().await
                     }
-                    (Some(reached), DropAt::InBody) => Response::new(
+                    (Some((reached, reset)), DropAt::InBody) => Response::new(
                         SentThenStalled {
                             left: SENT_BEFORE_REACHED,
                             reached: Some(reached),
+                            _reset: SignalOnDrop(Some(reset)),
                         }
                         .boxed(),
                     ),
@@ -1371,5 +1396,173 @@ pub async fn spawn_h2_dropper(at: DropAt, ca: &TestCa) -> Dropper {
         accepted,
         reached,
         closed: None,
+        reset: Some(reset),
     }
+}
+
+/// A server for a hop that hyper-util moves to a new connection. See
+/// [`spawn_h2_mover`].
+pub struct Mover {
+    pub addr: SocketAddr,
+    accepted: Arc<AtomicUsize>,
+    held: mpsc::UnboundedReceiver<()>,
+    cut: Option<oneshot::Sender<()>>,
+}
+
+impl Mover {
+    /// Waits until the server holds its next held request.
+    pub async fn held(&mut self) {
+        self.held.recv().await.expect("the server ended");
+    }
+
+    /// Closes the first connection at once.
+    pub fn cut(&mut self) {
+        let cut = self.cut.take().expect("the connection was cut already");
+        cut.send(()).expect("the server ended");
+    }
+
+    /// The TCP connections the server has accepted so far.
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+/// Serves HTTP/2 with prior knowledge, one stream at a time per connection.
+/// Requests are numbered across connections. The 1st gets `200`. The 2nd and
+/// 3rd are held unanswered, and each signals `held` when it arrives. Every
+/// later one gets `200`. `cut` closes the first connection.
+pub async fn spawn_h2_mover() -> Mover {
+    let listener = bind().await;
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (held_tx, held) = mpsc::unbounded_channel();
+    let (cut_tx, cut_rx) = oneshot::channel::<()>();
+    let count = accepted.clone();
+    tokio::spawn(async move {
+        let numbered = Arc::new(AtomicUsize::new(0));
+        let mut cut_rx = Some(cut_rx);
+        while let Ok((tcp, _)) = listener.accept().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            let numbered = numbered.clone();
+            let held = held_tx.clone();
+            let service = service_fn(move |_request: Request<Incoming>| {
+                let number = numbered.fetch_add(1, Ordering::SeqCst) + 1;
+                let held = held.clone();
+                async move {
+                    if number == 2 || number == 3 {
+                        let _ = held.send(());
+                        pending::<()>().await;
+                    }
+                    Ok::<_, Infallible>(reply(200, &[], ""))
+                }
+            });
+            let serving = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .max_concurrent_streams(1)
+                .serve_connection(TokioIo::new(tcp), service);
+            match cut_rx.take() {
+                Some(cut) => {
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            _ = serving => {}
+                            _ = cut => {}
+                        }
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        let _ = serving.await;
+                    });
+                }
+            }
+        }
+    });
+    Mover {
+        addr,
+        accepted,
+        held,
+        cut: Some(cut_tx),
+    }
+}
+
+// ---- Part uploads ----
+
+/// How much of a request body an [`UploadStaller`] had read when it stopped.
+pub struct UploadRead {
+    /// The request's `content-length`.
+    pub declared: u64,
+    /// The body bytes read when the server stopped reading.
+    pub read: u64,
+}
+
+/// A server that reads 1 MiB of a request body and then stops reading. See
+/// [`spawn_upload_staller`].
+pub struct UploadStaller {
+    pub addr: SocketAddr,
+    stopped: oneshot::Receiver<UploadRead>,
+}
+
+impl UploadStaller {
+    /// What the server had read when it stopped reading, if it has stopped.
+    pub fn stopped(&mut self) -> Option<UploadRead> {
+        self.stopped.try_recv().ok()
+    }
+}
+
+/// Serves one plaintext HTTP/1.1 connection. It reads the request head and
+/// its `content-length`, then at least 1 MiB of the body, and stops reading
+/// without a word.
+pub async fn spawn_upload_staller() -> UploadStaller {
+    let listener = bind().await;
+    let addr = listener.local_addr().unwrap();
+    let (stopped_tx, stopped) = oneshot::channel();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let (head, mut read) = read_head_and_start(&stream).await;
+        let declared = content_length(&head);
+        let mut buf = vec![0; 64 * 1024];
+        while read < MIB && read < declared {
+            let got = read_some(&stream, &mut buf).await;
+            if got == 0 {
+                break;
+            }
+            read += got as u64;
+        }
+        let _ = stopped_tx.send(UploadRead { declared, read });
+        pending::<()>().await;
+    });
+    UploadStaller { addr, stopped }
+}
+
+/// Reads until the end of a request head, or until the stream ends. It gives
+/// the head and how many bytes after it, which are body, it also read.
+async fn read_head_and_start(stream: &TcpStream) -> (Vec<u8>, u64) {
+    let mut seen = Vec::new();
+    let mut buf = [0; 4096];
+    loop {
+        if let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+            let body = (seen.len() - (end + 4)) as u64;
+            seen.truncate(end + 4);
+            return (seen, body);
+        }
+        let read = read_some(stream, &mut buf).await;
+        if read == 0 {
+            return (seen, 0);
+        }
+        seen.extend_from_slice(&buf[..read]);
+    }
+}
+
+/// The head's `content-length`, or 0 if it has none.
+fn content_length(head: &[u8]) -> u64 {
+    String::from_utf8_lossy(head)
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
+        .unwrap_or(0)
 }
