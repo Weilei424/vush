@@ -293,10 +293,10 @@
       - a hop takes an idle connection if one is in its pool when it starts;
       - otherwise it opens a new one while it waits, and takes whichever is ready first;
       - Phase 7 measures the connections this opens (P7.2).
-    - **Hops waiting on a shared HTTP/2 connect report its real kind** (answers P2.3's note):
-      - each pool records its last 8 failed connects, in order;
-      - a waiting hop uses the first one for its origin after it asked for a connection;
-      - an abandoned connect, a failure in HTTP/2's own handshake, and a failure the record can't single out still give `connect` with "the shared connection attempt failed".
+    - **Hops waiting on a shared HTTP/2 connect report its real kind** (answers P2.3's note): Revised 2026-11-24 after Codex's second review.
+      - each pool logs its last 8 connects, in start order, with each one's failure;
+      - a waiting hop uses the failure of the connect that held its origin's connecting lock through the hop's first poll, and never another connect's;
+      - an abandoned connect, a failure in HTTP/2's own handshake, a connect the log no longer holds, one that started or failed during that poll, and a hop hyper-util sent back to wait again still give `connect` with "the shared connection attempt failed".
     - **The resolver hook stays private** (answers P2.2's note). The `dns` failure through `send`, its timing, and one plaintext reuse test live inside the crate.
     - **Reuse tests are gated, not lucky** (answers Codex round 3's note on P2.5). The ten tests that ran on one thread switch to HTTP/1.1 over TLS, where the server answers only the handshakes the test expects.
     - **One `contract.rs` walks the contract's eight points** (answers P2.1's note), with a failure-kind catalogue that gives every kind except `other` a real cause.
@@ -304,9 +304,10 @@
   - [x] Reuse tests that don't depend on scheduling (plan Task 2).
   - [x] The contract suite: one hop per call, finite time, cancel by drop, timing and reuse (plan Task 3).
   - [x] The failure-kind catalogue, the hostile responses, and `dns` through `send` (plan Task 4).
-  - [x] Fixes from Codex's review (2026-11-24):
+  - [x] Fixes from Codex's first review (2026-11-24):
     - A hop takes its connection's setup times when it gets the connection, so a dropped `http2` hop takes them with it and the next hop on that connection has none.
-    - A later failure for the same origin no longer replaces the one a waiting hop waited on.
+    - A later failure for the same origin no longer replaces one a waiting hop waited on. The second review found the cases this missed.
+  - [x] Fixes from Codex's second review (2026-11-24): a waiting hop is tied to the connect that held its origin's connecting lock through its first poll, so it never reports another connect's failure, even after an abandoned connect or a failure logged just before it asked. The spec and plan were revised first, with the user's approval.
   - [ ] CI green on all four runners after the user pushes, and Phase 2 marked complete (plan Task 5).
 
 ## Phase 3 Execution Checklist — Scenario interpreter
