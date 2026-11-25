@@ -102,6 +102,22 @@ async fn a_stalled_upload_times_out_in_headers() {
     assert!(stopped.read >= MIB, "{}", stopped.read);
 }
 
+/// An HTTP/1.1 executor whose `http.timeout`, and so its stall limit, is
+/// `limit`.
+fn http1_executor_with_timeout(limit: Duration) -> Executor {
+    let settings = HttpSettings {
+        timeout: limit,
+        ..settings(HttpVersion::Http1, MIB)
+    };
+    Executor::with_roots(
+        &settings,
+        &ResourceLimits::default(),
+        Path::new(NO_DIR),
+        RootCertStore::empty(),
+    )
+    .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_upload_closes_its_connection() {
     let mut staller = spawn_upload_staller().await;
@@ -110,17 +126,7 @@ async fn a_stalled_upload_closes_its_connection() {
     request.body = Some(HttpBody::Text("x".repeat(32 << 20)));
     // The pool's longest timeout, so its writes may stall this long.
     let limit = Duration::from_millis(500);
-    let settings = HttpSettings {
-        timeout: limit,
-        ..settings(HttpVersion::Http1, MIB)
-    };
-    let executor = Executor::with_roots(
-        &settings,
-        &ResourceLimits::default(),
-        Path::new(NO_DIR),
-        RootCertStore::empty(),
-    )
-    .unwrap();
+    let executor = http1_executor_with_timeout(limit);
 
     let hop = send_within(&executor, &request, limit).await;
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Headers));
@@ -132,6 +138,32 @@ async fn a_stalled_upload_closes_its_connection() {
         .await
         .expect("the client closed the connection");
     assert!(total < 32 << 20, "{total}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_write_past_the_limit_is_a_timeout() {
+    // A lone executor whose `http.timeout`, and so its limit, is 300 ms,
+    // sending with 5 s: only a caller outside a plan can do that.
+    let staller = spawn_upload_staller().await;
+    let mut request = get(format!("http://{}/", staller.addr));
+    request.method = method("POST");
+    request.body = Some(HttpBody::Text("x".repeat(32 << 20)));
+    let executor = http1_executor_with_timeout(Duration::from_millis(300));
+
+    let hop = send_within(&executor, &request, Duration::from_secs(5)).await;
+    assert_eq!(
+        hop.outcome.as_ref().expect_err("the write stalled"),
+        &Failure {
+            kind: FailureKind::Timeout,
+            stage: FailureStage::Headers,
+            message: "the connection took too long",
+        },
+    );
+    assert!(
+        hop.timing.total < Duration::from_secs(5),
+        "{:?}",
+        hop.timing
+    );
 }
 
 // ---- Point 3: no panics ----
