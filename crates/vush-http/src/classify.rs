@@ -6,7 +6,7 @@ use std::io;
 use hyper_util::client::legacy::Error as ClientError;
 use vush_core::protocol::{Failure, FailureKind, FailureStage};
 
-use crate::connector::ConnectError;
+use crate::connector::{ConnectError, WriteStalled};
 use crate::text;
 
 /// The fixed message of each kind `send` reports beyond `prepare` and the
@@ -77,10 +77,20 @@ pub(crate) fn is_shared_connect(failure: &Failure) -> bool {
 ///
 /// A connector error keeps its own kind, in `prepare` for `invalid_request`
 /// (nothing was sent) and in `connect` otherwise. A connect error without
-/// one is `connect` in `connect`. Every other failure is in `stage`.
+/// one is `connect` in `connect`. A stalled HTTP/1.1 write is `timeout` in
+/// `stage`. Every other failure is in `stage`.
 pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Failure {
     if let Some(error) = chain(error).find_map(|e| e.downcast_ref::<ConnectError>()) {
         return connector_failure(*error);
+    }
+    // A stalled HTTP/1.1 write ran past the connector's limit (see
+    // `connector`), so the hop ran out of time on the connection.
+    if chain(error).any(|e| e.is::<WriteStalled>()) {
+        return Failure {
+            kind: FailureKind::Timeout,
+            stage,
+            message: text::CONNECTION_TOOK_TOO_LONG,
+        };
     }
     // Under `http2`, hyper-util lets one hop per origin connect at a time,
     // and the others wait for it. When that connect fails or goes away, each
@@ -182,6 +192,19 @@ mod tests {
 
     fn wrapped(inner: impl Error + Send + Sync + 'static) -> Wrapper {
         Wrapper(Some(Box::new(inner)))
+    }
+
+    #[test]
+    fn a_stalled_write_is_a_timeout_in_its_stage() {
+        let stalled = io::Error::new(io::ErrorKind::TimedOut, WriteStalled);
+        assert_eq!(
+            classify(&wrapped(stalled), FailureStage::Headers),
+            Failure {
+                kind: FailureKind::Timeout,
+                stage: FailureStage::Headers,
+                message: "the connection took too long",
+            }
+        );
     }
 
     fn kind_and_stage(
