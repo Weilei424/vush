@@ -293,7 +293,7 @@
       - a hop takes an idle connection if one is in its pool when it starts;
       - otherwise it opens a new one while it waits, and takes whichever is ready first;
       - Phase 7 measures the connections this opens (P7.2).
-    - **Hops waiting on a shared HTTP/2 connect report its real kind** (answers P2.3's note): Revised 2026-11-24 after Codex's second review.
+    - **Hops waiting on a shared HTTP/2 connect report its real kind** (answers P2.3's note; revised 2026-11-24 after Codex's second review):
       - each pool logs its last 8 connects, in start order, with each one's failure;
       - a waiting hop uses the failure of the connect that held its origin's connecting lock through the hop's first poll, and never another connect's;
       - an abandoned connect, a failure in HTTP/2's own handshake, a connect the log no longer holds, one that started or failed during that poll, and a hop hyper-util sent back to wait again still give `connect` with "the shared connection attempt failed".
@@ -307,7 +307,7 @@
   - [x] Fixes from Codex's first review (2026-11-24):
     - A hop takes its connection's setup times when it gets the connection, so a dropped `http2` hop takes them with it and the next hop on that connection has none.
     - A later failure for the same origin no longer replaces one a waiting hop waited on. The second review found the cases this missed.
-  - [x] Fixes from Codex's second review (2026-11-24): a waiting hop is tied to the connect that held its origin's connecting lock through its first poll, so it never reports another connect's failure, even after an abandoned connect or a failure logged just before it asked. The spec and plan were revised first, with the user's approval.
+  - [x] Fixes from Codex's second review (2026-11-24): a waiting hop is tied to the connect that held its origin's connecting lock through its first poll, so it never reports another connect's failure, even after an abandoned connect or a failure logged just before it asked. The spec and plan were revised first, with the user's approval. Only `http2` pools log connects, so `auto` hops that an ALPN-upgraded connect releases keep `connect`, and so does a hop that got a connection before it was sent back to wait.
   - [ ] CI green on all four runners after the user pushes, and Phase 2 marked complete (plan Task 5).
 
 ## Phase 3 Execution Checklist — Scenario interpreter
