@@ -34,7 +34,8 @@ pub(crate) const CONNECTION_TOOK_TOO_LONG: &str = "the connection took too long"
 // Under `http2`, a hop that waited for another hop's connect gets this when
 // the pool's log can't tie a connector failure to that connect: it was
 // abandoned or failed in HTTP/2's own handshake, or the log can't single it
-// out (see `ConnectLog::waited_on`).
+// out (see `ConnectLog::waited_on`). Under `auto` over TLS, a hop released by
+// a connect that ALPN turned into HTTP/2 gets it too.
 pub(crate) const SHARED_CONNECT_FAILED: &str = "the shared connection attempt failed";
 
 // The rest, from `classify`.
