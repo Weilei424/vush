@@ -264,9 +264,9 @@ impl Executor {
     /// A lone executor with a pool of its own, shared with no other. It
     /// trusts the system's root certificates, plus those in `tls.ca_file`,
     /// which is resolved against `test_dir`, the test file's directory.
-    /// System roots that don't parse are skipped. Its background connects
-    /// are bounded by `timeout`. Its jar limit is `limits.max_cookies`, and
-    /// nothing else in `limits` is read.
+    /// System roots that don't parse are skipped. Its background connects,
+    /// and any HTTP/1.1 write that stalls, are bounded by `timeout`. Its jar
+    /// limit is `limits.max_cookies`, and nothing else in `limits` is read.
     ///
     /// Building fails with [`BuildError::CaFile`] at [`Scope::File`] when
     /// `tls.ca_file` can't be used, and with [`BuildError::NoTrustedRoots`]
