@@ -33,7 +33,7 @@ use rcgen::{
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{Barrier, mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
 use vush_core::plan::{
@@ -1526,8 +1526,16 @@ impl UploadStaller {
 /// its `content-length`, then at least 1 MiB of the body, and stops reading
 /// without a word. It reads again only when [`UploadStaller::rest`] is
 /// called, and then reads to the end of the stream or of the declared body.
+///
+/// Its receive buffer is small and fixed, so once it stops reading, its
+/// kernel soon stops taking the client's bytes. With the default buffer,
+/// Linux goes on taking a little about every 100 ms, for a second or more,
+/// and each bit lets one of the client's writes finish.
 pub async fn spawn_upload_staller() -> UploadStaller {
-    let listener = bind().await;
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(64 * 1024).unwrap();
+    socket.bind((LOCALHOST, 0).into()).unwrap();
+    let listener = socket.listen(16).unwrap();
     let addr = listener.local_addr().unwrap();
     let (stopped_tx, stopped) = oneshot::channel();
     let (resume, resumed) = oneshot::channel();
