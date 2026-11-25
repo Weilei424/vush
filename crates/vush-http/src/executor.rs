@@ -406,28 +406,22 @@ impl Executor {
         let first = poll_once(&mut response).await;
         let after = pool.connects.events();
         // The hop is in `connect` until hyper-util assigns it a connection,
-        // new or pooled. Only that tells this hop apart: a connect that loses
+        // new or pooled. It assigns one only inside a poll of `response`, and
+        // assigns another when a reused connection closed before the request
+        // went out, so the hop checks after every poll. A connect that loses
         // to a pooled connection finishes on another task.
+        claim(capture, marker, progress);
         let head = match first {
             Poll::Ready(head) => head,
-            Poll::Pending => tokio::select! {
-                biased;
-                head = &mut response => head,
-                assigned = connection_assigned(capture) => {
-                    if assigned {
-                        marker.set(FailureStage::Headers);
-                        progress.take_setup_from(capture);
-                    }
-                    response.await
-                }
-            },
+            Poll::Pending => {
+                std::future::poll_fn(|cx| {
+                    let polled = Pin::new(&mut response).poll(cx);
+                    claim(capture, marker, progress);
+                    polled
+                })
+                .await
+            }
         };
-        // A head that failed in the same poll that assigned its connection
-        // got there before the marker moved.
-        if capture.connection_metadata().is_some() {
-            marker.set(FailureStage::Headers);
-            progress.take_setup_from(capture);
-        }
         // A failure before the head is in the marker's stage, unless its
         // cause places it.
         let head = match head {
@@ -573,10 +567,8 @@ impl HttpExecutor for Executor {
             .and_then(|capture| capture.connection_metadata().as_ref().and_then(conn_info))
             .or(progress.error_connection);
         let connection = info.as_ref().map(|info| info.id);
-        // The setup the hop took when it got its connection. Otherwise the
-        // error named a connection, or hyper-util moved the hop to another
-        // one (it retries on a second connection only after a reused one
-        // closed before the request went out), so take that one's setup now.
+        // The setup the hop took for the connection it reports. Otherwise
+        // take that connection's setup now, if any is left.
         let setup = match progress.setup.take() {
             Some((id, setup)) if Some(id) == connection => Some(setup),
             _ => info.and_then(|info| info.take_setup()),
@@ -616,9 +608,10 @@ struct Progress {
     capture: Option<Capture>,
     /// The connection a hyper-util error names, if any.
     error_connection: Option<Arc<ConnInfo>>,
-    /// The setup the hop took from its connection, with that connection's
-    /// ID. It is taken when hyper-util assigns the connection, not at the
-    /// end, so a hop dropped after it got its connection takes the setup
+    /// The setup the hop took from the connection it is on, with that
+    /// connection's ID. It is taken after each poll that assigns a
+    /// connection, not at the end, so a hop dropped after it got its
+    /// connection, or after hyper-util moved it to another, takes the setup
     /// with it.
     setup: Option<(ConnectionId, ConnectionSetup)>,
 }
@@ -635,18 +628,17 @@ impl Progress {
     }
 
     /// Takes the setup of the connection `capture` names, unless the hop
-    /// already holds one. A pooled connection has none left, and then the
-    /// hop stores nothing.
+    /// already holds that connection's. A pooled connection has none left,
+    /// and a moved-off connection's setup is dropped, so the hop then holds
+    /// none.
     fn take_setup_from(&mut self, capture: &CaptureConnection) {
-        if self.setup.is_some() {
+        let Some(info) = capture.connection_metadata().as_ref().and_then(conn_info) else {
+            return;
+        };
+        if self.setup.as_ref().is_some_and(|(id, _)| *id == info.id) {
             return;
         }
-        let taken = capture
-            .connection_metadata()
-            .as_ref()
-            .and_then(conn_info)
-            .and_then(|info| info.take_setup().map(|setup| (info.id, setup)));
-        self.setup = taken;
+        self.setup = info.take_setup().map(|setup| (info.id, setup));
     }
 }
 
@@ -715,10 +707,14 @@ fn settle(
     }
 }
 
-/// Resolves once hyper-util assigns a connection to the request, new or
-/// pooled. It gives `false` if the request was dropped without one.
-async fn connection_assigned(capture: &mut CaptureConnection) -> bool {
-    capture.wait_for_connection_metadata().await.is_some()
+/// Once hyper-util has assigned the hop a connection, the hop is waiting
+/// for its head, and holds the setup of the connection it is on now.
+fn claim(capture: &CaptureConnection, marker: &StageMarker, progress: &mut Progress) {
+    let assigned = capture.connection_metadata().is_some();
+    if assigned {
+        marker.set(FailureStage::Headers);
+        progress.take_setup_from(capture);
+    }
 }
 
 /// Polls `future` once, with the caller's waker.
