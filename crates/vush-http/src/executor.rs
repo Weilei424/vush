@@ -344,7 +344,7 @@ impl Executor {
     }
 
     /// Runs the rest of the hop until the hop's deadline, and reports a
-    /// timeout in the stage the marker shows. The hop yields between decoding
+    /// timeout in the stage the hop is in (see [`stage_now`]). The hop yields between decoding
     /// steps, so the deadline can fire while a body decodes. A hop that ends
     /// at or after its deadline, with `Ok` or a failure, still ran out of
     /// time, and reports a timeout too (see [`settle`]). With no deadline,
@@ -364,11 +364,17 @@ impl Executor {
         let marker = StageMarker::new();
         marker.set(FailureStage::Connect);
         let hop = self.drive(pool, request, capture, &marker, progress, jar);
+        let mut hop = std::pin::pin!(hop);
         let outcome = match deadline {
             None => hop.await,
-            Some(deadline) => match tokio::time::timeout_at(deadline.into(), hop).await {
-                Ok(outcome) => outcome,
-                Err(_elapsed) => return Err(timeout(marker.get())),
+            Some(deadline) => tokio::select! {
+                biased;
+                outcome = &mut hop => outcome,
+                () = tokio::time::sleep_until(deadline.into()) => {
+                    // Read while the hop is alive: dropping it can close its
+                    // own connection.
+                    return Err(timeout(stage_now(&marker, capture)));
+                }
             },
         };
         // The deadline is a std Instant from core, so `now` is too (only tokio's pause differs).
@@ -562,10 +568,18 @@ impl HttpExecutor for Executor {
             }
         };
 
-        let info = capture
-            .as_ref()
-            .and_then(|capture| capture.connection_metadata().as_ref().and_then(conn_info))
-            .or(progress.error_connection);
+        // A failure in `connect` names no connection: the hop never got one
+        // that carried its request. Its capture may still name a closed one
+        // that hyper-util handed the request back from.
+        let connecting = matches!(&outcome, Err(failure) if failure.stage == FailureStage::Connect);
+        let info = if connecting {
+            None
+        } else {
+            capture
+                .as_ref()
+                .and_then(|capture| capture.connection_metadata().as_ref().and_then(conn_info))
+                .or(progress.error_connection)
+        };
         let connection = info.as_ref().map(|info| info.id);
         // The setup the hop took for the connection it reports. Otherwise
         // take that connection's setup now, if any is left.
@@ -714,6 +728,23 @@ fn claim(capture: &CaptureConnection, marker: &StageMarker, progress: &mut Progr
     if assigned {
         marker.set(FailureStage::Headers);
         progress.take_setup_from(capture);
+    }
+}
+
+/// The stage of a hop that ran out of time while still waiting. A hop at
+/// `headers` whose connection closed had its request handed back by
+/// hyper, which sends it on another connection: it is connecting again.
+fn stage_now(marker: &StageMarker, capture: &CaptureConnection) -> FailureStage {
+    let stage = marker.get();
+    let named = capture.connection_metadata();
+    let closed = named
+        .as_ref()
+        .and_then(conn_info)
+        .is_some_and(|info| info.is_closed());
+    if stage == FailureStage::Headers && closed {
+        FailureStage::Connect
+    } else {
+        stage
     }
 }
 
