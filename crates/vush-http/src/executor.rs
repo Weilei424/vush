@@ -193,9 +193,10 @@ pub(crate) enum Transport {
 ///   it out of the log, when it started or failed during the hop's first
 ///   poll, a window of microseconds, and when hyper-util sent the hop back to
 ///   wait again, because the connection it got closed, or sent GOAWAY,
-///   before its request went out. Under `auto` over TLS, a connect that ALPN turns into HTTP/2
-///   can release hops that were running their own connects. They keep
-///   `connect` too, since only `http2` connects are logged.
+///   before its request went out. Under `auto` over TLS, a connect that ALPN
+///   turns into HTTP/2 can release hops that were running their own
+///   connects. They keep `connect` too, since only `http2` connects are
+///   logged.
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
@@ -344,11 +345,11 @@ impl Executor {
     }
 
     /// Runs the rest of the hop until the hop's deadline, and reports a
-    /// timeout in the stage its marker shows. The hop
-    /// yields between decoding steps, so the deadline can fire while a body
-    /// decodes. A hop that ends at or after its deadline, with `Ok` or a
-    /// failure, still ran out of time, and reports a timeout too (see
-    /// [`settle`]). With no deadline, the hop never runs out of time.
+    /// timeout in the stage its marker shows. The hop yields between decoding
+    /// steps, so the deadline can fire while a body decodes. A hop that ends
+    /// at or after its deadline, with `Ok` or a failure, still ran out of
+    /// time, and reports a timeout too (see [`settle`]). With no deadline, the
+    /// hop never runs out of time.
     async fn exchange(
         &self,
         pool: &Pool,
