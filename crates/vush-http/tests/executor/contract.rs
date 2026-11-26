@@ -19,8 +19,8 @@ use crate::common::{
     early_hints_then_ok, echo, executor, failure, garbage_status, get, h2_data_on_stream_zero,
     h2_goaway_before_response, http_reply_to_tls, method, pairs, poll_once, redirecting,
     refused_port, response, send, send_within, settings, short_body_then_close, silent_after_head,
-    slow_reply, spawn_h1, spawn_h1_dropper, spawn_h2_dropper, spawn_h2_mover, spawn_raw, spawn_tls,
-    spawn_upload_staller, trusting, two_content_lengths,
+    slow_reply, spawn_h1, spawn_h1_dropper, spawn_h2_dropper, spawn_h2_mover, spawn_h2_mover_tls,
+    spawn_raw, spawn_tls, spawn_upload_staller, trusting, two_content_lengths,
 };
 
 // ---- Point 1: one hop per call ----
@@ -586,6 +586,44 @@ async fn a_dropped_hop_takes_the_setup_of_the_connection_it_was_moved_to() {
     response(&next);
     assert_eq!(mover.accepted(), 2);
     assert!(next.timing.setup.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_moved_hop_that_times_out_while_connecting_again_is_in_connect() {
+    let ca = TestCa::generate();
+    let mut mover = spawn_h2_mover_tls(&ca).await;
+    let request = get(format!("https://{}/", mover.addr));
+    let executor = trusting(&ca, HttpVersion::Http2);
+
+    // As in the test above: warm up, hold the one stream, queue `pending` in
+    // h2 and `moved` in hyper's queue, then cut the connection.
+    let warm = send(&executor, &request).await;
+    response(&warm);
+    let (mut one, mut two, mut three) = (
+        executor.new_session(),
+        executor.new_session(),
+        executor.new_session(),
+    );
+    let mut holding = Box::pin(executor.send(&mut one, &request, TIMEOUT));
+    tokio::select! {
+        biased;
+        _ = &mut holding => panic!("the first hop finished before the server held it"),
+        () = mover.held() => {}
+    }
+    let mut pending = Box::pin(executor.send(&mut two, &request, TIMEOUT));
+    assert!(matches!(poll_once(&mut pending).await, Poll::Pending));
+    let mut moved = Box::pin(executor.send(&mut three, &request, Duration::from_secs(1)));
+    assert!(matches!(poll_once(&mut moved).await, Poll::Pending));
+    mover.cut();
+
+    // hyper-util sends `moved` on a new connection, whose handshake never
+    // ends, so it runs out of time while connecting again.
+    let hop = moved.await;
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
+    assert_eq!(hop.connection, None);
+    assert!(hop.timing.setup.is_none());
+    assert_eq!(mover.accepted(), 2);
+    drop((pending, holding));
 }
 
 // ---- Point 5: no per-user state in the executor ----
