@@ -88,18 +88,23 @@ async fn a_stalled_upload_times_out_in_headers() {
 
     let hop = send_within(&executor(HttpVersion::Http1), &request, timeout).await;
 
-    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Headers));
-    assert_eq!(hop.timing.to_headers, None);
-    assert!(hop.timing.total >= timeout, "{:?}", hop.timing);
+    // Checked first: it tells a slow connect apart from a stalled upload.
     // The server had read part of the declared body, and had stopped
     // reading, when the hop ended, so the body was being sent. Loopback
     // socket buffers hold far less than the other 31 MiB, so the upload was
     // still incomplete.
-    let stopped = staller
-        .stopped()
-        .expect("the server read part of the body first");
+    let stopped = staller.stopped().unwrap_or_else(|| {
+        panic!(
+            "the server read no body: {:?}, {:?}",
+            failure(&hop),
+            hop.timing
+        )
+    });
     assert_eq!(stopped.declared, 32 << 20);
     assert!(stopped.read >= MIB, "{}", stopped.read);
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Headers));
+    assert_eq!(hop.timing.to_headers, None);
+    assert!(hop.timing.total >= timeout, "{:?}", hop.timing);
 }
 
 /// An HTTP/1.1 executor whose `http.timeout`, and so its stall limit, is
@@ -623,6 +628,136 @@ async fn a_moved_hop_that_times_out_while_connecting_again_is_in_connect() {
     assert_eq!(hop.connection, None);
     assert!(hop.timing.setup.is_none());
     assert_eq!(mover.accepted(), 2);
+    drop((pending, holding));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hop_waiting_for_a_free_stream_is_in_connect() {
+    let mut mover = spawn_h2_mover().await;
+    let request = get(format!("http://{}/", mover.addr));
+    let executor = executor(HttpVersion::Http2);
+
+    let warm = send(&executor, &request).await;
+    response(&warm);
+    let (mut one, mut two, mut three) = (
+        executor.new_session(),
+        executor.new_session(),
+        executor.new_session(),
+    );
+    let mut holding = Box::pin(executor.send(&mut one, &request, TIMEOUT));
+    tokio::select! {
+        biased;
+        _ = &mut holding => panic!("the first hop finished before the server held it"),
+        () = mover.held() => {}
+    }
+
+    // `given` waits in h2 for the stream, so hyper has given its request to
+    // the connection, while `queued` waits in hyper's channel.
+    let timeout = Duration::from_millis(500);
+    let mut given = Box::pin(executor.send(&mut two, &request, timeout));
+    assert!(matches!(poll_once(&mut given).await, Poll::Pending));
+    let mut queued = Box::pin(executor.send(&mut three, &request, timeout));
+    assert!(matches!(poll_once(&mut queued).await, Poll::Pending));
+    let (given, queued) = tokio::join!(given, queued);
+
+    assert_eq!(
+        failure(&given),
+        (FailureKind::Timeout, FailureStage::Headers)
+    );
+    assert_eq!(given.connection, warm.connection);
+    assert_eq!(
+        failure(&queued),
+        (FailureKind::Timeout, FailureStage::Connect)
+    );
+    assert_eq!(queued.connection, None);
+    assert!(queued.timing.setup.is_none());
+    drop(holding);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hop_handed_back_by_a_goaway_times_out_in_connect() {
+    let ca = TestCa::generate();
+    let mut mover = spawn_h2_mover_tls(&ca).await;
+    let request = get(format!("https://{}/", mover.addr));
+    let executor = trusting(&ca, HttpVersion::Http2);
+
+    // As in the test above: warm up, hold the one stream, queue `pending` in
+    // h2 and `moved` in hyper's queue, then have the server send GOAWAY.
+    let warm = send(&executor, &request).await;
+    response(&warm);
+    let (mut one, mut two, mut three) = (
+        executor.new_session(),
+        executor.new_session(),
+        executor.new_session(),
+    );
+    let mut holding = Box::pin(executor.send(&mut one, &request, TIMEOUT));
+    tokio::select! {
+        biased;
+        _ = &mut holding => panic!("the first hop finished before the server held it"),
+        () = mover.held() => {}
+    }
+    let mut pending = Box::pin(executor.send(&mut two, &request, TIMEOUT));
+    assert!(matches!(poll_once(&mut pending).await, Poll::Pending));
+    let mut moved = Box::pin(executor.send(&mut three, &request, Duration::from_secs(1)));
+    assert!(matches!(poll_once(&mut moved).await, Poll::Pending));
+    mover.goaway();
+
+    // hyper-util sends `moved` on a new connection, whose handshake never
+    // ends, while the old connection stays open for the held stream.
+    let hop = moved.await;
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
+    assert_eq!(hop.connection, None);
+    assert!(hop.timing.setup.is_none());
+    assert_eq!(mover.accepted(), 2);
+    assert!(
+        matches!(poll_once(&mut holding).await, Poll::Pending),
+        "the first connection stayed open"
+    );
+    drop((pending, holding));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_replacement_failure_is_a_timeout_in_connect() {
+    let ca = TestCa::generate();
+    let mut mover = spawn_h2_mover_tls(&ca).await;
+    let request = get(format!("https://{}/", mover.addr));
+    let executor = trusting(&ca, HttpVersion::Http2);
+
+    let warm = send(&executor, &request).await;
+    response(&warm);
+    let (mut one, mut two, mut three) = (
+        executor.new_session(),
+        executor.new_session(),
+        executor.new_session(),
+    );
+    let mut holding = Box::pin(executor.send(&mut one, &request, TIMEOUT));
+    tokio::select! {
+        biased;
+        _ = &mut holding => panic!("the first hop finished before the server held it"),
+        () = mover.held() => {}
+    }
+    let mut pending = Box::pin(executor.send(&mut two, &request, TIMEOUT));
+    assert!(matches!(poll_once(&mut pending).await, Poll::Pending));
+    let mut moved = Box::pin(executor.send(&mut three, &request, Duration::from_secs(1)));
+    assert!(matches!(poll_once(&mut moved).await, Poll::Pending));
+    mover.cut();
+    tokio::select! {
+        biased;
+        _ = &mut moved => panic!("the moved hop finished before it connected again"),
+        () = mover.reconnected() => {}
+    }
+
+    // Stop polling `moved` until its deadline has passed, then fail the new
+    // connection's handshake.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    mover.close_held();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The next poll finds the failed handshake ready, after the deadline.
+    let hop = moved.await;
+
+    assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
+    assert_eq!(hop.connection, None);
+    assert!(hop.timing.setup.is_none());
     drop((pending, holding));
 }
 
