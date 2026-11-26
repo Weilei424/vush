@@ -478,6 +478,19 @@ where
     spawn_counted_tls(handler, alpn, max_handshakes, leaf, Arc::default()).await
 }
 
+/// An acceptor serving `leaf`, choosing from `alpn` the way rustls does.
+fn tls_acceptor(leaf: Leaf, alpn: &[&[u8]]) -> TlsAcceptor {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![leaf.cert], leaf.key)
+        .unwrap();
+    config.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
+    TlsAcceptor::from(Arc::new(config))
+}
+
 /// Like [`spawn_tls`], and adds each accepted connection to `accepted`.
 async fn spawn_counted_tls<H, F>(
     handler: H,
@@ -491,15 +504,7 @@ where
     F: Future<Output = Reply> + Send + 'static,
 {
     let handler = boxed(handler);
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![leaf.cert], leaf.key)
-        .unwrap();
-    config.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
-    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let acceptor = tls_acceptor(leaf, alpn);
     let listener = bind().await;
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -1444,37 +1449,12 @@ pub async fn spawn_h2_mover() -> Mover {
         let mut cut_rx = Some(cut_rx);
         while let Ok((tcp, _)) = listener.accept().await {
             count.fetch_add(1, Ordering::SeqCst);
-            let numbered = numbered.clone();
-            let held = held_tx.clone();
-            let service = service_fn(move |_request: Request<Incoming>| {
-                let number = numbered.fetch_add(1, Ordering::SeqCst) + 1;
-                let held = held.clone();
-                async move {
-                    if number == 2 || number == 3 {
-                        let _ = held.send(());
-                        pending::<()>().await;
-                    }
-                    Ok::<_, Infallible>(reply(200, &[], ""))
-                }
-            });
-            let serving = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                .max_concurrent_streams(1)
-                .serve_connection(TokioIo::new(tcp), service);
-            match cut_rx.take() {
-                Some(cut) => {
-                    tokio::spawn(async move {
-                        tokio::select! {
-                            _ = serving => {}
-                            _ = cut => {}
-                        }
-                    });
-                }
-                None => {
-                    tokio::spawn(async move {
-                        let _ = serving.await;
-                    });
-                }
-            }
+            tokio::spawn(serve_mover(
+                TokioIo::new(tcp),
+                numbered.clone(),
+                held_tx.clone(),
+                cut_rx.take(),
+            ));
         }
     });
     Mover {
@@ -1482,6 +1462,81 @@ pub async fn spawn_h2_mover() -> Mover {
         accepted,
         held,
         cut: Some(cut_tx),
+    }
+}
+
+/// Like [`spawn_h2_mover`], over TLS offering only `h2`. Only its first
+/// connection gets a handshake. Later ones are held open and never
+/// answered, so a hop sent on one stays connecting.
+pub async fn spawn_h2_mover_tls(ca: &TestCa) -> Mover {
+    let acceptor = tls_acceptor(ca.leaf_for_ip(LOCALHOST), &[b"h2"]);
+    let listener = bind().await;
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (held_tx, held) = mpsc::unbounded_channel();
+    let (cut_tx, cut_rx) = oneshot::channel::<()>();
+    let count = accepted.clone();
+    tokio::spawn(async move {
+        let numbered = Arc::new(AtomicUsize::new(0));
+        let mut cut_rx = Some(cut_rx);
+        while let Ok((tcp, _)) = listener.accept().await {
+            if count.fetch_add(1, Ordering::SeqCst) > 0 {
+                tokio::spawn(hold(tcp));
+                continue;
+            }
+            let acceptor = acceptor.clone();
+            let numbered = numbered.clone();
+            let held = held_tx.clone();
+            let cut = cut_rx.take();
+            tokio::spawn(async move {
+                if let Ok(tls) = acceptor.accept(tcp).await {
+                    serve_mover(TokioIo::new(tls), numbered, held, cut).await;
+                }
+            });
+        }
+    });
+    Mover {
+        addr,
+        accepted,
+        held,
+        cut: Some(cut_tx),
+    }
+}
+
+/// Serves one connection of a mover server: HTTP/2, one stream at a time,
+/// with the shared request numbering. The connection ends early on `cut`.
+async fn serve_mover<I>(
+    io: I,
+    numbered: Arc<AtomicUsize>,
+    held: mpsc::UnboundedSender<()>,
+    cut: Option<oneshot::Receiver<()>>,
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let service = service_fn(move |_request: Request<Incoming>| {
+        let number = numbered.fetch_add(1, Ordering::SeqCst) + 1;
+        let held = held.clone();
+        async move {
+            if number == 2 || number == 3 {
+                let _ = held.send(());
+                pending::<()>().await;
+            }
+            Ok::<_, Infallible>(reply(200, &[], ""))
+        }
+    });
+    let serving = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+        .max_concurrent_streams(1)
+        .serve_connection(io, service);
+    match cut {
+        Some(cut) => {
+            tokio::select! {
+                _ = serving => {}
+                _ = cut => {}
+            }
+        }
+        None => {
+            let _ = serving.await;
+        }
     }
 }
 
