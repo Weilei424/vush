@@ -34,7 +34,7 @@ use rcgen::{
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::{Barrier, mpsc, oneshot};
+use tokio::sync::{Barrier, mpsc, oneshot, watch};
 use tokio_rustls::TlsAcceptor;
 use vush_core::plan::{
     ByteSize, ClosedStop, ClosedVusLoad, Expect, HttpMethod, HttpSettings, HttpVersion, JsonNumber,
@@ -1406,13 +1406,24 @@ pub async fn spawn_h2_dropper(at: DropAt, ca: &TestCa) -> Dropper {
     }
 }
 
+/// How a mover server ends its first connection.
+#[derive(Debug)]
+enum End {
+    Cut,
+    GoAway,
+}
+
 /// A server for a hop that hyper-util moves to a new connection. See
 /// [`spawn_h2_mover`].
 pub struct Mover {
     pub addr: SocketAddr,
     accepted: Arc<AtomicUsize>,
     held: mpsc::UnboundedReceiver<()>,
-    cut: Option<oneshot::Sender<()>>,
+    reconnected: mpsc::UnboundedReceiver<()>,
+    close: watch::Sender<bool>,
+    end: Option<oneshot::Sender<End>>,
+    // Kept alive, so the plaintext mover's `reconnected()` waits.
+    _reconnected: mpsc::UnboundedSender<()>,
 }
 
 impl Mover {
@@ -1421,10 +1432,30 @@ impl Mover {
         self.held.recv().await.expect("the server ended");
     }
 
+    /// Waits until the server holds its next later connection without a
+    /// handshake. Only the TLS mover holds any.
+    pub async fn reconnected(&mut self) {
+        self.reconnected.recv().await.expect("the server ended");
+    }
+
     /// Closes the first connection at once.
     pub fn cut(&mut self) {
-        let cut = self.cut.take().expect("the connection was cut already");
-        cut.send(()).expect("the server ended");
+        let end = self.end.take().expect("the connection was ended already");
+        end.send(End::Cut).expect("the server ended");
+    }
+
+    /// Sends GOAWAY on the first connection and keeps serving it, so its open
+    /// streams can finish. The held stream never does, so the connection
+    /// stays open.
+    pub fn goaway(&mut self) {
+        let end = self.end.take().expect("the connection was ended already");
+        end.send(End::GoAway).expect("the server ended");
+    }
+
+    /// Closes every connection the server holds without a handshake, now and
+    /// later.
+    pub fn close_held(&self) {
+        self.close.send_replace(true);
     }
 
     /// The TCP connections the server has accepted so far.
@@ -1436,24 +1467,27 @@ impl Mover {
 /// Serves HTTP/2 with prior knowledge, one stream at a time per connection.
 /// Requests are numbered across connections. The 1st gets `200`. The 2nd and
 /// 3rd are held unanswered, and each signals `held` when it arrives. Every
-/// later one gets `200`. `cut` closes the first connection.
+/// later one gets `200`. `cut` closes the first connection, and `goaway`
+/// sends GOAWAY on it.
 pub async fn spawn_h2_mover() -> Mover {
     let listener = bind().await;
     let addr = listener.local_addr().unwrap();
     let accepted = Arc::new(AtomicUsize::new(0));
     let (held_tx, held) = mpsc::unbounded_channel();
-    let (cut_tx, cut_rx) = oneshot::channel::<()>();
+    let (reconnected_tx, reconnected) = mpsc::unbounded_channel();
+    let (close, _) = watch::channel(false);
+    let (end_tx, end_rx) = oneshot::channel::<End>();
     let count = accepted.clone();
     tokio::spawn(async move {
         let numbered = Arc::new(AtomicUsize::new(0));
-        let mut cut_rx = Some(cut_rx);
+        let mut end_rx = Some(end_rx);
         while let Ok((tcp, _)) = listener.accept().await {
             count.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(serve_mover(
                 TokioIo::new(tcp),
                 numbered.clone(),
                 held_tx.clone(),
-                cut_rx.take(),
+                end_rx.take(),
             ));
         }
     });
@@ -1461,36 +1495,50 @@ pub async fn spawn_h2_mover() -> Mover {
         addr,
         accepted,
         held,
-        cut: Some(cut_tx),
+        reconnected,
+        close,
+        end: Some(end_tx),
+        _reconnected: reconnected_tx,
     }
 }
 
 /// Like [`spawn_h2_mover`], over TLS offering only `h2`. Only its first
-/// connection gets a handshake. Later ones are held open and never
-/// answered, so a hop sent on one stays connecting.
+/// connection gets a handshake. Later ones are counted and held open without
+/// one, never answered, so a hop sent on one stays connecting. Each signals
+/// `reconnected` when it starts being held, and closes once `close_held` is
+/// called.
 pub async fn spawn_h2_mover_tls(ca: &TestCa) -> Mover {
     let acceptor = tls_acceptor(ca.leaf_for_ip(LOCALHOST), &[b"h2"]);
     let listener = bind().await;
     let addr = listener.local_addr().unwrap();
     let accepted = Arc::new(AtomicUsize::new(0));
     let (held_tx, held) = mpsc::unbounded_channel();
-    let (cut_tx, cut_rx) = oneshot::channel::<()>();
+    let (reconnected_tx, reconnected) = mpsc::unbounded_channel();
+    let (close, close_rx) = watch::channel(false);
+    let (end_tx, end_rx) = oneshot::channel::<End>();
     let count = accepted.clone();
+    let signal = reconnected_tx.clone();
     tokio::spawn(async move {
         let numbered = Arc::new(AtomicUsize::new(0));
-        let mut cut_rx = Some(cut_rx);
+        let mut end_rx = Some(end_rx);
         while let Ok((tcp, _)) = listener.accept().await {
             if count.fetch_add(1, Ordering::SeqCst) > 0 {
-                tokio::spawn(hold(tcp));
+                let signal = signal.clone();
+                let mut close = close_rx.clone();
+                tokio::spawn(async move {
+                    let _held = tcp;
+                    let _ = signal.send(());
+                    let _ = close.wait_for(|closed| *closed).await;
+                });
                 continue;
             }
             let acceptor = acceptor.clone();
             let numbered = numbered.clone();
             let held = held_tx.clone();
-            let cut = cut_rx.take();
+            let end = end_rx.take();
             tokio::spawn(async move {
                 if let Ok(tls) = acceptor.accept(tcp).await {
-                    serve_mover(TokioIo::new(tls), numbered, held, cut).await;
+                    serve_mover(TokioIo::new(tls), numbered, held, end).await;
                 }
             });
         }
@@ -1499,17 +1547,22 @@ pub async fn spawn_h2_mover_tls(ca: &TestCa) -> Mover {
         addr,
         accepted,
         held,
-        cut: Some(cut_tx),
+        reconnected,
+        close,
+        end: Some(end_tx),
+        _reconnected: reconnected_tx,
     }
 }
 
 /// Serves one connection of a mover server: HTTP/2, one stream at a time,
-/// with the shared request numbering. The connection ends early on `cut`.
+/// with the shared request numbering. The connection ends early on
+/// `End::Cut`, and shuts down gracefully on `End::GoAway`, which lets its
+/// open streams finish. If the sender is dropped, it keeps serving.
 async fn serve_mover<I>(
     io: I,
     numbered: Arc<AtomicUsize>,
     held: mpsc::UnboundedSender<()>,
-    cut: Option<oneshot::Receiver<()>>,
+    end: Option<oneshot::Receiver<End>>,
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -1524,20 +1577,24 @@ async fn serve_mover<I>(
             Ok::<_, Infallible>(reply(200, &[], ""))
         }
     });
-    let serving = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-        .max_concurrent_streams(1)
-        .serve_connection(io, service);
-    match cut {
-        Some(cut) => {
-            tokio::select! {
-                _ = serving => {}
-                _ = cut => {}
-            }
-        }
-        None => {
-            let _ = serving.await;
-        }
+    let mut serving = std::pin::pin!(
+        hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+            .max_concurrent_streams(1)
+            .serve_connection(io, service)
+    );
+    let Some(end) = end else {
+        let _ = serving.await;
+        return;
+    };
+    tokio::select! {
+        _ = serving.as_mut() => return,
+        end = end => match end {
+            Ok(End::Cut) => return,
+            Ok(End::GoAway) => serving.as_mut().graceful_shutdown(),
+            Err(_) => {}
+        },
     }
+    let _ = serving.await;
 }
 
 // ---- Part uploads ----
