@@ -33,7 +33,7 @@ use crate::decode;
 use crate::executors::{SystemRoots, build};
 use crate::pool::ScopeView;
 use crate::prepare::{Prepared, add_accept_encoding, add_cookies, prepare};
-use crate::stage::StageMarker;
+use crate::stage::{StageMarker, Unwritten};
 use crate::text;
 
 /// Why an executor couldn't be built. Each text is fixed: it names a
@@ -192,8 +192,8 @@ pub(crate) enum Transport {
 ///   when it failed in HTTP/2's own handshake, when 8 newer connects pushed
 ///   it out of the log, when it started or failed during the hop's first
 ///   poll, a window of microseconds, and when hyper-util sent the hop back to
-///   wait again, because the connection it got closed before its request
-///   went out. Under `auto` over TLS, a connect that ALPN turns into HTTP/2
+///   wait again, because the connection it got closed, or sent GOAWAY,
+///   before its request went out. Under `auto` over TLS, a connect that ALPN turns into HTTP/2
 ///   can release hops that were running their own connects. They keep
 ///   `connect` too, since only `http2` connects are logged.
 /// - `max_response_size` is the body limit. A longer body is read to the end,
@@ -344,7 +344,7 @@ impl Executor {
     }
 
     /// Runs the rest of the hop until the hop's deadline, and reports a
-    /// timeout in the stage the hop is in (see [`stage_now`]). The hop
+    /// timeout in the stage its marker shows. The hop
     /// yields between decoding steps, so the deadline can fire while a body
     /// decodes. A hop that ends at or after its deadline, with `Ok` or a
     /// failure, still ran out of time, and reports a timeout too (see
@@ -352,7 +352,7 @@ impl Executor {
     async fn exchange(
         &self,
         pool: &Pool,
-        request: Request<CountingBody>,
+        mut request: Request<CountingBody>,
         capture: &CaptureConnection,
         deadline: Option<Instant>,
         progress: &mut Progress,
@@ -361,8 +361,13 @@ impl Executor {
         // `prepare` is done, so the hop is waiting for a connection: its own
         // connect, a pooled one, or, under `http2`, another hop's connect,
         // which hyper-util shares without running the connector for this hop.
-        let marker = StageMarker::new();
+        // Its request carries a mark that moves the marker to `headers` once
+        // hyper gives it to a connection.
+        let marker = Arc::new(StageMarker::new());
         marker.set(FailureStage::Connect);
+        request
+            .extensions_mut()
+            .insert(Unwritten::new(marker.clone()));
         let hop = self.drive(pool, request, capture, &marker, progress, jar);
         let mut hop = std::pin::pin!(hop);
         let outcome = match deadline {
@@ -371,9 +376,9 @@ impl Executor {
                 biased;
                 outcome = &mut hop => outcome,
                 () = tokio::time::sleep_until(deadline.into()) => {
-                    // Read while the hop is alive: dropping it can close its
-                    // own connection.
-                    return Err(timeout(stage_now(&marker, capture)));
+                    // Read before the hop is dropped: dropping it drops an
+                    // unwritten request, whose mark moves the marker.
+                    return Err(timeout(marker.get()));
                 }
             },
         };
@@ -411,18 +416,20 @@ impl Executor {
         let before = pool.connects.events();
         let first = poll_once(&mut response).await;
         let after = pool.connects.events();
-        // The hop is in `connect` until hyper-util assigns it a connection,
-        // new or pooled. It assigns one only inside a poll of `response`, and
-        // assigns another when a reused connection closed before the request
-        // went out, so the hop checks after every poll. A connect that loses
-        // to a pooled connection finishes on another task.
-        claim(capture, marker, progress);
+        // hyper-util assigns the hop a connection, new or pooled, only inside
+        // a poll of `response`. It assigns another when a reused connection
+        // closed, or sent GOAWAY, before the request went out, so the hop
+        // takes the setup of the connection it is on after every poll. Its
+        // stage moves to `headers` on its own, when hyper gives its request
+        // to a connection (see `Unwritten`). A connect that loses to a pooled
+        // connection finishes on another task.
+        claim(capture, progress);
         let head = match first {
             Poll::Ready(head) => head,
             Poll::Pending => {
                 std::future::poll_fn(|cx| {
                     let polled = Pin::new(&mut response).poll(cx);
-                    claim(capture, marker, progress);
+                    claim(capture, progress);
                     polled
                 })
                 .await
@@ -568,9 +575,9 @@ impl HttpExecutor for Executor {
             }
         };
 
-        // A failure in `connect` names no connection: the hop never got one
-        // that carried its request. Its capture may still name a closed one
-        // that hyper-util handed the request back from.
+        // A failure in `connect` names no connection: none carried the hop's
+        // request. Its capture may still name one it was queued on or handed
+        // back from.
         let connecting = matches!(&outcome, Err(failure) if failure.stage == FailureStage::Connect);
         let info = if connecting {
             None
@@ -705,10 +712,10 @@ fn wire_request(prepared: Prepared, sent: Arc<AtomicU64>) -> (Request<CountingBo
 }
 
 /// The outcome of a hop that ended at `now`. Any outcome reached at or after
-/// the `deadline`, `Ok` or failure, ran out of time all the same, so it
-/// becomes a timeout in `stage`, the stage the hop was in, whatever stage or
-/// kind a failure had. Before the deadline, and with no deadline, nothing
-/// changes.
+/// the `deadline` ran out of time all the same. A failure becomes a timeout
+/// in its own stage, which is the marker's unless its cause placed it, as a
+/// connect failure is. `Ok` becomes a timeout in `stage`, the marker's.
+/// Before the deadline, and with no deadline, nothing changes.
 fn settle(
     outcome: Result<HttpResponse, Failure>,
     deadline: Option<Instant>,
@@ -716,35 +723,19 @@ fn settle(
     stage: FailureStage,
 ) -> Result<HttpResponse, Failure> {
     match outcome {
-        _ if deadline.is_some_and(|deadline| now >= deadline) => Err(timeout(stage)),
+        Err(failure) if deadline.is_some_and(|deadline| now >= deadline) => {
+            Err(timeout(failure.stage))
+        }
+        Ok(_) if deadline.is_some_and(|deadline| now >= deadline) => Err(timeout(stage)),
         outcome => outcome,
     }
 }
 
-/// Once hyper-util has assigned the hop a connection, the hop is waiting
-/// for its head, and holds the setup of the connection it is on now.
-fn claim(capture: &CaptureConnection, marker: &StageMarker, progress: &mut Progress) {
-    let assigned = capture.connection_metadata().is_some();
-    if assigned {
-        marker.set(FailureStage::Headers);
+/// Once hyper-util has assigned the hop a connection, the hop holds the setup
+/// of the connection it is on now.
+fn claim(capture: &CaptureConnection, progress: &mut Progress) {
+    if capture.connection_metadata().is_some() {
         progress.take_setup_from(capture);
-    }
-}
-
-/// The stage of a hop that ran out of time while still waiting. A hop at
-/// `headers` whose connection closed had its request handed back by
-/// hyper, which sends it on another connection: it is connecting again.
-fn stage_now(marker: &StageMarker, capture: &CaptureConnection) -> FailureStage {
-    let stage = marker.get();
-    let named = capture.connection_metadata();
-    let closed = named
-        .as_ref()
-        .and_then(conn_info)
-        .is_some_and(|info| info.is_closed());
-    if stage == FailureStage::Headers && closed {
-        FailureStage::Connect
-    } else {
-        stage
     }
 }
 
@@ -1261,8 +1252,14 @@ mod tests {
         );
         assert_eq!(
             settle(Err(protocol), Some(now), later, headers),
-            Err(timeout(headers)),
-            "err after, in the stage given, not the error's own"
+            Err(timeout(body)),
+            "err after, in the error's own stage"
+        );
+        let connect = failure(FailureKind::Connect, FailureStage::Connect);
+        assert_eq!(
+            settle(Err(connect), Some(now), later, headers),
+            Err(timeout(FailureStage::Connect)),
+            "a connect failure after, in connect"
         );
         assert_eq!(settle(ok(), None, later, body), ok(), "ok, no deadline");
         assert_eq!(
