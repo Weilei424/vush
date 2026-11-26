@@ -34,7 +34,7 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -62,16 +62,9 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct ConnInfo {
     pub id: ConnectionId,
     setup: Mutex<Option<ConnectionSetup>>,
-    closed: AtomicBool,
 }
 
 impl ConnInfo {
-    /// Whether hyper has dropped the connection: its task ended, so no
-    /// request can go out on it any more.
-    pub(crate) fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
-    }
-
     /// The setup times, for the first hop that asks. Later calls get `None`.
     pub(crate) fn take_setup(&self) -> Option<ConnectionSetup> {
         self.setup
@@ -410,7 +403,6 @@ impl Connector {
         let info = ConnInfo {
             id: ConnectionId(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
             setup: Mutex::new(Some(ConnectionSetup { dns, connect, tls })),
-            closed: AtomicBool::new(false),
         };
         Ok(Conn {
             stream,
@@ -530,13 +522,6 @@ impl Conn {
             return stalled_error();
         }
         polled
-    }
-}
-
-/// Marks the connection closed for the hops that still name it.
-impl Drop for Conn {
-    fn drop(&mut self) {
-        self.info.closed.store(true, Ordering::Release);
     }
 }
 
