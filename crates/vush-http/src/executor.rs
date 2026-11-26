@@ -344,11 +344,11 @@ impl Executor {
     }
 
     /// Runs the rest of the hop until the hop's deadline, and reports a
-    /// timeout in the stage the hop is in (see [`stage_now`]). The hop yields between decoding
-    /// steps, so the deadline can fire while a body decodes. A hop that ends
-    /// at or after its deadline, with `Ok` or a failure, still ran out of
-    /// time, and reports a timeout too (see [`settle`]). With no deadline,
-    /// the hop never runs out of time.
+    /// timeout in the stage the hop is in (see [`stage_now`]). The hop
+    /// yields between decoding steps, so the deadline can fire while a body
+    /// decodes. A hop that ends at or after its deadline, with `Ok` or a
+    /// failure, still ran out of time, and reports a timeout too (see
+    /// [`settle`]). With no deadline, the hop never runs out of time.
     async fn exchange(
         &self,
         pool: &Pool,
