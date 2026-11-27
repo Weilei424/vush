@@ -175,8 +175,9 @@ impl Pool {
             match wait.await {
                 Some(Offer::Fresh(result)) => return result.map(|lent| (lent, true)),
                 Some(Offer::Pooled(lent)) => return Ok((lent, false)),
-                // The pool dropped the waiter without giving it anything.
-                None => {}
+                // The connect's task ended before it gave its result (see
+                // `ConnectGuard`), so the hop connects anew.
+                None => yield_before_retry().await,
             }
         }
     }
@@ -232,12 +233,15 @@ impl Pool {
     fn connect(&self, key: Key, uri: Uri, starter: u64) {
         let connecting = self.shared.connector.connect_to(uri);
         let pool = Arc::downgrade(&self.shared);
+        let guard = self.guard(&key, Owed::Starter(starter));
         tokio::spawn(async move {
             let result = match connecting.await {
                 Ok(conn) if conn.is_h2() => open_h2(&pool, &key, conn).await.map(Made::H2),
                 Ok(conn) => open_h1(conn).await.map(Made::H1),
                 Err(error) => Err(connector_failure(error)),
             };
+            // The result is given in this same poll.
+            guard.disarm();
             // A connect that finishes after its pool is gone drops its
             // connection.
             if let Some(pool) = Pool::upgrade(&pool) {
@@ -351,6 +355,32 @@ impl Pool {
         }
     }
 
+    /// A guard for a connect to `key` that owes its result to `owed`.
+    fn guard(&self, key: &Key, owed: Owed) -> ConnectGuard {
+        ConnectGuard {
+            pool: Arc::downgrade(&self.shared),
+            key: key.clone(),
+            owed,
+            armed: true,
+        }
+    }
+
+    /// Lets go the hops a connect to `key` owed its result to, when its task
+    /// ended without giving it: their givers are taken out of the origin
+    /// and dropped outside the lock, which ends each hop's wait with
+    /// nothing.
+    fn let_go(&self, key: &Key, owed: Owed) {
+        let gone = {
+            let mut state = self.lock();
+            let origin = state.origins.get_mut(key);
+            match owed {
+                Owed::Starter(id) => (origin.and_then(|origin| origin.take_waiter(id)), None),
+                Owed::Waiters => (None, origin.and_then(|origin| origin.connecting.take())),
+            }
+        };
+        drop(gone);
+    }
+
     /// Takes the waiter `id` out of `key`'s queue, if it is still there.
     fn forget(&self, key: &Key, id: u64) {
         let gone = {
@@ -422,8 +452,9 @@ impl Pool {
                     match taker.await {
                         Some(Ok((conn, take))) => return Ok((conn, take, true)),
                         Some(Err(failure)) => return Err(failure),
-                        // The connect's waiters were dropped unserved.
-                        None => {}
+                        // The connect's task ended before it gave its result
+                        // (see `ConnectGuard`), so the hop connects anew.
+                        None => yield_before_retry().await,
                     }
                 }
             }
@@ -436,11 +467,14 @@ impl Pool {
     fn connect_h2(&self, key: Key, uri: Uri) {
         let connecting = self.shared.connector.connect_to(uri);
         let pool = Arc::downgrade(&self.shared);
+        let guard = self.guard(&key, Owed::Waiters);
         tokio::spawn(async move {
             let result = match connecting.await {
                 Ok(conn) => open_h2(&pool, &key, conn).await,
                 Err(error) => Err(connector_failure(error)),
             };
+            // The result is given in this same poll.
+            guard.disarm();
             // A connect that finishes after its pool is gone drops its
             // connection.
             if let Some(pool) = Pool::upgrade(&pool) {
@@ -608,6 +642,54 @@ impl Origin {
     }
 }
 
+/// Whom a connect in progress owes its result.
+#[derive(Clone, Copy)]
+enum Owed {
+    /// The hop that started it, the waiter with this ID, under `http1` and
+    /// `auto`.
+    Starter(u64),
+    /// Every hop waiting on the origin's connect in progress, under `http2`.
+    Waiters,
+}
+
+/// A connect's hold on the hops it owes its result. Its task disarms it in
+/// the poll that gives the result. A task that ends first, dropped with its
+/// runtime or by a panic, drops it armed, which lets those hops go (see
+/// [`Pool::let_go`]). Each then connects anew, instead of waiting until its
+/// deadline on a connect that never ends, and under `http2` no later hop to
+/// the origin waits on it either.
+struct ConnectGuard {
+    pool: Weak<Shared>,
+    key: Key,
+    owed: Owed,
+    armed: bool,
+}
+
+impl ConnectGuard {
+    /// The connect gives its result now, so its hops aren't let go.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ConnectGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && let Some(pool) = Pool::upgrade(&self.pool)
+        {
+            pool.let_go(&self.key, self.owed);
+        }
+    }
+}
+
+/// Yields once before a hop whose connect was let go connects anew. A
+/// runtime that is shutting down drops each new task at once, and with it
+/// the connect's guard, so without the yield the hop would retry within one
+/// poll, without end.
+async fn yield_before_retry() {
+    tokio::task::yield_now().await;
+}
+
 /// Runs hyper's HTTP/1.1 handshake on `conn`. A failure is in `connect`.
 async fn open_h1(conn: Conn) -> Result<H1Conn, Failure> {
     let info = conn.info();
@@ -671,6 +753,106 @@ impl Drop for Wait<'_> {
         self.pool.forget(self.key, self.id);
         if let Some(conn) = given.and_then(Offer::h1) {
             self.pool.put(self.key.clone(), conn);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use http::Request;
+    use rustls::RootCertStore;
+    use tokio::runtime::{Builder, Runtime};
+    use vush_core::plan::HttpVersion;
+    use vush_core::protocol::{Failure, FailureKind, FailureStage};
+
+    use crate::client::{Hop, new_pool};
+    use crate::connector::{Connector, Resolver};
+    use crate::stage::StageMarker;
+    use crate::tls::{Verification, client_config};
+
+    fn runtime() -> Runtime {
+        Builder::new_multi_thread().enable_all().build().unwrap()
+    }
+
+    /// A connector for `version` whose first lookup never ends and whose
+    /// later ones fail at once, with the count of lookups. Its limit is far
+    /// off, so the first connect never ends by itself.
+    fn flaky(version: HttpVersion) -> (Connector, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let resolver: Resolver = Arc::new(move |_, _| {
+            let first = counted.fetch_add(1, Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if first {
+                    std::future::pending().await
+                } else {
+                    Err(std::io::Error::other("no such host"))
+                }
+            })
+        });
+        let tls = client_config(Verification::Roots(RootCertStore::empty()), version);
+        let connector = Connector::with_resolver(tls, version, Duration::from_secs(30), resolver);
+        (connector, calls)
+    }
+
+    /// A hop starts its connect on a runtime that then shuts down, which
+    /// drops the connect's task before it settles. The hop doesn't wait on
+    /// it until its deadline: it starts one connect anew, whose lookup fails
+    /// at once. Under `http2`, this frees the origin's connect in progress,
+    /// which every later hop would otherwise have waited on.
+    #[test]
+    fn a_hop_whose_connect_was_dropped_connects_again() {
+        for version in [HttpVersion::Http2, HttpVersion::Auto] {
+            let (connector, lookups) = flaky(version);
+            let pool = new_pool(connector, version);
+            let marker = Arc::new(StageMarker::new());
+            let sent = Arc::default();
+            let mut handed = None;
+            let request = Request::get("http://flaky.vush.test/")
+                .body(Bytes::new())
+                .unwrap();
+            let hop = Hop {
+                marker: &marker,
+                sent: &sent,
+                handed: &mut handed,
+            };
+            let mut hop = Box::pin(pool.send(request, hop));
+
+            let doomed = runtime();
+            doomed.block_on(async {
+                let polled = std::future::poll_fn(|cx| Poll::Ready(hop.as_mut().poll(cx))).await;
+                assert!(polled.is_pending(), "{version:?}");
+                // The connect's task runs until its lookup, which never ends.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while lookups.load(Ordering::SeqCst) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the connect looked the host up");
+            });
+            drop(doomed);
+
+            let outcome = runtime()
+                .block_on(async { tokio::time::timeout(Duration::from_secs(5), hop).await })
+                .unwrap_or_else(|_| panic!("{version:?}: the hop waited on the dropped connect"));
+            assert_eq!(
+                outcome.err(),
+                Some(Failure {
+                    kind: FailureKind::Dns,
+                    stage: FailureStage::Connect,
+                    message: "the host name didn't resolve",
+                }),
+                "{version:?}"
+            );
+            assert_eq!(lookups.load(Ordering::SeqCst), 2, "{version:?}");
         }
     }
 }
