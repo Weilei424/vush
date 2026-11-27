@@ -492,7 +492,7 @@ fn tls_acceptor(leaf: Leaf, alpn: &[&[u8]]) -> TlsAcceptor {
 }
 
 /// Like [`spawn_tls`], and adds each accepted connection to `accepted`.
-async fn spawn_counted_tls<H, F>(
+pub async fn spawn_counted_tls<H, F>(
     handler: H,
     alpn: &[&[u8]],
     max_handshakes: Option<usize>,
