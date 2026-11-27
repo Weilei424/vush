@@ -558,10 +558,9 @@ async fn a_dropped_hop_takes_the_setup_of_the_connection_it_was_moved_to() {
     response(&warm);
     assert!(warm.timing.setup.is_some());
 
-    // `holding` takes the connection's one stream. `pending` waits in h2 for
-    // it, which stops the connection taking more, so `moved` waits in
-    // hyper's queue. Cutting the connection hands `moved` back, and
-    // hyper-util sends it on a new connection.
+    // `holding` takes the connection's one stream, so `pending` and `moved`
+    // wait at its gate. Cutting the connection moves `moved`, the one still
+    // polled, to a new connection.
     let (mut one, mut two, mut three) = (
         executor.new_session(),
         executor.new_session(),
@@ -600,8 +599,8 @@ async fn a_moved_hop_that_times_out_while_connecting_again_is_in_connect() {
     let request = get(format!("https://{}/", mover.addr));
     let executor = trusting(&ca, HttpVersion::Http2);
 
-    // As in the test above: warm up, hold the one stream, queue `pending` in
-    // h2 and `moved` in hyper's queue, then cut the connection.
+    // As in the test above: warm up, hold the one stream, queue `pending`
+    // and `moved` at the gate, then cut the connection.
     let warm = send(&executor, &request).await;
     response(&warm);
     let (mut one, mut two, mut three) = (
@@ -621,8 +620,8 @@ async fn a_moved_hop_that_times_out_while_connecting_again_is_in_connect() {
     assert!(matches!(poll_once(&mut moved).await, Poll::Pending));
     mover.cut();
 
-    // hyper-util sends `moved` on a new connection, whose handshake never
-    // ends, so it runs out of time while connecting again.
+    // `moved` goes to a new connection, whose handshake never ends, so it
+    // runs out of time while connecting again.
     let hop = moved.await;
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
     assert_eq!(hop.connection, None);
@@ -632,7 +631,7 @@ async fn a_moved_hop_that_times_out_while_connecting_again_is_in_connect() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_hop_waiting_for_a_free_stream_is_in_connect() {
+async fn hops_waiting_for_a_free_stream_are_in_connect() {
     let mut mover = spawn_h2_mover().await;
     let request = get(format!("http://{}/", mover.addr));
     let executor = executor(HttpVersion::Http2);
@@ -651,8 +650,8 @@ async fn a_hop_waiting_for_a_free_stream_is_in_connect() {
         () = mover.held() => {}
     }
 
-    // `given` waits in h2 for the stream, so hyper has given its request to
-    // the connection, while `queued` waits in hyper's channel.
+    // Both wait at the connection's gate, so neither request was handed to
+    // h2.
     let timeout = Duration::from_millis(500);
     let mut given = Box::pin(executor.send(&mut two, &request, timeout));
     assert!(matches!(poll_once(&mut given).await, Poll::Pending));
@@ -660,17 +659,11 @@ async fn a_hop_waiting_for_a_free_stream_is_in_connect() {
     assert!(matches!(poll_once(&mut queued).await, Poll::Pending));
     let (given, queued) = tokio::join!(given, queued);
 
-    assert_eq!(
-        failure(&given),
-        (FailureKind::Timeout, FailureStage::Headers)
-    );
-    assert_eq!(given.connection, warm.connection);
-    assert_eq!(
-        failure(&queued),
-        (FailureKind::Timeout, FailureStage::Connect)
-    );
-    assert_eq!(queued.connection, None);
-    assert!(queued.timing.setup.is_none());
+    for hop in [&given, &queued] {
+        assert_eq!(failure(hop), (FailureKind::Timeout, FailureStage::Connect));
+        assert_eq!(hop.connection, None);
+        assert!(hop.timing.setup.is_none());
+    }
     drop(holding);
 }
 
@@ -681,8 +674,8 @@ async fn a_hop_handed_back_by_a_goaway_times_out_in_connect() {
     let request = get(format!("https://{}/", mover.addr));
     let executor = trusting(&ca, HttpVersion::Http2);
 
-    // As in the test above: warm up, hold the one stream, queue `pending` in
-    // h2 and `moved` in hyper's queue, then have the server send GOAWAY.
+    // As in the tests above: warm up, hold the one stream, queue `pending`
+    // and `moved` at the gate, then have the server send GOAWAY.
     let warm = send(&executor, &request).await;
     response(&warm);
     let (mut one, mut two, mut three) = (
@@ -702,8 +695,8 @@ async fn a_hop_handed_back_by_a_goaway_times_out_in_connect() {
     assert!(matches!(poll_once(&mut moved).await, Poll::Pending));
     mover.goaway();
 
-    // hyper-util sends `moved` on a new connection, whose handshake never
-    // ends, while the old connection stays open for the held stream.
+    // `moved` goes to a new connection, whose handshake never ends, while
+    // the draining connection stays open for the held stream.
     let hop = moved.await;
     assert_eq!(failure(&hop), (FailureKind::Timeout, FailureStage::Connect));
     assert_eq!(hop.connection, None);
