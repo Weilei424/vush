@@ -31,12 +31,6 @@ pub(crate) const CONNECTION_UNREACHABLE: &str = "the connection was refused or u
 pub(crate) const HANDSHAKE_FAILED: &str = "the TLS handshake failed";
 pub(crate) const NO_HTTP2: &str = "the server didn't agree to HTTP/2";
 pub(crate) const CONNECTION_TOOK_TOO_LONG: &str = "the connection took too long";
-// Under `http2`, a hop that waited for another hop's connect gets this when
-// the pool's log can't tie a connector failure to that connect: it was
-// abandoned or failed in HTTP/2's own handshake, or the log can't single it
-// out (see `ConnectLog::waited_on`). Under `auto` over TLS, a hop released by
-// a connect that ALPN turned into HTTP/2 gets it too.
-pub(crate) const SHARED_CONNECT_FAILED: &str = "the shared connection attempt failed";
 
 // The rest, from `classify`.
 pub(crate) const HOP_TIMED_OUT: &str = "the hop ran out of time";
@@ -73,7 +67,6 @@ pub(crate) const ALL: &[&str] = &[
     HANDSHAKE_FAILED,
     NO_HTTP2,
     CONNECTION_TOOK_TOO_LONG,
-    SHARED_CONNECT_FAILED,
     HOP_TIMED_OUT,
     CONNECTION_CLOSED,
     PROTOCOL_BROKEN,
@@ -99,6 +92,6 @@ mod tests {
             assert!(seen.insert(*text), "duplicate: {text}");
         }
         // Update the count when a text is added to or removed from `ALL`.
-        assert_eq!(ALL.len(), 29);
+        assert_eq!(ALL.len(), 28);
     }
 }
