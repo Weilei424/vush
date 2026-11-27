@@ -313,8 +313,12 @@
   - [x] Fixes from Codex's fourth review (2026-11-26): a write whose stall wait has run past the limit fails even when the socket would take bytes again, and a hop that hyper-util moves to a new connection, and that runs out of time while connecting it, reports `timeout` in `connect` with no connection.
   - [x] Fixes from Codex's fifth review (2026-11-26): a hop is in `headers` once hyper gives its request to a connection, not once hyper-util assigns it one, so a hop that a GOAWAY hands back, or that waits for a free HTTP/2 stream, times out in `connect` with no connection. A failure that comes after the deadline becomes a timeout in its own stage.
   - [x] Fix from Codex's sixth review (2026-11-26): a failure whose request never went out is in `connect`, not `headers`. That covers a new connection that closes before taking the request, and a connection that hands it back unsent.
-  - [ ] Own the HTTP/2 stream limit (Codex's sixth review, 2026-11-26; chosen by the user the same day). Under HTTP/2, h2 holds one request per connection until the server allows another stream, and it sends that request once a stream frees, even after its hop timed out or was dropped. Vush is to hand h2 a request only when a stream is free, so an ended hop's request never goes out. The design waits for the user's approval.
-  - [ ] CI green on all four runners after the user pushes, and Phase 2 marked complete (plan Task 5).
+  - [~] Own the HTTP/2 stream limit (Codex's sixth review, 2026-11-26; chosen by the user the same day). Under HTTP/2, h2 holds one request per connection until the server allows another stream, and it sends that request once a stream frees, even after its hop timed out or was dropped. Vush is to hand h2 a request only when a stream is free, so an ended hop's request never goes out. On 2026-11-27 the user picked Vush's own connection pool for this, so the work moved to P2.7.
+  - [ ] CI green on all four runners after the user pushes (plan Task 5). Phase 2 is marked complete after P2.7.
+- [ ] P2.7 Own the connection pool: HTTP/1.1 on hyper's connection API, HTTP/2 on h2 with a stream gate, so a hop that ends while it waits for a stream never sends its request (approach picked 2026-11-27; design waiting for the user's approval).
+  - Spec: `docs/superpowers/specs/2026-11-27-phase-2-7-own-connection-pool-design.md` (local only). Plan: not written yet.
+  - It changes P2.2's decision "hyper + hyper-util with Vush's own connector". It also makes HTTP/1.1 reuse certain for hops in a row, and gives every hop waiting for an `http2` connect that connect's own failure.
+  - [ ] CI green on all four runners after the user pushes, and Phase 2 marked complete.
 
 ## Phase 3 Execution Checklist — Scenario interpreter
 
