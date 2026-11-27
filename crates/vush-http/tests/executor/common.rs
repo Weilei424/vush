@@ -1632,9 +1632,7 @@ pub async fn spawn_h2_mover_tls(ca: &TestCa) -> Mover {
 }
 
 /// Serves one connection of a mover server: HTTP/2, one stream at a time,
-/// with the shared request numbering. The connection ends early on
-/// `End::Cut`, and shuts down gracefully on `End::GoAway`, which lets its
-/// open streams finish. If the sender is dropped, it keeps serving.
+/// with the shared request numbering, ending as [`serve_h2_ending`] does.
 async fn serve_mover<I>(
     io: I,
     numbered: Arc<AtomicUsize>,
@@ -1643,7 +1641,7 @@ async fn serve_mover<I>(
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let service = service_fn(move |_request: Request<Incoming>| {
+    let handler = boxed(move |_request: Request<Incoming>| {
         let number = numbered.fetch_add(1, Ordering::SeqCst) + 1;
         let held = held.clone();
         async move {
@@ -1651,12 +1649,31 @@ async fn serve_mover<I>(
                 let _ = held.send(());
                 pending::<()>().await;
             }
-            Ok::<_, Infallible>(reply(200, &[], ""))
+            reply(200, &[], "")
         }
+    });
+    serve_h2_ending(io, handler, Some(1), end).await;
+}
+
+/// Serves HTTP/2 with prior knowledge on `io`, advertising at most `limit`
+/// streams, or no limit. The connection ends early on `End::Cut`, and shuts
+/// down gracefully on `End::GoAway`, which lets its open streams finish. If
+/// the sender is dropped, it keeps serving.
+async fn serve_h2_ending<I>(
+    io: I,
+    handler: Handler,
+    limit: Option<u32>,
+    end: Option<oneshot::Receiver<End>>,
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let service = service_fn(move |request| {
+        let reply = handler(request);
+        async move { Ok::<_, Infallible>(reply.await) }
     });
     let mut serving = std::pin::pin!(
         hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-            .max_concurrent_streams(1)
+            .max_concurrent_streams(limit)
             .serve_connection(io, service)
     );
     let Some(end) = end else {
@@ -1672,6 +1689,383 @@ async fn serve_mover<I>(
         },
     }
     let _ = serving.await;
+}
+
+// ---- Stream servers ----
+//
+// A stream server tells a test which requests reached its handler, in what
+// order and how many at once, so a test can show that a hop's request never
+// went out.
+
+/// How many requests are in a handler at once, and the most so far.
+#[derive(Default)]
+struct OpenCount {
+    now: AtomicUsize,
+    most: AtomicUsize,
+}
+
+/// Counts one request as open while it lives.
+struct Open(Arc<OpenCount>);
+
+impl Open {
+    fn enter(count: &Arc<OpenCount>) -> Self {
+        let now = count.now.fetch_add(1, Ordering::SeqCst) + 1;
+        count.most.fetch_max(now, Ordering::SeqCst);
+        Self(count.clone())
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.0.now.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Sends on its channel when dropped.
+struct SendOnDrop(mpsc::UnboundedSender<()>);
+
+impl Drop for SendOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// What a stream server's handler shares with its test.
+struct Streams {
+    arrivals: mpsc::UnboundedSender<String>,
+    received: Mutex<Vec<String>>,
+    released: watch::Receiver<Vec<String>>,
+    open: Arc<OpenCount>,
+    upload_stopped: mpsc::UnboundedSender<()>,
+    upload_reset: mpsc::UnboundedSender<()>,
+}
+
+/// An HTTP/2 server that holds requests until a test releases them. See
+/// [`spawn_h2_streams`].
+pub struct StreamServer {
+    pub addr: SocketAddr,
+    streams: Arc<Streams>,
+    arrivals: mpsc::UnboundedReceiver<String>,
+    released: watch::Sender<Vec<String>>,
+    accepted: Arc<AtomicUsize>,
+    end: Option<oneshot::Sender<End>>,
+    upload_stopped: mpsc::UnboundedReceiver<()>,
+    upload_reset: mpsc::UnboundedReceiver<()>,
+}
+
+impl StreamServer {
+    /// Waits for the next request to reach the handler, and gives its path.
+    pub async fn arrival(&mut self) -> String {
+        self.arrivals.recv().await.expect("the server ended")
+    }
+
+    /// Answers the held request for `path`, now or once it arrives.
+    pub fn release(&self, path: &str) {
+        self.released
+            .send_modify(|released| released.push(path.to_owned()));
+    }
+
+    /// The path of every request that reached the handler, in arrival order.
+    pub fn received(&self) -> Vec<String> {
+        self.streams.received.lock().unwrap().clone()
+    }
+
+    /// The most requests the handler held at once.
+    pub fn most_open(&self) -> usize {
+        self.streams.open.most.load(Ordering::SeqCst)
+    }
+
+    /// The TCP connections the server has accepted so far.
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Closes the first connection at once.
+    pub fn cut(&mut self) {
+        let end = self.end.take().expect("the connection was ended already");
+        end.send(End::Cut).expect("the server ended");
+    }
+
+    /// Sends GOAWAY on the first connection, which goes on serving its open
+    /// streams.
+    pub fn goaway(&mut self) {
+        let end = self.end.take().expect("the connection was ended already");
+        end.send(End::GoAway).expect("the server ended");
+    }
+
+    /// Waits until a `/hold-upload` handler has read 1 MiB of its body and
+    /// stopped reading.
+    pub async fn upload_stopped(&mut self) {
+        self.upload_stopped.recv().await.expect("the server ended");
+    }
+
+    /// Waits until a `/hold-upload` handler was dropped, which hyper's server
+    /// does when the client resets its stream.
+    pub async fn upload_reset(&mut self) {
+        self.upload_reset.recv().await.expect("the server ended");
+    }
+}
+
+/// Serves HTTP/2, over TLS offering only `h2` with a leaf from `ca`, or with
+/// prior knowledge in plaintext when there is no `ca`. Each connection
+/// advertises at most `limit` streams, or no limit with `None`. `cut` and
+/// `goaway` end the first connection. The handler records each request's
+/// path as it arrives, then:
+/// - `/hold-upload` reads 1 MiB of the request body, signals
+///   `upload_stopped`, reads no more, and is never answered;
+/// - `/early` answers `200` with the body `early`, without reading the
+///   request body;
+/// - any other path that starts with `/hold` is held until `release`;
+/// - every other path gets `200` with an empty body.
+pub async fn spawn_h2_streams(limit: Option<u32>, ca: Option<&TestCa>) -> StreamServer {
+    let acceptor = ca.map(|ca| tls_acceptor(ca.leaf_for_ip(LOCALHOST), &[b"h2"]));
+    let listener = bind().await;
+    let addr = listener.local_addr().unwrap();
+    let (arrivals_tx, arrivals) = mpsc::unbounded_channel();
+    let (released, released_rx) = watch::channel(Vec::new());
+    let (stopped_tx, upload_stopped) = mpsc::unbounded_channel();
+    let (reset_tx, upload_reset) = mpsc::unbounded_channel();
+    let (end_tx, end_rx) = oneshot::channel::<End>();
+    let streams = Arc::new(Streams {
+        arrivals: arrivals_tx,
+        received: Mutex::new(Vec::new()),
+        released: released_rx,
+        open: Arc::default(),
+        upload_stopped: stopped_tx,
+        upload_reset: reset_tx,
+    });
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let handler = streams_handler(streams.clone());
+    let count = accepted.clone();
+    tokio::spawn(async move {
+        let mut end_rx = Some(end_rx);
+        while let Ok((tcp, _)) = listener.accept().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            let (acceptor, handler, end) = (acceptor.clone(), handler.clone(), end_rx.take());
+            tokio::spawn(async move {
+                match acceptor {
+                    None => serve_h2_ending(TokioIo::new(tcp), handler, limit, end).await,
+                    Some(acceptor) => {
+                        if let Ok(tls) = acceptor.accept(tcp).await {
+                            serve_h2_ending(TokioIo::new(tls), handler, limit, end).await;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    StreamServer {
+        addr,
+        streams,
+        arrivals,
+        released,
+        accepted,
+        end: Some(end_tx),
+        upload_stopped,
+        upload_reset,
+    }
+}
+
+/// The handler of [`spawn_h2_streams`].
+fn streams_handler(streams: Arc<Streams>) -> Handler {
+    boxed(move |request: Request<Incoming>| {
+        // Counted before it is announced, so a test that saw it arrive sees
+        // it open.
+        let open = Open::enter(&streams.open);
+        let path = request.uri().path().to_owned();
+        streams.received.lock().unwrap().push(path.clone());
+        let _ = streams.arrivals.send(path.clone());
+        let streams = streams.clone();
+        async move {
+            let _open = open;
+            match path.as_str() {
+                "/hold-upload" => hold_upload(request, &streams).await,
+                "/early" => reply(200, &[], "early"),
+                held if held.starts_with("/hold") => {
+                    let mut released = streams.released.clone();
+                    let _ = released
+                        .wait_for(|released| released.iter().any(|path| path == held))
+                        .await;
+                    reply(200, &[], "")
+                }
+                _ => reply(200, &[], ""),
+            }
+        }
+    })
+}
+
+/// Reads 1 MiB of `request`'s body, signals `upload_stopped`, and then
+/// reads no more and never answers. It signals `upload_reset` when dropped.
+async fn hold_upload(request: Request<Incoming>, streams: &Streams) -> Reply {
+    let _reset = SendOnDrop(streams.upload_reset.clone());
+    let mut body = request.into_body();
+    let mut read = 0;
+    while read < MIB {
+        match body.frame().await {
+            Some(Ok(frame)) => read += frame.data_ref().map_or(0, |data| data.len() as u64),
+            _ => break,
+        }
+    }
+    let _ = streams.upload_stopped.send(());
+    pending().await
+}
+
+// ---- Raw HTTP/2 servers ----
+
+/// What a raw HTTP/2 server does with each connection. See
+/// [`spawn_raw_h2`].
+#[derive(Clone, Copy, Debug)]
+pub enum RawScript {
+    /// Reads the client's preface, then sends `SETTINGS` for one stream. It
+    /// acknowledges the client's `SETTINGS`, holds each request, and answers
+    /// both `:status 200` once it has two. [`RawH2::raise`] sends `SETTINGS`
+    /// for two streams.
+    RaiseToTwo,
+    /// Sends `SETTINGS` and a `GOAWAY` for last stream 0 at once, before
+    /// reading anything, and then holds the connection.
+    GoAwayAtOnce,
+}
+
+/// A server that speaks HTTP/2 frame by frame, in plaintext with prior
+/// knowledge, so a test chooses exactly when its `SETTINGS` arrive.
+pub struct RawH2 {
+    pub addr: SocketAddr,
+    opened: mpsc::UnboundedReceiver<u32>,
+    raise: watch::Sender<bool>,
+    accepted: Arc<AtomicUsize>,
+}
+
+impl RawH2 {
+    /// Waits for the next request `HEADERS`, and gives its stream ID.
+    pub async fn stream_opened(&mut self) -> u32 {
+        self.opened.recv().await.expect("the server ended")
+    }
+
+    /// Sends `SETTINGS` for two streams on each `RaiseToTwo` connection.
+    pub fn raise(&self) {
+        self.raise.send_replace(true);
+    }
+
+    /// The TCP connections the server has accepted so far.
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+/// Runs `script` on every connection it accepts.
+pub async fn spawn_raw_h2(script: RawScript) -> RawH2 {
+    let listener = bind().await;
+    let addr = listener.local_addr().unwrap();
+    let (opened_tx, opened) = mpsc::unbounded_channel();
+    let (raise, raise_rx) = watch::channel(false);
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = accepted.clone();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            match script {
+                RawScript::RaiseToTwo => {
+                    tokio::spawn(raise_to_two(tcp, opened_tx.clone(), raise_rx.clone()));
+                }
+                RawScript::GoAwayAtOnce => {
+                    tokio::spawn(goaway_at_once(tcp));
+                }
+            }
+        }
+    });
+    RawH2 {
+        addr,
+        opened,
+        raise,
+        accepted,
+    }
+}
+
+const SETTINGS: u8 = 0x4;
+const HEADERS: u8 = 0x1;
+const ACK: u8 = 0x1;
+
+/// `SETTINGS` with `MAX_CONCURRENT_STREAMS` (0x3) set to `streams`.
+fn max_streams(streams: u8) -> [u8; 15] {
+    [0, 0, 6, SETTINGS, 0, 0, 0, 0, 0, 0, 0x3, 0, 0, 0, streams]
+}
+
+/// The `RaiseToTwo` script on one connection.
+async fn raise_to_two(
+    stream: TcpStream,
+    opened: mpsc::UnboundedSender<u32>,
+    mut raise: watch::Receiver<bool>,
+) {
+    let stream = Arc::new(stream);
+    if read_exact(&stream, 24).await.len() < 24 {
+        return;
+    }
+    write_all(&stream, &max_streams(1)).await;
+    // Frames are read on a task of their own, so waiting for `raise` never
+    // cuts a frame in half.
+    let (frames_tx, mut frames) = mpsc::unbounded_channel();
+    let reader = stream.clone();
+    tokio::spawn(async move {
+        loop {
+            let header = read_exact(&reader, 9).await;
+            if header.len() < 9 {
+                return;
+            }
+            let len = u32::from_be_bytes([0, header[0], header[1], header[2]]);
+            read_exact(&reader, len as usize).await;
+            let id = u32::from_be_bytes([header[5], header[6], header[7], header[8]]) & !(1 << 31);
+            if frames_tx.send((header[3], header[4], id)).is_err() {
+                return;
+            }
+        }
+    });
+    let mut held = Vec::new();
+    let mut raised = false;
+    loop {
+        tokio::select! {
+            frame = frames.recv() => match frame {
+                None => return,
+                Some((SETTINGS, flags, _)) if flags & ACK == 0 => {
+                    write_all(&stream, &[0, 0, 0, SETTINGS, ACK, 0, 0, 0, 0]).await;
+                }
+                Some((HEADERS, _, id)) => {
+                    held.push(id);
+                    let _ = opened.send(id);
+                    if held.len() == 2 {
+                        for id in &held {
+                            // HEADERS with END_STREAM and END_HEADERS:
+                            // `:status: 200` (HPACK index 8).
+                            let [a, b, c, d] = id.to_be_bytes();
+                            write_all(&stream, &[0, 0, 1, HEADERS, 0x5, a, b, c, d, 0x88]).await;
+                        }
+                    }
+                }
+                Some(_) => {}
+            },
+            up = async { raise.wait_for(|up| *up).await.is_ok() }, if !raised => {
+                raised = true;
+                if up {
+                    write_all(&stream, &max_streams(2)).await;
+                }
+            }
+        }
+    }
+}
+
+/// The `GoAwayAtOnce` script on one connection.
+fn goaway_at_once(stream: TcpStream) -> BoxFuture {
+    Box::pin(async move {
+        #[rustfmt::skip]
+        let frames: &[u8] = &[
+            // SETTINGS, empty
+            0, 0, 0, SETTINGS, 0, 0, 0, 0, 0,
+            // GOAWAY: last stream 0, NO_ERROR
+            0, 0, 8, 0x7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        write_all(&stream, frames).await;
+        let _held = stream;
+        pending::<()>().await;
+    })
 }
 
 // ---- Part uploads ----
