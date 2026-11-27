@@ -14,3 +14,4 @@ mod redirects;
 mod retries;
 mod send;
 mod tls;
+mod wire;
