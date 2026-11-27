@@ -77,12 +77,20 @@ pub(crate) fn is_shared_connect(failure: &Failure) -> bool {
 ///
 /// A connector error keeps its own kind, in `prepare` for `invalid_request`
 /// (nothing was sent) and in `connect` otherwise. A connect error without
-/// one is `connect` in `connect`. A stalled HTTP/1.1 write is `timeout` in
-/// `stage`. Every other failure is in `stage`.
+/// one is `connect` in `connect`. A failure whose request never went out
+/// (see [`unsent`]) is in `connect`. A stalled HTTP/1.1 write is `timeout`
+/// in `stage`. Every other failure is in `stage`.
 pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Failure {
     if let Some(error) = chain(error).find_map(|e| e.downcast_ref::<ConnectError>()) {
         return connector_failure(*error);
     }
+    // hyper-util drops such a request, and its mark with it, so the marker
+    // shows `headers` though no connection carried the request.
+    let stage = if unsent(error) {
+        FailureStage::Connect
+    } else {
+        stage
+    };
     // A stalled HTTP/1.1 write ran past the connector's limit (see
     // `connector`), so the hop ran out of time on the connection.
     if chain(error).any(|e| e.is::<WriteStalled>()) {
@@ -143,6 +151,20 @@ pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Fa
     failure(FailureKind::Other, stage)
 }
 
+/// Whether `error` shows that the hop's request never went out. hyper-util
+/// names the connection on every error after it gives the request one, so
+/// an error that names none failed while getting a connection. hyper
+/// reports `canceled` only for a request a connection never started, which
+/// it hands back unsent.
+fn unsent(error: &(dyn Error + 'static)) -> bool {
+    chain(error).any(|e| {
+        e.downcast_ref::<ClientError>()
+            .is_some_and(|e| e.connect_info().is_none())
+            || e.downcast_ref::<hyper::Error>()
+                .is_some_and(hyper::Error::is_canceled)
+    })
+}
+
 /// Whether `error` is an I/O error for bytes that break the rules, such as
 /// the size line of a chunked body that isn't hex. tokio-rustls reports a
 /// broken TLS record the same way, so an error that wraps a TLS or a
@@ -169,7 +191,8 @@ mod tests {
     use bytes::Bytes;
     use http_body_util::Empty;
     use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
     use crate::connector::Conn;
@@ -268,6 +291,75 @@ mod tests {
                 stage: FailureStage::Connect,
                 message: "the shared connection attempt failed",
             }
+        );
+    }
+
+    /// A connector that hands over a socket whose peer has already closed it.
+    #[derive(Clone)]
+    struct Closed;
+
+    impl tower_service::Service<http::Uri> for Closed {
+        type Response = TokioIo<TcpStream>;
+        type Error = io::Error;
+        type Future = Pin<Box<dyn Future<Output = io::Result<Self::Response>> + Send>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: http::Uri) -> Self::Future {
+            Box::pin(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                let socket = TcpStream::connect(listener.local_addr()?).await?;
+                drop(listener.accept().await?);
+                // The close has reached the socket, so hyper reads it first.
+                socket.peek(&mut [0; 1]).await?;
+                Ok(TokioIo::new(socket))
+            })
+        }
+    }
+
+    /// A new HTTP/1.1 connection that closes before it takes the request
+    /// fails while hyper-util waits for it to be ready, so the error names
+    /// no connection. The request never went out, whatever the marker shows
+    /// after hyper-util drops it.
+    #[tokio::test]
+    async fn a_connection_that_closes_before_taking_the_request_is_in_connect() {
+        let client: Client<Closed, Empty<Bytes>> =
+            Client::builder(TokioExecutor::new()).build(Closed);
+        let request = http::Request::get("http://127.0.0.1:1/")
+            .body(Empty::new())
+            .unwrap();
+        let error = client.request(request).await.expect_err("the peer closed");
+        assert!(error.connect_info().is_none());
+        assert_eq!(
+            kind_and_stage(&error, FailureStage::Headers),
+            (FailureKind::ConnectionClosed, FailureStage::Connect)
+        );
+    }
+
+    /// hyper reports `canceled` when a connection hands a request back
+    /// unsent, so the request never went out.
+    #[tokio::test]
+    async fn a_request_handed_back_unsent_is_in_connect() {
+        let (socket, _peer) = tokio::io::duplex(64);
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(TokioIo::new(socket))
+                .await
+                .unwrap();
+        // With its connection gone, the sender hands every request back.
+        drop(connection);
+        let request = http::Request::get("/").body(Empty::new()).unwrap();
+        let handed_back = sender
+            .try_send_request(request)
+            .await
+            .expect_err("the connection is gone");
+        assert!(handed_back.message().is_some());
+        let error = handed_back.into_error();
+        assert!(error.is_canceled());
+        assert_eq!(
+            kind_and_stage(&error, FailureStage::Headers),
+            (FailureKind::ConnectionClosed, FailureStage::Connect)
         );
     }
 
