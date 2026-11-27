@@ -1,16 +1,16 @@
 //! The pool's origins: what each one holds, and how a hop gets a connection
 //! from one.
 //!
-//! An origin holds its idle HTTP/1.1 connections and the hops waiting for
-//! one, and, under `http2`, its HTTP/2 connection and the hops waiting on
-//! its connect in progress. The pool's module docs give the rules. The
-//! pool's lock guards every origin. It is held only to change them, and
-//! connections are closed outside it.
+//! An origin holds its idle HTTP/1.1 connections and the hops waiting for a
+//! connection, at most one HTTP/2 connection that takes new streams, and,
+//! under `http2`, the hops waiting on its connect in progress. The pool's
+//! module docs give the rules. The pool's lock guards every origin. It is
+//! held only to change them, and connections are closed outside it.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -19,13 +19,13 @@ use http::uri::{Authority, Scheme};
 use tokio::runtime::Handle;
 use vush_core::protocol::{Failure, FailureStage};
 
-use super::Pool;
 use super::gate::{Gate, Take};
 use super::h1;
 use super::h2::{self, H2Conn, Link};
 use super::handoff::{Giver, Taker, handoff};
+use super::{Pool, Shared};
 use crate::classify::{classify, connector_failure};
-use crate::connector::ConnInfo;
+use crate::connector::{Conn, ConnInfo};
 use crate::executor::IDLE_TIMEOUT;
 
 /// An origin: a URI's scheme and authority.
@@ -46,12 +46,13 @@ struct Origin {
     /// Idle connections, in the order they were returned: the last was
     /// returned last, and the first has been idle longest.
     idle: Vec<Idle>,
-    /// Hops waiting for a connection, the longest-waiting first.
+    /// Hops waiting for a connection under `http1` or `auto`, each on a
+    /// connect of its own, the longest-waiting first.
     waiters: VecDeque<Waiter>,
     /// The HTTP/2 connection that takes new streams.
     h2: Option<Arc<H2Conn>>,
-    /// While an HTTP/2 connect is in progress, the hops waiting on it, in the
-    /// order they asked.
+    /// While an `http2` connect is in progress, the hops waiting on it, in
+    /// the order they asked.
     connecting: Option<Vec<Giver<Connected>>>,
 }
 
@@ -71,35 +72,66 @@ pub(super) struct H1Conn {
     pub(super) info: Arc<ConnInfo>,
 }
 
+/// A connection a hop under `http1` or `auto` can send on.
+pub(super) enum Lent {
+    /// An HTTP/1.1 connection.
+    H1(H1Conn),
+    /// An HTTP/2 connection, with the hop's place at its gate.
+    H2(Arc<H2Conn>, Take),
+}
+
+impl Lent {
+    /// The HTTP/1.1 connection, if it is one, for the pool to place
+    /// elsewhere. A place at an HTTP/2 gate passes to the next hop when it
+    /// drops.
+    fn h1(self) -> Option<H1Conn> {
+        match self {
+            Self::H1(conn) => Some(conn),
+            Self::H2(..) => None,
+        }
+    }
+}
+
 /// What a waiting hop is given.
 enum Offer {
     /// The result of the connect the hop started, so its connection is fresh
     /// for the hop.
-    Fresh(Result<H1Conn, Failure>),
-    /// A connection from the pool: returned by another hop, or opened by a
-    /// connect whose hop took another.
-    Pooled(H1Conn),
+    Fresh(Result<Lent, Failure>),
+    /// A connection from the pool: an HTTP/1.1 one returned by another hop,
+    /// or opened by a connect whose hop took another, or a place at the gate
+    /// of an HTTP/2 connection another hop's connect made.
+    Pooled(Lent),
 }
 
 impl Offer {
-    /// The connection offered, if any: a failed connect has none.
-    fn connection(self) -> Option<H1Conn> {
+    /// The HTTP/1.1 connection offered, if any, for the pool to place
+    /// elsewhere: a failed connect has none, and a place at an HTTP/2 gate
+    /// passes on by itself.
+    fn h1(self) -> Option<H1Conn> {
         match self {
-            Self::Fresh(result) => result.ok(),
-            Self::Pooled(conn) => Some(conn),
+            Self::Fresh(result) => result.ok().and_then(Lent::h1),
+            Self::Pooled(lent) => lent.h1(),
         }
     }
+}
+
+/// What a connect under `http1` or `auto` made, as ALPN chose.
+enum Made {
+    H1(H1Conn),
+    H2(Arc<H2Conn>),
 }
 
 /// What an HTTP/2 connect gives each hop that waited on it: the connection,
 /// with the hop's place at its gate, or the connect's failure.
 type Connected = Result<(Arc<H2Conn>, Take), Failure>;
 
-/// What a checkout found under the lock.
+/// What a checkout under `http1` or `auto` found under the lock.
 enum Next {
+    /// The origin's HTTP/2 connection.
+    H2(Arc<H2Conn>),
     /// The idle connection returned last.
     Idle(H1Conn),
-    /// No usable idle connection: the hop is queued as the waiter `id`.
+    /// No usable connection: the hop is queued as the waiter `id`.
     Wait(u64, Taker<Offer>),
 }
 
@@ -116,19 +148,24 @@ enum NextH2 {
 }
 
 impl Pool {
-    /// A connection for a hop to `key` under `http1`, and whether it is
-    /// fresh for the hop: from the connect the hop started.
-    pub(super) async fn checkout_h1(
-        &self,
-        key: &Key,
-        uri: &Uri,
-    ) -> Result<(H1Conn, bool), Failure> {
+    /// A connection for a hop to `key` under `http1` or `auto`, and whether
+    /// it is fresh for the hop: from the connect the hop started. The hop
+    /// takes the origin's HTTP/2 connection, or else its idle HTTP/1.1
+    /// connection returned last. With neither, it starts a connect of its
+    /// own, and takes whichever comes first: that connect's connection, an
+    /// HTTP/1.1 one another hop returns, or a place at the gate of an HTTP/2
+    /// one another hop's connect makes.
+    pub(super) async fn checkout(&self, key: &Key, uri: &Uri) -> Result<(Lent, bool), Failure> {
         loop {
             let (id, taker) = match self.take_or_wait(key) {
-                Next::Idle(conn) => return Ok((conn, false)),
+                Next::H2(conn) => {
+                    let take = conn.link.gate.take();
+                    return Ok((Lent::H2(conn, take), false));
+                }
+                Next::Idle(conn) => return Ok((Lent::H1(conn), false)),
                 Next::Wait(id, taker) => (id, taker),
             };
-            self.connect_h1(key.clone(), uri.clone(), id);
+            self.connect(key.clone(), uri.clone(), id);
             let wait = Wait {
                 pool: self,
                 key,
@@ -136,21 +173,23 @@ impl Pool {
                 taker,
             };
             match wait.await {
-                Some(Offer::Fresh(result)) => return result.map(|conn| (conn, true)),
-                Some(Offer::Pooled(conn)) => return Ok((conn, false)),
+                Some(Offer::Fresh(result)) => return result.map(|lent| (lent, true)),
+                Some(Offer::Pooled(lent)) => return Ok((lent, false)),
                 // The pool dropped the waiter without giving it anything.
                 None => {}
             }
         }
     }
 
-    /// Takes the idle connection for `key` returned last, after dropping the
-    /// ones idle for [`IDLE_TIMEOUT`] and any that is closed. With none left,
-    /// it queues the hop as a waiter, in the same lock, so no connection
-    /// returned in between is missed.
+    /// Takes the origin's HTTP/2 connection for `key`, unless it is draining
+    /// or has had no open stream for [`IDLE_TIMEOUT`]. Otherwise it takes the
+    /// idle HTTP/1.1 connection returned last, after dropping the ones idle
+    /// for [`IDLE_TIMEOUT`] and any that is closed. With none left, it queues
+    /// the hop as a waiter, in the same lock, so no connection returned or
+    /// made in between is missed.
     fn take_or_wait(&self, key: &Key) -> Next {
         loop {
-            let (next, expired) = {
+            let (next, expired, stale) = {
                 let mut state = self.lock();
                 let State {
                     origins,
@@ -158,21 +197,27 @@ impl Pool {
                     ..
                 } = &mut *state;
                 let origin = origins.entry(key.clone()).or_default();
-                let expired = origin.expire(Instant::now());
-                let next = match origin.idle.pop() {
-                    Some(idle) => Next::Idle(idle.conn),
-                    None => {
-                        let id = *next_waiter;
-                        *next_waiter += 1;
-                        let (giver, taker) = handoff();
-                        origin.waiters.push_back(Waiter { id, giver });
-                        Next::Wait(id, taker)
-                    }
+                let now = Instant::now();
+                let stale = origin.take_stale_h2(now);
+                let expired = origin.expire(now);
+                let next = if let Some(conn) = &origin.h2 {
+                    Next::H2(conn.clone())
+                } else if let Some(idle) = origin.idle.pop() {
+                    Next::Idle(idle.conn)
+                } else {
+                    let id = *next_waiter;
+                    *next_waiter += 1;
+                    let (giver, taker) = handoff();
+                    origin.waiters.push_back(Waiter { id, giver });
+                    Next::Wait(id, taker)
                 };
-                (next, expired)
+                (next, expired, stale)
             };
-            // Dropped outside the lock, where hyper closes them.
+            // Dropped outside the lock, where hyper and h2 close them.
             drop(expired);
+            if let Some(stale) = stale {
+                close_h2(stale);
+            }
             match next {
                 Next::Idle(conn) if conn.sender.is_closed() => {}
                 next => return next,
@@ -182,19 +227,15 @@ impl Pool {
 
     /// Starts a connect to `uri` for the waiter `starter`, on a task of its
     /// own, so it finishes even when the hop takes another connection or is
-    /// dropped.
-    fn connect_h1(&self, key: Key, uri: Uri, starter: u64) {
+    /// dropped. The connection speaks HTTP/2 when ALPN picked it, which
+    /// never happens under `http1` or in plaintext, and HTTP/1.1 otherwise.
+    fn connect(&self, key: Key, uri: Uri, starter: u64) {
         let connecting = self.shared.connector.connect_to(uri);
         let pool = Arc::downgrade(&self.shared);
         tokio::spawn(async move {
             let result = match connecting.await {
-                Ok(conn) => {
-                    let info = conn.info();
-                    h1::handshake(conn)
-                        .await
-                        .map(|sender| H1Conn { sender, info })
-                        .map_err(|error| classify(&error, FailureStage::Connect))
-                }
+                Ok(conn) if conn.is_h2() => open_h2(&pool, &key, conn).await.map(Made::H2),
+                Ok(conn) => open_h1(conn).await.map(Made::H1),
                 Err(error) => Err(connector_failure(error)),
             };
             // A connect that finishes after its pool is gone drops its
@@ -206,9 +247,14 @@ impl Pool {
     }
 
     /// Gives a finished connect's result to the hop that started it, if it
-    /// still waits. Otherwise the connection joins the pool, and a failure is
-    /// dropped.
-    fn deliver(&self, key: Key, starter: u64, result: Result<H1Conn, Failure>) {
+    /// still waits. Otherwise an HTTP/1.1 connection joins the pool, and a
+    /// failure is dropped. An HTTP/2 connection goes to [`Pool::adopt`].
+    fn deliver(&self, key: Key, starter: u64, result: Result<Made, Failure>) {
+        let result = match result {
+            Ok(Made::H2(conn)) => return self.adopt(key, starter, conn),
+            Ok(Made::H1(conn)) => Ok(Lent::H1(conn)),
+            Err(failure) => Err(failure),
+        };
         let unclaimed = {
             let mut state = self.lock();
             let giver = state
@@ -216,15 +262,92 @@ impl Pool {
                 .get_mut(&key)
                 .and_then(|origin| origin.take_waiter(starter));
             match giver {
-                Some(giver) => giver
-                    .give(Offer::Fresh(result))
-                    .err()
-                    .and_then(Offer::connection),
-                None => result.ok(),
+                Some(giver) => giver.give(Offer::Fresh(result)).err().and_then(Offer::h1),
+                None => result.ok().and_then(Lent::h1),
             }
         };
         if let Some(conn) = unclaimed {
             self.put(key, conn);
+        }
+    }
+
+    /// Takes in an HTTP/2 connection that the connect `starter` started made,
+    /// under `auto`.
+    ///
+    /// - If the origin has no HTTP/2 connection, this one becomes its
+    ///   connection, unless it is draining already, and every hop waiting
+    ///   for the origin gets a place at its gate, in the order the hops
+    ///   asked. It is fresh only for `starter`. Their own connects go on,
+    ///   and the connections they make join the pool.
+    /// - If the origin has one, which another connect made first, this one
+    ///   closes without serving a stream, and `starter`, if it still waits,
+    ///   gets a place at the gate of the origin's.
+    /// - If the origin has none and this one is draining already, it goes
+    ///   to `starter` alone, as fresh, and its gate turns the hop away (see
+    ///   [`after_unsent`](super::after_unsent)).
+    ///
+    /// The first connection the pool stores starts its sweep.
+    fn adopt(&self, key: Key, starter: u64, conn: Arc<H2Conn>) {
+        let runtime = Handle::try_current().ok();
+        let (offers, unused, stale, start) = {
+            let mut state = self.lock();
+            let origin = state.origins.entry(key).or_default();
+            let stale = origin.take_stale_h2(Instant::now());
+            let place = |conn: &Arc<H2Conn>| Lent::H2(conn.clone(), conn.link.gate.take());
+            // Places taken under the lock, so no hop that finds the
+            // connection gets ahead of these.
+            let (offers, unused, stored): (Vec<_>, _, _) = match origin.h2.clone() {
+                Some(first) => {
+                    let offers = origin
+                        .take_waiter(starter)
+                        .map(|giver| (giver, Offer::Pooled(place(&first))))
+                        .into_iter()
+                        .collect();
+                    (offers, Some(conn), false)
+                }
+                None if conn.link.is_draining() => {
+                    let offers = origin
+                        .take_waiter(starter)
+                        .map(|giver| (giver, Offer::Fresh(Ok(place(&conn)))))
+                        .into_iter()
+                        .collect();
+                    (offers, None, false)
+                }
+                None => {
+                    origin.h2 = Some(conn.clone());
+                    let offers = origin
+                        .waiters
+                        .drain(..)
+                        .map(|waiter| {
+                            let lent = place(&conn);
+                            let offer = if waiter.id == starter {
+                                Offer::Fresh(Ok(lent))
+                            } else {
+                                Offer::Pooled(lent)
+                            };
+                            (waiter.giver, offer)
+                        })
+                        .collect();
+                    (offers, None, true)
+                }
+            };
+            (
+                offers,
+                unused,
+                stale,
+                stored && state.claim_sweep(runtime.as_ref()),
+            )
+        };
+        // Closed outside the lock, where h2 closes them once their last
+        // handles are gone.
+        stale.into_iter().chain(unused).for_each(close_h2);
+        // A hop that stopped waiting drops its offer, and its place at the
+        // gate passes to the next.
+        for (giver, offer) in offers {
+            drop(giver.give(offer));
+        }
+        if start && let Some(runtime) = runtime {
+            self.start_sweeping(&runtime);
         }
     }
 
@@ -307,7 +430,7 @@ impl Pool {
         }
     }
 
-    /// Starts `key`'s HTTP/2 connect, on a task of its own, so it finishes,
+    /// Starts `key`'s `http2` connect, on a task of its own, so it finishes,
     /// and serves every hop waiting on it, even when the hop that started it
     /// is dropped.
     fn connect_h2(&self, key: Key, uri: Uri) {
@@ -315,21 +438,7 @@ impl Pool {
         let pool = Arc::downgrade(&self.shared);
         tokio::spawn(async move {
             let result = match connecting.await {
-                Ok(conn) => {
-                    let info = conn.info();
-                    match h2::handshake(conn).await {
-                        Ok((sender, connection)) => {
-                            // With the pool gone, no hop waits at the gate.
-                            let (pool, key) = (pool.clone(), key.clone());
-                            Ok(h2::start(sender, connection, info, move |link, goaway| {
-                                if let Some(pool) = Pool::upgrade(&pool) {
-                                    pool.retire(&key, link, goaway);
-                                }
-                            }))
-                        }
-                        Err(error) => Err(classify(&error, FailureStage::Connect)),
-                    }
-                }
+                Ok(conn) => open_h2(&pool, &key, conn).await,
                 Err(error) => Err(connector_failure(error)),
             };
             // A connect that finishes after its pool is gone drops its
@@ -340,7 +449,7 @@ impl Pool {
         });
     }
 
-    /// Gives a finished HTTP/2 connect's result to every hop that waited on
+    /// Gives a finished `http2` connect's result to every hop that waited on
     /// it. The connection becomes the origin's, unless it is draining
     /// already, and each hop gets its place at the connection's gate, in the
     /// order the hops asked. The first connection the pool stores starts its
@@ -430,10 +539,10 @@ impl State {
     fn place(&mut self, key: Key, mut conn: H1Conn) -> bool {
         let origin = self.origins.entry(key).or_default();
         while let Some(waiter) = origin.waiters.pop_front() {
-            match waiter.giver.give(Offer::Pooled(conn)) {
+            match waiter.giver.give(Offer::Pooled(Lent::H1(conn))) {
                 Ok(()) => return false,
                 // The hop stopped waiting, so the next one gets it.
-                Err(offer) => match offer.connection() {
+                Err(offer) => match offer.h1() {
                     Some(back) => conn = back,
                     None => return false,
                 },
@@ -499,6 +608,31 @@ impl Origin {
     }
 }
 
+/// Runs hyper's HTTP/1.1 handshake on `conn`. A failure is in `connect`.
+async fn open_h1(conn: Conn) -> Result<H1Conn, Failure> {
+    let info = conn.info();
+    h1::handshake(conn)
+        .await
+        .map(|sender| H1Conn { sender, info })
+        .map_err(|error| classify(&error, FailureStage::Connect))
+}
+
+/// Runs h2's handshake on `conn` and starts the connection's task, which
+/// retires it from `key`'s origin in `pool` when it drains or ends. With
+/// the pool gone, no hop waits at its gate. A failure is in `connect`.
+async fn open_h2(pool: &Weak<Shared>, key: &Key, conn: Conn) -> Result<Arc<H2Conn>, Failure> {
+    let info = conn.info();
+    let (sender, connection) = h2::handshake(conn)
+        .await
+        .map_err(|error| classify(&error, FailureStage::Connect))?;
+    let (pool, key) = (pool.clone(), key.clone());
+    Ok(h2::start(sender, connection, info, move |link, goaway| {
+        if let Some(pool) = Pool::upgrade(&pool) {
+            pool.retire(&key, link, goaway);
+        }
+    }))
+}
+
 /// Whether `gate` has had no open stream for [`IDLE_TIMEOUT`] by `at`.
 fn idle_too_long(gate: &Gate, at: Instant) -> bool {
     gate.idle_since()
@@ -535,7 +669,7 @@ impl Drop for Wait<'_> {
     fn drop(&mut self) {
         let given = self.taker.close();
         self.pool.forget(self.key, self.id);
-        if let Some(conn) = given.and_then(Offer::connection) {
+        if let Some(conn) = given.and_then(Offer::h1) {
             self.pool.put(self.key.clone(), conn);
         }
     }
