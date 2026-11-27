@@ -14,5 +14,6 @@ mod pools;
 mod redirects;
 mod retries;
 mod send;
+mod streams;
 mod tls;
 mod wire;
