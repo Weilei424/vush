@@ -1,11 +1,12 @@
-//! Vush's own connector, which hyper-util calls for each new connection.
+//! Vush's own connector, which hyper-util calls for each new connection, and
+//! Vush's own pool calls through [`Connector::connect_to`].
 //!
 //! It resolves the host, connects, and runs the TLS handshake for `https`,
 //! timing each step. Each connection gets a [`ConnInfo`] with a process-wide
 //! ID and its setup times, which hyper-util copies into every response.
 //!
 //! Each connect, from resolving to the end of the handshake, runs under a
-//! limit and fails as a timeout past it. hyper-util finishes a connect in the
+//! limit and fails as a timeout past it. Both pools finish a connect in the
 //! background after its hop took a pooled connection instead, so no hop's
 //! deadline bounds that connect.
 //!
@@ -34,7 +35,7 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -62,6 +63,9 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct ConnInfo {
     pub id: ConnectionId,
     setup: Mutex<Option<ConnectionSetup>>,
+    /// Whether an HTTP/1.1 write-side call is waiting (see
+    /// [`ConnInfo::write_waiting`]).
+    waiting: AtomicBool,
 }
 
 impl ConnInfo {
@@ -71,6 +75,16 @@ impl ConnInfo {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
+    }
+
+    /// Whether the connection's writes are waiting: true from a write-side
+    /// call's first `Pending` until a flush is `Ready`. hyper flushes only
+    /// once it has written all the bytes it holds, so a write that goes
+    /// through in part, with more to come, doesn't end the wait. Only
+    /// HTTP/1.1 connections, which have the stall limit, track it, so it
+    /// stays false under HTTP/2.
+    pub(crate) fn write_waiting(&self) -> bool {
+        self.waiting.load(Ordering::Acquire)
     }
 }
 
@@ -285,7 +299,8 @@ pub(crate) fn host_and_port(uri: &Uri) -> Result<(Host, u16), ConnectError> {
     Ok((host, port))
 }
 
-/// Opens connections for hyper-util's client. Clones share their settings.
+/// Opens connections for hyper-util's client and Vush's own pool. Clones
+/// share their settings.
 #[derive(Clone)]
 pub(crate) struct Connector {
     tls: TlsConnector,
@@ -340,17 +355,18 @@ impl Connector {
         }
     }
 
-    /// The whole connect, resolving, TCP and TLS, under the limit.
-    async fn connect(self, uri: Uri, started: Option<u64>) -> Result<Conn, ConnectError> {
+    /// Opens a connection to `uri`'s origin: the whole connect, resolving,
+    /// TCP and TLS, under the limit. Only the URI's scheme and authority are
+    /// read. The future needs no hop: it can run on a task of its own.
+    pub(crate) fn connect_to(&self, uri: Uri) -> ConnectFuture {
+        Box::pin(self.clone().connect(uri))
+    }
+
+    async fn connect(self, uri: Uri) -> Result<Conn, ConnectError> {
         let limit = self.limit;
-        let connects = self.connects.clone();
-        let result = tokio::time::timeout(limit, self.open(uri.clone()))
+        tokio::time::timeout(limit, self.open(uri))
             .await
-            .unwrap_or(Err(TOO_LONG));
-        if let (Err(error), Some(started)) = (&result, started) {
-            connects.fail(started, *error);
-        }
-        result
+            .unwrap_or(Err(TOO_LONG))
     }
 
     async fn open(self, uri: Uri) -> Result<Conn, ConnectError> {
@@ -403,6 +419,7 @@ impl Connector {
         let info = ConnInfo {
             id: ConnectionId(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
             setup: Mutex::new(Some(ConnectionSetup { dns, connect, tls })),
+            waiting: AtomicBool::new(false),
         };
         Ok(Conn {
             stream,
@@ -444,10 +461,13 @@ async fn connect_in_order(addrs: &[SocketAddr]) -> Result<TcpStream, ConnectErro
     Err(UNREACHABLE)
 }
 
+/// A connect in progress, from [`Connector::connect_to`].
+pub(crate) type ConnectFuture = Pin<Box<dyn Future<Output = Result<Conn, ConnectError>> + Send>>;
+
 impl tower_service::Service<Uri> for Connector {
     type Response = Conn;
     type Error = ConnectError;
-    type Future = Pin<Box<dyn Future<Output = Result<Conn, ConnectError>> + Send>>;
+    type Future = ConnectFuture;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), ConnectError>> {
         Poll::Ready(Ok(()))
@@ -463,7 +483,15 @@ impl tower_service::Service<Uri> for Connector {
         let started = (self.version == HttpVersion::Http2)
             .then(|| self.connects.start(&uri))
             .flatten();
-        Box::pin(self.clone().connect(uri, started))
+        let connecting = self.connect_to(uri);
+        let connects = self.connects.clone();
+        Box::pin(async move {
+            let result = connecting.await;
+            if let (Err(error), Some(started)) = (&result, started) {
+                connects.fail(started, *error);
+            }
+            result
+        })
     }
 }
 
@@ -483,6 +511,11 @@ pub(crate) struct Conn {
 }
 
 impl Conn {
+    /// The connection's info, shared with every hop that uses it.
+    pub(crate) fn info(&self) -> Arc<ConnInfo> {
+        self.info.clone()
+    }
+
     /// Whether the wait in progress has run past the limit. If so, it ends
     /// the wait and marks the connection stalled. The wait counts from the
     /// write's first `Pending`, not from its last poll, so a call that is
@@ -501,6 +534,8 @@ impl Conn {
 
     /// Passes a write-side result through the stall limit. `Ready` ends the
     /// wait. A `Pending` starts it, or checks it, and fails once it is over.
+    /// A `Pending` also sets the info's [`ConnInfo::write_waiting`], which
+    /// only a flush clears.
     fn limited<T>(
         &mut self,
         cx: &mut Context<'_>,
@@ -513,6 +548,7 @@ impl Conn {
             self.stall = None;
             return polled;
         }
+        self.info.waiting.store(true, Ordering::Release);
         let wait = self
             .stall
             .get_or_insert_with(|| Box::pin(tokio::time::sleep(limit)));
@@ -599,7 +635,12 @@ impl Write for Conn {
             Stream::Plain(io) => Pin::new(io).poll_flush(cx),
             Stream::Tls(io) => Pin::new(&mut **io).poll_flush(cx),
         };
-        this.limited(cx, polled)
+        let polled = this.limited(cx, polled);
+        // hyper has written everything it held.
+        if matches!(polled, Poll::Ready(Ok(()))) {
+            this.info.waiting.store(false, Ordering::Release);
+        }
+        polled
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -1422,6 +1463,44 @@ mod tests {
 
         let write = write_chunk(&mut conn).await;
         assert_eq!(write.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_write_shows_in_the_connections_info() {
+        let (addr, go, done) = late_reader().await;
+        // The limit is far off, so the wait never fails here.
+        let mut conn = connect(&mut plain(), &format!("http://{addr}/"))
+            .await
+            .unwrap();
+        let info = conn.info();
+        assert!(!info.write_waiting());
+
+        let chunk = [0; 64 * 1024];
+        loop {
+            let pending = std::future::poll_fn(|cx| {
+                Poll::Ready(Pin::new(&mut conn).poll_write(cx, &chunk).is_pending())
+            })
+            .await;
+            if pending {
+                break;
+            }
+            assert!(!info.write_waiting(), "a write that went through");
+        }
+        assert!(info.write_waiting());
+
+        go.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done)
+            .await
+            .expect("the server drained the socket")
+            .unwrap();
+        // A write that goes through doesn't end the wait: hyper may still
+        // hold bytes, and it flushes only once it has written them all.
+        write_chunk(&mut conn).await.unwrap();
+        assert!(info.write_waiting());
+        std::future::poll_fn(|cx| Pin::new(&mut conn).poll_flush(cx))
+            .await
+            .unwrap();
+        assert!(!info.write_waiting());
     }
 
     #[tokio::test]
