@@ -4,7 +4,11 @@
 //! the moment a hop takes a slot, which it does in the same poll as it hands
 //! h2 its request, until the hop drops the slot, after the stream's last h2
 //! handle. A hop takes a slot only while the count is below the server's
-//! limit, so h2 never has to hold a request until a stream frees.
+//! limit, so h2 never has to hold a request until a stream that ended
+//! normally frees. A stream that ends with a reset, because its hop ended
+//! early or the server answered before the upload was done, stays counted
+//! in h2 until the connection's task writes the reset, so a request handed
+//! over just after waits for that write, never for the server.
 //!
 //! - **Taking.** [`Gate::take`] joins the queue at once, so takes are served
 //!   in the order they were made, whatever the order of their polls. A take
