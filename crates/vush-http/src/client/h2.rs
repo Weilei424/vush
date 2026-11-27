@@ -24,8 +24,12 @@
 //!   is read. A reset with `NO_ERROR` ends it, as hyper ends it: the server
 //!   answered before reading the whole request (RFC 9113 §8.1).
 //!
-//! Each stream's handles drop before its slot, so a freed slot never finds
-//! h2 still counting the stream it held.
+//! Each stream's handles drop before its slot, so the slot of a stream that
+//! ended normally never frees while h2 still counts that stream. h2 counts
+//! a stream that ends with a reset, because its hop ended early or the
+//! server answered before the upload was done, until the connection's task
+//! writes the reset, so the request that takes its slot waits for that
+//! write.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -61,9 +65,9 @@ const MAX_SEND_BUFFER: usize = 1_048_576;
 /// The connection's h2 client, over the connector's stream.
 pub(super) type H2Connection = Connection<TokioIo<Conn>, Bytes>;
 
-/// Runs h2's client handshake on `conn`. It writes the preface and the
-/// client's `SETTINGS` into the connection's buffer, and the connection's
-/// task sends them.
+/// Runs h2's client handshake on `conn`. It writes the preface to the
+/// stream itself, and the client's `SETTINGS` into the connection's buffer,
+/// which the connection's task sends.
 pub(super) async fn handshake(conn: Conn) -> Result<(SendRequest<Bytes>, H2Connection), h2::Error> {
     let mut builder = Builder::new();
     // hyper also sets `max_local_error_reset_streams` to 1024, which is h2's
