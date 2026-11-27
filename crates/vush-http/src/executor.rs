@@ -1,41 +1,33 @@
-//! The executor: hyper-util clients over Vush's own connector. It sends
+//! The executor: Vush's own pool over Vush's own connector. It sends
 //! through its pool, or under `pool: vu` through the session's.
 
 use std::fmt;
-use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use http::header::{COOKIE, SET_COOKIE};
-use http::{Extensions, HeaderValue, Request, Response, Version};
+use http::{HeaderValue, Request, Response, Version};
 use http_body_util::BodyExt;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::{CaptureConnection, Connected, capture_connection};
-use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::RootCertStore;
 use vush_core::plan::{HttpSettings, HttpVersion, ResourceLimits};
 use vush_core::protocol::http::{HttpExecutor, HttpHop, HttpRequest, HttpResponse, WireVersion};
-use vush_core::protocol::{
-    BodySizes, ConnectionId, ConnectionSetup, Failure, FailureKind, FailureStage, HopTiming,
-};
+use vush_core::protocol::{BodySizes, Failure, FailureKind, FailureStage, HopTiming};
 
-use crate::body::CountingBody;
 use crate::capture::Capture;
 use crate::classify::{classify, failure, timeout};
-use crate::client::{self, BoxError, Handed, Hop};
-use crate::connector::{ConnInfo, Connector};
+use crate::client::{BoxError, Handed, Hop};
+pub(crate) use crate::client::{Pool, new_pool};
+use crate::connector::Connector;
 use crate::cookie::{Jar, Target};
 use crate::decode;
 use crate::executors::{SystemRoots, build};
 use crate::pool::ScopeView;
 use crate::prepare::{Prepared, add_accept_encoding, add_cookies, prepare};
-use crate::stage::{StageMarker, Unwritten};
+use crate::stage::StageMarker;
 use crate::text;
 
 /// Why an executor couldn't be built. Each text is fixed: it names a
@@ -139,54 +131,12 @@ pub(crate) const HEAD_BUFFER_BYTES: usize = 417_792;
 /// client advertises it, so a server that honors it sends no more.
 pub(crate) const H2_HEADER_LIST_BYTES: u32 = 16_384;
 
-/// A pool of connections. A clone shares it.
-#[derive(Clone)]
-pub(crate) enum Pool {
-    /// hyper-util's client, for `auto`. Boxed, because it is much larger than
-    /// Vush's own pool.
-    Legacy(Box<LegacyPool>),
-    /// Vush's own pool, for `http1` and `http2`.
-    Own(client::Pool),
-}
-
-/// hyper-util's client. A clone shares it.
-#[derive(Clone)]
-pub(crate) struct LegacyPool {
-    client: Client<Connector, CountingBody>,
-}
-
-/// Builds a pool. Every pool, pooled or per user, is built here, so each
-/// closes its idle connections after [`IDLE_TIMEOUT`]. `http1` and `http2`
-/// pools are Vush's own, and `auto` pools are hyper-util's.
-pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
-    if version != HttpVersion::Auto {
-        return Pool::Own(client::new_pool(connector, version));
-    }
-    let client = Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(IDLE_TIMEOUT)
-        .pool_timer(TokioTimer::new())
-        .http1_max_buf_size(HEAD_BUFFER_BYTES)
-        .http2_max_header_list_size(H2_HEADER_LIST_BYTES)
-        .build(connector);
-    Pool::Legacy(Box::new(LegacyPool { client }))
-}
-
-/// A hop's request, and the pool it goes through.
-enum Sending<'a> {
-    /// Through hyper-util's client, which names the connection it gives the
-    /// request in `capture`.
-    Legacy {
-        pool: &'a LegacyPool,
-        request: Request<CountingBody>,
-        capture: &'a CaptureConnection,
-    },
-    /// Through Vush's own pool, which counts the body bytes it hands hyper or
-    /// h2 in `sent`.
-    Own {
-        pool: &'a client::Pool,
-        request: Request<Bytes>,
-        sent: &'a Arc<AtomicU64>,
-    },
+/// A hop's request, and the pool it goes through, which counts the body
+/// bytes it hands hyper or h2 in `sent`.
+struct Sending<'a> {
+    pool: &'a Pool,
+    request: Request<Bytes>,
+    sent: &'a Arc<AtomicU64>,
 }
 
 /// Where an executor's connections live. A clone of a pooled transport
@@ -194,8 +144,7 @@ enum Sending<'a> {
 #[derive(Clone)]
 pub(crate) enum Transport {
     /// One pool for every session of the executor.
-    /// Boxed, because a pool is much larger than a connector.
-    Pooled(Box<Pool>),
+    Pooled(Pool),
     /// Each session builds its own pool from this connector.
     PerSession {
         connector: Connector,
@@ -208,31 +157,44 @@ pub(crate) enum Transport {
 /// plan's executors, whose pools it may share. [`Executor::new`] builds a
 /// lone one, whose pool is its own.
 ///
-/// `send` must run inside a Tokio runtime, of either kind, because the client
-/// spawns its connection tasks on it. Building needs no runtime.
+/// `send` must run inside a Tokio runtime, of either kind, because the pool
+/// spawns its connects and its connections' tasks on it. Building needs no
+/// runtime.
 ///
 /// How the [`HttpSettings`] are read:
-/// - `version` sets the version mode: `auto` negotiates over TLS, `http1`
-///   speaks only HTTP/1.1, and `http2` speaks only HTTP/2, with prior
-///   knowledge in plaintext. Under `http2`, one hop per origin connects at a
-///   time and the others wait for it. The connect runs on a task of its own,
-///   so it ends even when the hop that started it is dropped, and every hop
-///   that waited on it reports its own result. An origin then has one HTTP/2
-///   connection that takes new streams. A hop gets a stream there only while
-///   the streams Vush has open on it are fewer than the server allows, and
-///   otherwise waits its turn in Vush's queue, in `connect` and naming no
-///   connection, so a hop that runs out of time or is dropped while it waits
-///   never sends its request. A new connection takes one stream until the
-///   server's first `SETTINGS` arrive. A server that lowers its limit later
-///   can still be sent a request handed to h2 just before, after its hop
-///   ended. A `GOAWAY` sends the waiting hops to a new connection, while the
-///   old one finishes its open streams. A connection that dies sends them on
-///   too, except that a hop fails as `connection_closed` in `connect` when
-///   the connection came from the connect it waited on, so a server that
-///   always breaks can't keep it reconnecting. Under `auto` over TLS, a
-///   connect that ALPN turns into HTTP/2 can release hops that were running
-///   their own connects, and they keep `connect` and "the shared connection
-///   attempt failed".
+/// - `version` sets the version mode: `auto` negotiates over TLS and speaks
+///   HTTP/1.1 in plaintext, `http1` speaks only HTTP/1.1, and `http2` speaks
+///   only HTTP/2, with prior knowledge in plaintext. Every connect runs on a
+///   task of its own, so it ends even when the hop that started it is
+///   dropped, and its connection then joins the pool. A hop that waited on a
+///   connect reports that connect's own failure.
+///   - **Getting a connection.** A hop takes its origin's HTTP/2 connection
+///     if it has one, or else the idle HTTP/1.1 connection returned last.
+///     Under `http2`, one hop per origin connects at a time and the others
+///     wait for it. Under `http1` and `auto`, a hop with no connection to
+///     take starts a connect of its own, and takes whichever comes first:
+///     that connect's connection, an HTTP/1.1 one another hop returns, or,
+///     under `auto`, a stream on an HTTP/2 connection another hop's connect
+///     makes. An origin keeps one HTTP/2 connection that takes new streams:
+///     when ALPN makes more than one connect HTTP/2, the first becomes the
+///     origin's, and the others close unused.
+///   - **The stream gate.** A hop gets a stream on an HTTP/2 connection only
+///     while the streams Vush has open on it are fewer than the server
+///     allows, and otherwise waits its turn in Vush's queue, in `connect` and
+///     naming no connection, so a hop that runs out of time or is dropped
+///     while it waits never sends its request. A new connection takes one
+///     stream until the server's first `SETTINGS` arrive. A server that
+///     lowers its limit later can still be sent a request handed to h2 just
+///     before, after its hop ended.
+///   - **A request turned down unsent.** A connection that closes or dies
+///     before it takes the request, or that sent `GOAWAY`, sends the hop to
+///     another connection, while a draining one finishes its open streams.
+///     The hop fails as `connection_closed` in `connect` instead when the
+///     connection was fresh for it, because it came from the connect the
+///     hop started or waited on, so a server that always breaks, or that
+///     answers every new connection with `GOAWAY`, can't keep it
+///     reconnecting. A connection that sent `GOAWAY` after it had opened a
+///     stream sends every hop on, fresh or not.
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
@@ -251,13 +213,13 @@ pub(crate) enum Transport {
 ///   the sessions of an executor use its one pool, which [`Executors`] shares
 ///   with other executors under `shared`. Under `vu`, each session holds its
 ///   own pool, with its own TLS session cache so users never resume each
-///   other's sessions, and its clones share both. Every pool closes a
-///   connection that has been idle for 90 s. A hop takes an idle connection
-///   from its pool if one is there when it starts. If none is, it opens a new
-///   one while it waits, and takes whichever is ready first: the new one, or
-///   one that comes back to the pool. A connection it doesn't take stays in
-///   the pool, so a hop isn't promised the previous hop's HTTP/1.1
-///   connection.
+///   other's sessions, and its clones share both. Every pool closes an
+///   HTTP/1.1 connection idle for 90 s, and an HTTP/2 connection that has
+///   had no open stream for 90 s. A hop whose body was read to the end puts
+///   its HTTP/1.1 connection back before `send` returns: to the hop that has
+///   waited longest for one, or else to the idle list. So hops in a row on
+///   one session share a connection. A connection still writing a request
+///   the server answered early goes back only once that write is done.
 /// - `cookies`, with the limits' `max_cookies`, sets whether each session
 ///   has a cookie jar and its size: none under `cookies: false` or
 ///   `max_cookies: 0`. A session reads every `Set-Cookie` of a response
@@ -388,24 +350,18 @@ impl Executor {
     /// hop never runs out of time.
     async fn exchange(
         &self,
-        mut sending: Sending<'_>,
+        sending: Sending<'_>,
         deadline: Option<Instant>,
         progress: &mut Progress,
         jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
         // `prepare` is done, so the hop is waiting for a connection: its own
-        // connect, a pooled one, or, under `http2`, another hop's connect or a
-        // free stream. hyper-util's request carries a mark that moves the
-        // marker to `headers` once hyper gives it to a connection. Vush's own
-        // pool marks the request it builds itself, or moves the marker when h2
-        // takes the request.
+        // connect, a pooled one, another hop's connect, or a free stream. The
+        // pool moves the marker to `headers` when it hands the request over:
+        // through the request's mark under HTTP/1.1, when hyper writes the
+        // head, and itself under HTTP/2, when h2 takes the request.
         let marker = Arc::new(StageMarker::new());
         marker.set(FailureStage::Connect);
-        if let Sending::Legacy { request, .. } = &mut sending {
-            request
-                .extensions_mut()
-                .insert(Unwritten::new(marker.clone()));
-        }
         let hop = self.drive(sending, &marker, progress, jar);
         let mut hop = std::pin::pin!(hop);
         let outcome = match deadline {
@@ -414,8 +370,8 @@ impl Executor {
                 biased;
                 outcome = &mut hop => outcome,
                 () = tokio::time::sleep_until(deadline.into()) => {
-                    // Read before the hop is dropped: dropping it drops an
-                    // unwritten request, whose mark moves the marker.
+                    // Read before the hop is dropped, so nothing dropped
+                    // with it can move the marker first.
                     return Err(timeout(marker.get()));
                 }
             },
@@ -425,9 +381,10 @@ impl Executor {
     }
 
     /// Sends the request through its pool, waits for its head, and reads the
-    /// response with [`Executor::read_response`]. `jar` is the session's jar,
-    /// if it has one, with the target the head's `Set-Cookie` values are
-    /// stored against.
+    /// response with [`Executor::read_response`]. The pool names, in
+    /// `progress.handed`, the connection it hands the request to. `jar` is
+    /// the session's jar, if it has one, with the target the head's
+    /// `Set-Cookie` values are stored against.
     async fn drive(
         &self,
         sending: Sending<'_>,
@@ -435,59 +392,17 @@ impl Executor {
         progress: &mut Progress,
         jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
-        let (pool, request, capture) = match sending {
-            // Vush's own pool names, in `handed`, the connection that took
-            // the request.
-            Sending::Own {
-                pool,
-                request,
-                sent,
-            } => {
-                let hop = Hop {
-                    marker,
-                    sent,
-                    handed: &mut progress.handed,
-                };
-                let head = pool.send(request, hop).await?;
-                marker.set(FailureStage::Body);
-                return self.read_response(head, progress, jar).await;
-            }
-            Sending::Legacy {
-                pool,
-                request,
-                capture,
-            } => (pool, request, capture),
+        let Sending {
+            pool,
+            request,
+            sent,
+        } = sending;
+        let hop = Hop {
+            marker,
+            sent,
+            handed: &mut progress.handed,
         };
-        let mut response = pool.client.request(request);
-        let first = poll_once(&mut response).await;
-        // hyper-util assigns the hop a connection, new or pooled, only inside
-        // a poll of `response`. It assigns another when a reused connection
-        // closed, or sent GOAWAY, before the request went out, so the hop
-        // takes the setup of the connection it is on after every poll. Its
-        // stage moves to `headers` on its own, when hyper gives its request
-        // to a connection (see `Unwritten`). A connect that loses to a pooled
-        // connection finishes on another task.
-        claim(capture, progress);
-        let head = match first {
-            Poll::Ready(head) => head,
-            Poll::Pending => {
-                std::future::poll_fn(|cx| {
-                    let polled = Pin::new(&mut response).poll(cx);
-                    claim(capture, progress);
-                    polled
-                })
-                .await
-            }
-        };
-        // A failure before the head is in the marker's stage, unless its
-        // cause places it.
-        let head = match head {
-            Ok(head) => head,
-            Err(error) => {
-                progress.error_connection = error.connect_info().and_then(conn_info);
-                return Err(classify(&error, marker.get()));
-            }
-        };
+        let head = pool.send(request, hop).await?;
         marker.set(FailureStage::Body);
         self.read_response(head, progress, jar).await
     }
@@ -605,7 +520,6 @@ impl HttpExecutor for Executor {
         // A timeout too long to add to the start has no deadline.
         let deadline = progress.start.checked_add(timeout_after);
         let sent = Arc::new(AtomicU64::new(0));
-        let mut capture = None;
         let outcome = if session.owner != self.id {
             Err(Failure {
                 kind: FailureKind::InvalidRequest,
@@ -621,22 +535,10 @@ impl HttpExecutor for Executor {
                 Err(failure) => Err(failure),
                 Ok(prepared) => {
                     let (request, target) = wire_request(prepared);
-                    let sending = match self.pool_of(pool.as_ref()) {
-                        Pool::Legacy(pool) => {
-                            let mut request =
-                                request.map(|body| CountingBody::new(body, sent.clone()));
-                            let capture = capture.insert(capture_connection(&mut request));
-                            Sending::Legacy {
-                                pool,
-                                request,
-                                capture,
-                            }
-                        }
-                        Pool::Own(pool) => Sending::Own {
-                            pool,
-                            request,
-                            sent: &sent,
-                        },
+                    let sending = Sending {
+                        pool: self.pool_of(pool.as_ref()),
+                        request,
+                        sent: &sent,
                     };
                     self.exchange(
                         sending,
@@ -649,37 +551,13 @@ impl HttpExecutor for Executor {
             }
         };
 
-        // A failure in `connect` names no connection: none carried the hop's
-        // request. hyper-util's capture may still name one it was queued on
-        // or handed back from.
+        // The pool names the connection it handed the request to, with the
+        // setup the hop took then. A failure in `connect` names none: no
+        // connection carried the hop's request.
         let connecting = matches!(&outcome, Err(failure) if failure.stage == FailureStage::Connect);
-        let (connection, setup) = match &capture {
-            // Only hyper-util's client has a capture. Vush's own pool names
-            // the connection it handed the request to, with the setup the hop
-            // took then.
-            None => match progress.handed.take() {
-                Some(handed) if !connecting => (Some(handed.info.id), handed.setup),
-                _ => (None, None),
-            },
-            Some(capture) => {
-                let info = if connecting {
-                    None
-                } else {
-                    capture
-                        .connection_metadata()
-                        .as_ref()
-                        .and_then(conn_info)
-                        .or(progress.error_connection)
-                };
-                let connection = info.as_ref().map(|info| info.id);
-                // The setup the hop took for the connection it reports.
-                // Otherwise take that connection's setup now, if any is left.
-                let setup = match progress.setup.take() {
-                    Some((id, setup)) if Some(id) == connection => Some(setup),
-                    _ => info.and_then(|info| info.take_setup()),
-                };
-                (connection, setup)
-            }
+        let (connection, setup) = match progress.handed.take() {
+            Some(handed) if !connecting => (Some(handed.info.id), handed.setup),
+            _ => (None, None),
         };
         let received = progress.capture.as_ref().map_or(0, Capture::received);
         HttpHop {
@@ -714,17 +592,9 @@ struct Progress {
     /// The body being read, from the moment the head arrives. Its count is
     /// what the hop received, on a failure too.
     capture: Option<Capture>,
-    /// The connection a hyper-util error names, if any.
-    error_connection: Option<Arc<ConnInfo>>,
-    /// The connection Vush's own pool handed the request to, with the setup
-    /// the hop took then. A request the connection handed back clears it.
+    /// The connection the pool handed the request to, with the setup the
+    /// hop took then. A request the connection handed back clears it.
     handed: Option<Handed>,
-    /// The setup the hop took from the connection it is on, with that
-    /// connection's ID. It is taken after each poll that assigns a
-    /// connection, not at the end, so a hop dropped after it got its
-    /// connection, or after hyper-util moved it to another, takes the setup
-    /// with it.
-    setup: Option<(ConnectionId, ConnectionSetup)>,
 }
 
 impl Progress {
@@ -733,24 +603,8 @@ impl Progress {
             start: Instant::now(),
             to_headers: None,
             capture: None,
-            error_connection: None,
             handed: None,
-            setup: None,
         }
-    }
-
-    /// Takes the setup of the connection `capture` names, unless the hop
-    /// already holds that connection's. The setup of a connection the hop
-    /// was moved off is dropped. A pooled connection has none left, and then
-    /// the hop holds none.
-    fn take_setup_from(&mut self, capture: &CaptureConnection) {
-        let Some(info) = capture.connection_metadata().as_ref().and_then(conn_info) else {
-            return;
-        };
-        if self.setup.as_ref().is_some_and(|(id, _)| *id == info.id) {
-            return;
-        }
-        self.setup = info.take_setup().map(|setup| (info.id, setup));
     }
 }
 
@@ -822,26 +676,6 @@ fn settle(
     }
 }
 
-/// Once hyper-util has assigned the hop a connection, the hop holds the setup
-/// of the connection it is on now.
-fn claim(capture: &CaptureConnection, progress: &mut Progress) {
-    if capture.connection_metadata().is_some() {
-        progress.take_setup_from(capture);
-    }
-}
-
-/// Polls `future` once, with the caller's waker.
-async fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
-    std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
-}
-
-/// The info the connector attached to a connection.
-fn conn_info(connected: &Connected) -> Option<Arc<ConnInfo>> {
-    let mut extensions = Extensions::new();
-    connected.get_extras(&mut extensions);
-    extensions.remove::<Arc<ConnInfo>>()
-}
-
 /// hyper's client only reads HTTP/1.0, HTTP/1.1 and HTTP/2 responses.
 fn wire_version(version: Version) -> Option<WireVersion> {
     match version {
@@ -855,9 +689,12 @@ fn wire_version(version: Version) -> Option<WireVersion> {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::future::Future;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::pin::Pin;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
 
     use bytes::Bytes;
     use http::Response;
@@ -899,11 +736,16 @@ mod tests {
         );
         let connector = Connector::with_resolver(tls, HttpVersion::Auto, NAMED_TIMEOUT, resolver);
         Executor::from_parts(
-            Transport::Pooled(Box::new(new_pool(connector, HttpVersion::Auto))),
+            Transport::Pooled(new_pool(connector, HttpVersion::Auto)),
             1_048_576,
             NonZeroU32::new(64),
             false,
         )
+    }
+
+    /// Polls `future` once, with the caller's waker.
+    async fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
     }
 
     /// The values of `name` in `headers`, joined with `, `, or empty.
@@ -1435,7 +1277,7 @@ mod tests {
         );
         let connector = Connector::with_resolver(tls, HttpVersion::Http2, limit, resolver);
         Executor::from_parts(
-            Transport::Pooled(Box::new(new_pool(connector, HttpVersion::Http2))),
+            Transport::Pooled(new_pool(connector, HttpVersion::Http2)),
             1_048_576,
             NonZeroU32::new(64),
             false,
