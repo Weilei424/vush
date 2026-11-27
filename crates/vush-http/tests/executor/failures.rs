@@ -77,7 +77,7 @@ async fn a_lone_executor_bounds_connects_by_its_timeout() {
     );
 }
 
-/// Under `http2`, hyper-util opens one connection per origin at a time. The
+/// Under `http2`, the pool opens one connection per origin at a time. The
 /// second hop starts once the first hop's connect has reached the server, so
 /// it never runs the connector: it waits for that connect, which never
 /// finishes. It runs out of time long before the first hop does, while it is
@@ -101,10 +101,10 @@ async fn a_hop_waiting_for_a_shared_http2_connect_times_out_in_connect() {
     first.abort();
 }
 
-/// When the connect that hops share under `http2` fails, hyper-util cancels
-/// every hop waiting for it. Each of them fails as `tls`, never `other`. The
-/// five waiting hops get the kind through the pool's record, and the hop sent
-/// after the failure through its own connect.
+/// When the connect that hops share under `http2` fails, every hop waiting
+/// for it fails as `tls`, never `other`. The five waiting hops get the
+/// connect's own failure, and the hop sent after the failure that of its own
+/// connect.
 ///
 /// The hops are ordered by hand: the first holds the shared connect, and each
 /// of the others is registered as a waiter before anything runs on, so each
@@ -140,20 +140,16 @@ async fn a_failed_shared_http2_connect_fails_every_waiter_as_tls() {
     assert_eq!(*later.outcome.as_ref().unwrap_err(), tls);
 }
 
-/// A hop that waits on a shared connect that is then abandoned has no failure
-/// to report, so it keeps `connect`, even though an earlier connect failed
-/// as `tls`.
+/// The connect that hops share under `http2` runs on a task of its own, so
+/// dropping the hop that started it leaves it running, and the hop waiting
+/// on it gets its connection.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_abandoned_shared_http2_connect_leaves_its_waiter_with_connect() {
-    let leaf = TestCa::generate().leaf_for_ip(LOCALHOST);
-    // The server answers one handshake, so the second connect's is held.
-    let addr = spawn_tls(echo, &[b"h2"], Some(1), leaf).await;
-    let executor = trusting(&TestCa::generate(), HttpVersion::Http2);
-    let url = format!("https://{addr}/");
-    let first = send(&executor, &get(url.clone())).await;
-    assert_eq!(failure(&first), (FailureKind::Tls, FailureStage::Connect));
+async fn a_dropped_hops_shared_connect_still_serves_its_waiter() {
+    let ca = TestCa::generate();
+    let addr = spawn_tls(echo, &[b"h2"], None, ca.leaf_for_ip(LOCALHOST)).await;
+    let executor = trusting(&ca, HttpVersion::Http2);
+    let request = get(format!("https://{addr}/"));
 
-    let request = get(url);
     let mut connecting = Box::pin(send(&executor, &request));
     assert!(poll_once(&mut connecting).await.is_pending());
     let mut waiting = Box::pin(send(&executor, &request));
@@ -161,15 +157,9 @@ async fn an_abandoned_shared_http2_connect_leaves_its_waiter_with_connect() {
     drop(connecting);
 
     let hop = waiting.await;
-    assert_eq!(hop.connection, None);
-    assert_eq!(
-        *hop.outcome.as_ref().unwrap_err(),
-        Failure {
-            kind: FailureKind::Connect,
-            stage: FailureStage::Connect,
-            message: "the shared connection attempt failed",
-        }
-    );
+    crate::common::response(&hop);
+    assert!(hop.connection.is_some());
+    assert!(hop.timing.setup.is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]
