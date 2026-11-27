@@ -79,6 +79,7 @@
 mod body;
 mod capture;
 mod classify;
+mod client;
 mod connector;
 mod cookie;
 mod decode;
