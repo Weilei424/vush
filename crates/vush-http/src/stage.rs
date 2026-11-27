@@ -1,9 +1,11 @@
 //! Which stage a hop is in, so a timeout can report where it struck.
 //!
 //! `exchange` owns each hop's marker. The marker starts at `connect` once
-//! `prepare` is done, moves to `headers` when hyper gives the hop's request to
-//! a connection (see [`Unwritten`]), and moves to `body` when the head
-//! arrives.
+//! `prepare` is done, and moves to `headers` when the pool hands the hop's
+//! request to a connection: under HTTP/1.1 through the request's mark when
+//! hyper writes the head (see [`Unwritten`]), and under HTTP/2 when the pool
+//! hands h2 the request, which needs no mark. It moves to `body` when the
+//! head arrives.
 //!
 //! A marker only moves forward, in the order `prepare`, `connect`, `headers`,
 //! `body`, so a move that comes late can't take a hop back to an earlier
@@ -38,20 +40,16 @@ impl StageMarker {
     }
 }
 
-/// A mark a hop's request carries in its extensions. hyper drops a request's
-/// extensions when it gives the request to a connection: under HTTP/1.1 once
-/// it has written the head into the connection's buffer, and under HTTP/2
-/// once h2 takes the stream, which h2 may hold until the server allows
-/// another. A request hyper hands back keeps them, and is sent on another
-/// connection: by hyper-util, or by Vush's own pool. When the last copy of
-/// the mark drops, the hop's marker moves to `headers`, unless the mark was
-/// disarmed.
+/// A mark an HTTP/1.1 request carries in its extensions. It serves HTTP/1.1
+/// only: under HTTP/2 the pool moves the marker itself. hyper drops a
+/// request's extensions once it has written the head into the connection's
+/// buffer. When the last copy of the mark drops, the hop's marker moves to
+/// `headers`, unless the mark was disarmed.
 ///
-/// hyper-util also drops a request it can't send, when a connect fails,
-/// inside the hop's poll that then gives the failure. A connect failure is
-/// placed in `connect` by its cause, and `settle` keeps it there. Vush's own
-/// pool disarms the mark before it drops a request that a fresh connection
-/// turned down unsent, so the hop stays in `connect`.
+/// A request hyper hands back unsent keeps its extensions. The pool disarms
+/// its mark before it drops it, so the hop stays in `connect`. The next
+/// HTTP/1.1 connection the hop tries is handed a copy with a mark of its
+/// own.
 #[derive(Clone)]
 pub(crate) struct Unwritten {
     mark: Arc<OnWritten>,
