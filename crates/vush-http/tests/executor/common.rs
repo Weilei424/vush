@@ -623,6 +623,83 @@ pub fn echo(request: Request<Incoming>) -> ReplyFuture {
     })
 }
 
+/// Answers `200` with what arrived, one item per line: the version as
+/// `{:?}` prints it, the method, the URI as the server sees it, each header
+/// as `name: value` in arrival order, then a blank line and the body.
+/// [`Wire::of`] reads it back.
+pub fn wire(request: Request<Incoming>) -> ReplyFuture {
+    Box::pin(async move {
+        let (parts, body) = request.into_parts();
+        let body = body.collect().await.unwrap().to_bytes();
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("{:?}\n", parts.version).as_bytes());
+        out.extend_from_slice(parts.method.as_str().as_bytes());
+        out.push(b'\n');
+        out.extend_from_slice(parts.uri.to_string().as_bytes());
+        out.push(b'\n');
+        for (name, value) in &parts.headers {
+            out.extend_from_slice(name.as_str().as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(value.as_bytes());
+            out.push(b'\n');
+        }
+        out.push(b'\n');
+        out.extend_from_slice(&body);
+        reply(200, &[], out)
+    })
+}
+
+/// What the wire handler saw, with every `127.0.0.1:{port}` in the URI and
+/// the headers written as `127.0.0.1:PORT`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Wire {
+    pub version: String,
+    pub method: String,
+    pub uri: String,
+    /// Each header as `name: value`, in arrival order.
+    pub headers: Vec<String>,
+    pub body: Vec<u8>,
+}
+
+impl Wire {
+    pub fn of(hop: &HttpHop) -> Self {
+        let bytes = &response(hop).body;
+        let blank = bytes
+            .windows(2)
+            .position(|pair| pair == b"\n\n")
+            .expect("a wire report has a blank line after its head");
+        let head = std::str::from_utf8(&bytes[..blank]).expect("the reported head is UTF-8");
+        let mut lines = head.split('\n');
+        let version = lines.next().unwrap().to_owned();
+        let method = lines.next().unwrap().to_owned();
+        let uri = mask_port(lines.next().unwrap());
+        let headers = lines.map(mask_port).collect();
+        Self {
+            version,
+            method,
+            uri,
+            headers,
+            body: bytes[blank + 2..].to_vec(),
+        }
+    }
+}
+
+/// Writes each `127.0.0.1:{digits}` in `text` as `127.0.0.1:PORT`.
+fn mask_port(text: &str) -> String {
+    const HOST: &str = "127.0.0.1:";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(HOST) {
+        let after = &rest[at + HOST.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        out.push_str(&rest[..at + HOST.len()]);
+        out.push_str("PORT");
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Answers each path in `routes` with its status and `Location`, after
 /// reading the request body, and echoes every other path.
 pub fn redirecting(
