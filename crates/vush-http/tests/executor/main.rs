@@ -9,6 +9,7 @@ mod contract;
 mod cookies;
 mod diagnostics;
 mod failures;
+mod http1;
 mod pools;
 mod redirects;
 mod retries;
