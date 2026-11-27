@@ -23,13 +23,9 @@
 //! answer it. The hop fails as `timeout`. HTTP/2 connections have no such
 //! limit, because a dropped stream frees its data.
 //!
-//! Under `http2`, each connect's start, and its failure if it fails, is
-//! logged in its pool's `ConnectLog`, for the hops that waited on it.
-//!
 //! Its errors carry a kind and a fixed message, never a host, a port or a
 //! library's text.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -102,122 +98,6 @@ impl fmt::Display for ConnectError {
 }
 
 impl std::error::Error for ConnectError {}
-
-/// A pool's last [`KEPT_CONNECTS`] connects under `http2`, for the hops that
-/// waited on them. Under `http2`, hyper-util hands those hops only a generic
-/// connect error, so the executor reads the cause here. Other pools' logs
-/// stay empty. Clones share it. It holds a
-/// host, so it has no `Debug`.
-#[derive(Clone, Default)]
-pub(crate) struct ConnectLog {
-    inner: Arc<LogInner>,
-}
-
-/// How many connects a pool's log keeps.
-const KEPT_CONNECTS: usize = 8;
-
-#[derive(Default)]
-struct LogInner {
-    /// Goes up by one at each start and each failure the log takes, under
-    /// `kept`'s lock.
-    events: AtomicU64,
-    /// The last [`KEPT_CONNECTS`] connects, in the order they started.
-    kept: Mutex<VecDeque<Logged>>,
-}
-
-struct Logged {
-    /// The event number of its start.
-    started: u64,
-    scheme: http::uri::Scheme,
-    authority: http::uri::Authority,
-    /// The event number of its failure, and the failure, if it failed.
-    failed: Option<(u64, ConnectError)>,
-}
-
-impl ConnectLog {
-    /// The number of events so far: each start and each failure the log took.
-    pub(crate) fn events(&self) -> u64 {
-        self.inner.events.load(Ordering::SeqCst)
-    }
-
-    /// Logs the start of a connect for `uri` and gives its event number. It
-    /// gives `None`, and logs nothing, for a URI with no scheme or authority.
-    pub(crate) fn start(&self, uri: &Uri) -> Option<u64> {
-        let (Some(scheme), Some(authority)) = (uri.scheme(), uri.authority()) else {
-            return None;
-        };
-        let mut kept = self
-            .inner
-            .kept
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let started = self.inner.events.fetch_add(1, Ordering::SeqCst) + 1;
-        kept.push_back(Logged {
-            started,
-            scheme: scheme.clone(),
-            authority: authority.clone(),
-            failed: None,
-        });
-        // Drop the oldest, so the log never holds more than `KEPT_CONNECTS`.
-        if kept.len() > KEPT_CONNECTS {
-            kept.pop_front();
-        }
-        Some(started)
-    }
-
-    /// Logs that the connect that started at event `started` failed with
-    /// `error`. It does nothing if the log no longer holds that connect.
-    pub(crate) fn fail(&self, started: u64, error: ConnectError) {
-        let mut kept = self
-            .inner
-            .kept
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(logged) = kept.iter_mut().find(|logged| logged.started == started) {
-            let at = self.inner.events.fetch_add(1, Ordering::SeqCst) + 1;
-            logged.failed = Some((at, error));
-        }
-    }
-
-    /// The failure of the connect a hop waited on, if the log can tell.
-    /// `before` and `after` are the event counts the hop read just before and
-    /// just after its first poll of its request, in which hyper-util makes a
-    /// hop a waiter.
-    ///
-    /// It finds the newest connect to `uri`'s origin that started at or
-    /// before `before`, and gives its failure only if that came after
-    /// `after`. Under `http2`, the start is logged after hyper-util takes the
-    /// origin's connecting lock and the failure before it releases it, so a
-    /// connect that started by `before` and failed after `after` held the
-    /// lock through the whole poll. It is the connect the hop waited on.
-    ///
-    /// It never gives another connect's failure. It gives `None` when:
-    /// - the connect was abandoned, or failed in HTTP/2's own handshake, so
-    ///   no failure was logged;
-    /// - the log no longer holds the connect;
-    /// - the connect started or failed during the poll;
-    /// - hyper-util sent the hop back to wait again after the connect its
-    ///   first poll waited on succeeded. A hop that got a connection never
-    ///   asks: the executor keeps `connect` for it.
-    pub(crate) fn waited_on(&self, uri: &Uri, before: u64, after: u64) -> Option<ConnectError> {
-        let kept = self
-            .inner
-            .kept
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        // The log drops its oldest connect first, so if the newest one that
-        // fits was pushed out, so was every older one for the origin.
-        let logged = kept.iter().rev().find(|logged| {
-            logged.started <= before
-                && uri.scheme() == Some(&logged.scheme)
-                && uri.authority() == Some(&logged.authority)
-        })?;
-        match logged.failed {
-            Some((at, error)) if at > after => Some(error),
-            _ => None,
-        }
-    }
-}
 
 const fn error(kind: FailureKind, message: &'static str) -> ConnectError {
     ConnectError { kind, message }
@@ -307,7 +187,6 @@ pub(crate) struct Connector {
     version: HttpVersion,
     limit: Duration,
     resolver: Resolver,
-    connects: ConnectLog,
 }
 
 impl Connector {
@@ -321,7 +200,6 @@ impl Connector {
             version,
             limit,
             resolver: Arc::new(lookup),
-            connects: ConnectLog::default(),
         }
     }
 
@@ -333,13 +211,7 @@ impl Connector {
             version: self.version,
             limit: self.limit,
             resolver: self.resolver.clone(),
-            connects: ConnectLog::default(),
         }
-    }
-
-    /// The log of this connector's connects, shared with its clones.
-    pub(crate) fn connects(&self) -> ConnectLog {
-        self.connects.clone()
     }
 
     #[cfg(test)]
@@ -474,24 +346,7 @@ impl tower_service::Service<Uri> for Connector {
     }
 
     fn call(&mut self, uri: Uri) -> Self::Future {
-        // Only `http2` connects are logged. Under `http2`, hyper-util calls
-        // this right after it takes the origin's connecting lock, so the
-        // start is logged while the lock is held. Under `auto`, a connect
-        // that ALPN turns into HTTP/2 takes that lock only after its TLS
-        // handshake, and the hops it can release ran connects of their own,
-        // so no log could say which failure is theirs.
-        let started = (self.version == HttpVersion::Http2)
-            .then(|| self.connects.start(&uri))
-            .flatten();
-        let connecting = self.connect_to(uri);
-        let connects = self.connects.clone();
-        Box::pin(async move {
-            let result = connecting.await;
-            if let (Err(error), Some(started)) = (&result, started) {
-                connects.fail(started, *error);
-            }
-            result
-        })
+        self.connect_to(uri)
     }
 }
 
@@ -990,185 +845,13 @@ mod tests {
             HttpVersion::Http2,
         );
         let mut connector = Connector::new(tls, HttpVersion::Http2, Duration::from_millis(200));
-        let url = format!("https://{addr}/");
-        let uri: Uri = url.parse().unwrap();
-        let connecting = connector.call(uri.clone());
-        let (before, after) = (connector.connects().events(), connector.connects().events());
+        let connecting = connector.call(uri(&format!("https://{addr}/")));
         let error = tokio::time::timeout(Duration::from_secs(5), connecting)
             .await
             .expect("the limit should end the connect")
             .err()
             .expect("the connect should fail");
         assert_eq!(error, TOO_LONG);
-        assert_eq!(
-            connector.connects().waited_on(&uri, before, after),
-            Some(TOO_LONG)
-        );
-    }
-
-    fn origins() -> (Uri, Uri) {
-        (uri("https://a.test:8443/"), uri("https://b.test:8443/"))
-    }
-
-    #[test]
-    fn a_hop_gets_the_failure_of_the_connect_that_held_its_first_poll() {
-        let (a, b) = origins();
-        let log = ConnectLog::default();
-        assert_eq!(log.waited_on(&a, 0, 0), None);
-        let g = log.start(&a).unwrap();
-        let before = log.events();
-        let after = log.events();
-        log.fail(g, HANDSHAKE);
-        let c = log.start(&a).unwrap();
-        log.fail(c, UNRESOLVED);
-        // The later failure doesn't replace it.
-        assert_eq!(log.waited_on(&a, before, after), Some(HANDSHAKE));
-        assert_eq!(
-            log.waited_on(&uri("https://A.TEST:8443/other?q=1"), before, after),
-            Some(HANDSHAKE)
-        );
-        assert_eq!(log.waited_on(&b, before, after), None);
-        assert_eq!(
-            log.waited_on(&uri("https://a.test:9443/"), before, after),
-            None
-        );
-        assert_eq!(
-            log.waited_on(&uri("http://a.test:8443/"), before, after),
-            None
-        );
-    }
-
-    #[test]
-    fn a_failure_logged_before_the_first_poll_ended_is_never_used() {
-        let (a, _) = origins();
-        // It failed before the poll began.
-        let log = ConnectLog::default();
-        let g = log.start(&a).unwrap();
-        log.fail(g, HANDSHAKE);
-        let before = log.events();
-        let after = log.events();
-        let c = log.start(&a).unwrap();
-        log.fail(c, UNRESOLVED);
-        assert_eq!(log.waited_on(&a, before, after), None);
-        // It failed during the poll.
-        let log = ConnectLog::default();
-        let g = log.start(&a).unwrap();
-        let before = log.events();
-        log.fail(g, HANDSHAKE);
-        let after = log.events();
-        let c = log.start(&a).unwrap();
-        log.fail(c, UNRESOLVED);
-        assert_eq!(log.waited_on(&a, before, after), None);
-    }
-
-    #[test]
-    fn a_connect_that_started_during_the_first_poll_is_never_used() {
-        let (a, _) = origins();
-        let log = ConnectLog::default();
-        let g0 = log.start(&a).unwrap();
-        log.fail(g0, REFUSED);
-        let before = log.events();
-        let g = log.start(&a).unwrap();
-        let after = log.events();
-        log.fail(g, HANDSHAKE);
-        assert_eq!(log.waited_on(&a, before, after), None);
-    }
-
-    #[test]
-    fn an_abandoned_connect_gives_none_even_after_a_later_failure() {
-        let (a, _) = origins();
-        let log = ConnectLog::default();
-        let _abandoned = log.start(&a).unwrap();
-        let before = log.events();
-        let after = log.events();
-        let c = log.start(&a).unwrap();
-        log.fail(c, UNRESOLVED);
-        assert_eq!(log.waited_on(&a, before, after), None);
-    }
-
-    #[test]
-    fn a_connect_the_log_no_longer_holds_gives_none() {
-        let (a, b) = origins();
-        let log = ConnectLog::default();
-        let g = log.start(&a).unwrap();
-        let before = log.events();
-        let after = log.events();
-        log.fail(g, HANDSHAKE);
-        for _ in 0..7 {
-            log.start(&b).unwrap();
-        }
-        assert_eq!(log.waited_on(&a, before, after), Some(HANDSHAKE));
-        log.start(&b).unwrap();
-        assert_eq!(log.waited_on(&a, before, after), None);
-
-        // A failure for a connect the log dropped is not logged.
-        let log = ConnectLog::default();
-        let g = log.start(&a).unwrap();
-        for _ in 0..8 {
-            log.start(&b).unwrap();
-        }
-        let events = log.events();
-        log.fail(g, HANDSHAKE);
-        assert_eq!(log.events(), events);
-
-        // A URI with no origin is never logged.
-        assert_eq!(log.start(&uri("/only/a/path")), None);
-        assert_eq!(log.events(), events);
-    }
-
-    #[tokio::test]
-    async fn only_an_http2_connector_logs_its_connects() {
-        let uri = uri("http://unresolvable.test/");
-        for (version, logs) in [
-            (HttpVersion::Auto, false),
-            (HttpVersion::Http1, false),
-            (HttpVersion::Http2, true),
-        ] {
-            let mut connector = resolving_for(version, failing_resolver());
-            let connecting = connector.call(uri.clone());
-            let (before, after) = (connector.connects().events(), connector.connects().events());
-            assert_eq!(connecting.await.err(), Some(UNRESOLVED));
-            let log = connector.connects();
-            assert_eq!(log.events(), if logs { 2 } else { 0 }, "{version:?}");
-            assert_eq!(
-                log.waited_on(&uri, before, after),
-                logs.then_some(UNRESOLVED),
-                "{version:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn a_connect_is_logged_for_its_pool_only() {
-        let url = "http://unresolvable.test/";
-        let uri: Uri = url.parse().unwrap();
-        let mut connector = resolving_for(HttpVersion::Http2, failing_resolver());
-        let connecting = connector.call(uri.clone());
-        let (before, after) = (connector.connects().events(), connector.connects().events());
-        assert_eq!(connecting.await.err(), Some(UNRESOLVED));
-        let log = connector.connects();
-        assert_eq!(log.waited_on(&uri, before, after), Some(UNRESOLVED));
-        assert_eq!(
-            connector.clone().connects().waited_on(&uri, before, after),
-            Some(UNRESOLVED)
-        );
-        assert_eq!(
-            connector
-                .for_user()
-                .connects()
-                .waited_on(&uri, before, after),
-            None
-        );
-
-        // A successful connect logs only its start.
-        let ok = format!("http://{}/", tcp_server().await);
-        let ok_uri: Uri = ok.parse().unwrap();
-        let mut fresh = resolving_for(HttpVersion::Http2, Arc::new(lookup));
-        let connecting = fresh.call(ok_uri.clone());
-        let (before, after) = (fresh.connects().events(), fresh.connects().events());
-        connecting.await.unwrap();
-        assert_eq!(fresh.connects().events(), 1);
-        assert_eq!(fresh.connects().waited_on(&ok_uri, before, after), None);
     }
 
     #[tokio::test]
@@ -1465,7 +1148,7 @@ mod tests {
         assert_eq!(write.unwrap_err().kind(), io::ErrorKind::TimedOut);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_waiting_write_shows_in_the_connections_info() {
         let (addr, go, done) = late_reader().await;
         // The limit is far off, so the wait never fails here.
