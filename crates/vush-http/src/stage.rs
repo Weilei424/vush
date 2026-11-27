@@ -10,7 +10,7 @@
 //! stage.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use vush_core::protocol::FailureStage;
 
@@ -42,33 +42,51 @@ impl StageMarker {
 /// extensions when it gives the request to a connection: under HTTP/1.1 once
 /// it has written the head into the connection's buffer, and under HTTP/2
 /// once h2 takes the stream, which h2 may hold until the server allows
-/// another. A request hyper hands back, for hyper-util to send on another
-/// connection, keeps them. When the last copy of the mark drops, the hop's
-/// marker moves to `headers`.
+/// another. A request hyper hands back keeps them, and is sent on another
+/// connection: by hyper-util, or by Vush's own pool. When the last copy of
+/// the mark drops, the hop's marker moves to `headers`, unless the mark was
+/// disarmed.
 ///
 /// hyper-util also drops a request it can't send, when a connect fails,
 /// inside the hop's poll that then gives the failure. A connect failure is
-/// placed in `connect` by its cause, and `settle` keeps it there.
+/// placed in `connect` by its cause, and `settle` keeps it there. Vush's own
+/// pool disarms the mark before it drops a request that a fresh connection
+/// turned down unsent, so the hop stays in `connect`.
 #[derive(Clone)]
 pub(crate) struct Unwritten {
-    _mark: Arc<OnWritten>,
+    mark: Arc<OnWritten>,
 }
 
-struct OnWritten(Arc<StageMarker>);
+struct OnWritten {
+    marker: Arc<StageMarker>,
+    /// Cleared by [`Unwritten::disarm`].
+    armed: AtomicBool,
+}
 
 impl Unwritten {
     /// A mark that moves `marker` to `headers` when its last copy drops.
     pub(crate) fn new(marker: Arc<StageMarker>) -> Self {
         Self {
-            _mark: Arc::new(OnWritten(marker)),
+            mark: Arc::new(OnWritten {
+                marker,
+                armed: AtomicBool::new(true),
+            }),
         }
+    }
+
+    /// Makes the mark leave its marker alone when its last copy drops, for a
+    /// request that drops without having reached a connection.
+    pub(crate) fn disarm(&self) {
+        self.mark.armed.store(false, Ordering::Relaxed);
     }
 }
 
 /// Moves the marker once the request has left hyper's hands.
 impl Drop for OnWritten {
     fn drop(&mut self) {
-        self.0.set(FailureStage::Headers);
+        if *self.armed.get_mut() {
+            self.marker.set(FailureStage::Headers);
+        }
     }
 }
 
@@ -124,5 +142,17 @@ mod tests {
         marker.set(FailureStage::Body);
         drop(mark);
         assert_eq!(marker.get(), FailureStage::Body);
+    }
+
+    #[test]
+    fn a_disarmed_mark_leaves_its_marker_where_it_is() {
+        let marker = Arc::new(StageMarker::new());
+        marker.set(FailureStage::Connect);
+        let mark = Unwritten::new(marker.clone());
+        let copy = mark.clone();
+        copy.disarm();
+        drop(copy);
+        drop(mark);
+        assert_eq!(marker.get(), FailureStage::Connect);
     }
 }
