@@ -159,7 +159,7 @@ pub(crate) fn build(
                     version: spec.version,
                 }
             } else {
-                Transport::Pooled(Box::new(new_pool(connector, spec.version)))
+                Transport::Pooled(new_pool(connector, spec.version))
             }
         })
         .collect();
