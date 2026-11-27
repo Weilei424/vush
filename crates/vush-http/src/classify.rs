@@ -62,12 +62,6 @@ pub(crate) fn connector_failure(error: ConnectError) -> Failure {
     }
 }
 
-/// Whether `failure` is the one a hop gets when it waited for another hop's
-/// connect and learned nothing more.
-pub(crate) fn is_shared_connect(failure: &Failure) -> bool {
-    failure.kind == FailureKind::Connect && failure.message == text::SHARED_CONNECT_FAILED
-}
-
 /// Classifies an error from hyper-util's client or a response body.
 ///
 /// The whole chain is searched for each cause in turn: a connector error,
@@ -100,15 +94,12 @@ pub(crate) fn classify(error: &(dyn Error + 'static), stage: FailureStage) -> Fa
             message: text::CONNECTION_TOOK_TOO_LONG,
         };
     }
-    // Under `http2`, hyper-util lets one hop per origin connect at a time,
-    // and the others wait for it. When that connect fails or goes away, each
-    // waiter gets a connect error that no connector error caused. Such a
-    // waiting hop's failure comes back as `connect` here, and the executor
-    // replaces it with the failure its pool's log ties to the hop, if any.
-    // Under `auto` over TLS, a connect that ALPN turns into HTTP/2 releases,
-    // the same way, the hops that were running their own connects. The hop
-    // isn't sent again: the waiters would queue behind each new connect, and
-    // a cascade would settle only one of them per round.
+    // Under `auto` over TLS, hyper-util lets a connect that ALPN turns into
+    // HTTP/2 release the hops that were running their own connects. Each of
+    // them gets a connect error that no connector error caused, and its
+    // failure comes back as `connect` here. The hop isn't sent again: the
+    // waiters would queue behind each new connect, and a cascade would
+    // settle only one of them per round.
     if chain(error)
         .filter_map(|e| e.downcast_ref::<ClientError>())
         .any(ClientError::is_connect)
