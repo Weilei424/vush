@@ -63,9 +63,9 @@ impl Sender {
         self.0.ready().await
     }
 
-    /// Sends `request`, shaped by [`shape`], and waits for its head. A
-    /// request refused because the connection is closed, or that hyper hands
-    /// back unsent, comes back as [`Refused::Unsent`].
+    /// Sends `request`, a request already shaped by [`shape`], and waits for
+    /// its head. A request refused because the connection is closed, or that
+    /// hyper hands back unsent, comes back as [`Refused::Unsent`].
     pub(super) async fn send(
         &mut self,
         request: Request<CountingBody>,
