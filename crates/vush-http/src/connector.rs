@@ -1,14 +1,16 @@
-//! Vush's own connector, which hyper-util calls for each new connection, and
-//! Vush's own pool calls through [`Connector::connect_to`].
+//! Vush's own connector, which Vush's own pool calls through
+//! [`Connector::connect_to`] for each new connection.
 //!
 //! It resolves the host, connects, and runs the TLS handshake for `https`,
 //! timing each step. Each connection gets a [`ConnInfo`] with a process-wide
-//! ID and its setup times, which hyper-util copies into every response.
+//! ID and its setup times, which the pool shows every hop it hands the
+//! connection, and [`Conn::is_h2`] tells the pool whether ALPN picked
+//! HTTP/2.
 //!
 //! Each connect, from resolving to the end of the handshake, runs under a
-//! limit and fails as a timeout past it. Both pools finish a connect in the
-//! background after its hop took a pooled connection instead, so no hop's
-//! deadline bounds that connect.
+//! limit and fails as a timeout past it. The pool runs each connect on a
+//! task of its own and finishes it after its hop took another connection or
+//! was dropped, so no hop's deadline bounds that connect.
 //!
 //! An HTTP/1.1 connection fails when a write-side call has waited longer than
 //! the same limit with nothing written, and every later write-side call
@@ -17,8 +19,8 @@
 //! only for the exchange it belongs to, whose hop started before the wait,
 //! so that hop's deadline has passed by then. The exception is a server that
 //! answered early, before reading the whole request, and then stopped
-//! reading. hyper may hand the connection to the next hop while those bytes
-//! still wait, and that hop can fail before its deadline. Its request is
+//! reading. The pool may hand the connection to the next hop while those
+//! bytes still wait, and that hop can fail before its deadline. Its request is
 //! stuck behind bytes the server never read, so no conforming server could
 //! answer it. The hop fails as `timeout`. HTTP/2 connections have no such
 //! limit, because a dropped stream frees its data.
@@ -38,7 +40,6 @@ use std::time::{Duration, Instant};
 
 use http::Uri;
 use hyper::rt::{Read, ReadBufCursor, Write};
-use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
 use rustls::{AlertDescription, ClientConfig};
@@ -179,8 +180,7 @@ pub(crate) fn host_and_port(uri: &Uri) -> Result<(Host, u16), ConnectError> {
     Ok((host, port))
 }
 
-/// Opens connections for hyper-util's client and Vush's own pool. Clones
-/// share their settings.
+/// Opens connections for Vush's own pool. Clones share their settings.
 #[derive(Clone)]
 pub(crate) struct Connector {
     tls: TlsConnector,
@@ -336,20 +336,6 @@ async fn connect_in_order(addrs: &[SocketAddr]) -> Result<TcpStream, ConnectErro
 /// A connect in progress, from [`Connector::connect_to`].
 pub(crate) type ConnectFuture = Pin<Box<dyn Future<Output = Result<Conn, ConnectError>> + Send>>;
 
-impl tower_service::Service<Uri> for Connector {
-    type Response = Conn;
-    type Error = ConnectError;
-    type Future = ConnectFuture;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), ConnectError>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, uri: Uri) -> Self::Future {
-        self.connect_to(uri)
-    }
-}
-
 /// A connection the connector opened. Under HTTP/1.1, a write-side call that
 /// waits too long, with nothing written, fails the connection.
 pub(crate) struct Conn {
@@ -369,6 +355,13 @@ impl Conn {
     /// The connection's info, shared with every hop that uses it.
     pub(crate) fn info(&self) -> Arc<ConnInfo> {
         self.info.clone()
+    }
+
+    /// Whether ALPN picked HTTP/2. A plaintext connection has no ALPN, so it
+    /// is never true there, even under `http2`, which speaks HTTP/2 to it
+    /// with prior knowledge.
+    pub(crate) fn is_h2(&self) -> bool {
+        self.h2
     }
 
     /// Whether the wait in progress has run past the limit. If so, it ends
@@ -438,17 +431,6 @@ enum Stream {
     Plain(TokioIo<TcpStream>),
     // Boxed, because a TLS session is far larger than a socket.
     Tls(Box<TokioIo<TlsStream<TcpStream>>>),
-}
-
-impl Connection for Conn {
-    fn connected(&self) -> Connected {
-        let connected = Connected::new().extra(self.info.clone());
-        if self.h2 {
-            connected.negotiated_h2()
-        } else {
-            connected
-        }
-    }
 }
 
 impl Read for Conn {
@@ -548,7 +530,6 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
-    use tower_service::Service;
 
     use super::*;
     use crate::tls::{Verification, client_config};
@@ -727,25 +708,15 @@ mod tests {
         Arc::new(|_, _| Box::pin(async { Err(io::Error::other("no such host")) }))
     }
 
-    async fn connect(connector: &mut Connector, url: &str) -> Result<Conn, ConnectError> {
-        connector.call(url.parse().unwrap()).await
+    async fn connect(connector: &Connector, url: &str) -> Result<Conn, ConnectError> {
+        connector.connect_to(url.parse().unwrap()).await
     }
 
-    async fn connect_err(connector: &mut Connector, url: &str) -> ConnectError {
+    async fn connect_err(connector: &Connector, url: &str) -> ConnectError {
         connect(connector, url)
             .await
             .err()
             .expect("the connect should fail")
-    }
-
-    /// The connection's info, read the way hyper-util hands it to a response.
-    fn info(conn: &Conn) -> Arc<ConnInfo> {
-        let mut extensions = http::Extensions::new();
-        conn.connected().get_extras(&mut extensions);
-        extensions
-            .get::<Arc<ConnInfo>>()
-            .cloned()
-            .expect("every connection carries its info")
     }
 
     fn uri(text: &str) -> http::Uri {
@@ -755,11 +726,11 @@ mod tests {
     #[tokio::test]
     async fn plain_connections_get_fresh_ids_and_setup_times() {
         let url = format!("http://{}/", tcp_server().await);
-        let mut connector = plain();
-        let first = connect(&mut connector, &url).await.unwrap();
-        let second = connect(&mut connector, &url).await.unwrap();
-        assert!(!first.connected().is_negotiated_h2());
-        let (first, second) = (info(&first), info(&second));
+        let connector = plain();
+        let first = connect(&connector, &url).await.unwrap();
+        let second = connect(&connector, &url).await.unwrap();
+        assert!(!first.is_h2());
+        let (first, second) = (first.info(), second.info());
         assert!(second.id.0 > first.id.0);
         let setup = first.take_setup().expect("a new connection has its setup");
         assert_eq!(setup.dns, None);
@@ -771,8 +742,8 @@ mod tests {
     #[tokio::test]
     async fn ids_are_unique_across_connectors() {
         let url = format!("http://{}/", tcp_server().await);
-        let a = info(&connect(&mut plain(), &url).await.unwrap()).id;
-        let b = info(&connect(&mut plain(), &url).await.unwrap()).id;
+        let a = connect(&plain(), &url).await.unwrap().info().id;
+        let b = connect(&plain(), &url).await.unwrap().info().id;
         assert_ne!(a, b);
     }
 
@@ -780,12 +751,12 @@ mod tests {
     async fn trusted_tls_negotiates_alpn() {
         let (roots, ca) = ca();
         let addr = tls_server(leaf(&ca, &localhost_san()), &[b"h2", b"http/1.1"]).await;
-        let mut connector = connector(roots, HttpVersion::Auto);
-        let conn = connect(&mut connector, &format!("https://{addr}/"))
+        let connector = connector(roots, HttpVersion::Auto);
+        let conn = connect(&connector, &format!("https://{addr}/"))
             .await
             .unwrap();
-        assert!(conn.connected().is_negotiated_h2());
-        let setup = info(&conn).take_setup().unwrap();
+        assert!(conn.is_h2());
+        let setup = conn.info().take_setup().unwrap();
         assert!(setup.tls.is_some());
         assert_eq!(setup.dns, None);
     }
@@ -802,9 +773,9 @@ mod tests {
         for (version, offer, expected) in cases {
             let (roots, ca) = ca();
             let addr = tls_server(leaf(&ca, &localhost_san()), offer).await;
-            let got = connect(&mut connector(roots, version), &format!("https://{addr}/"))
+            let got = connect(&connector(roots, version), &format!("https://{addr}/"))
                 .await
-                .map(|conn| conn.connected().is_negotiated_h2());
+                .map(|conn| conn.is_h2());
             assert_eq!(
                 got, expected,
                 "{version:?} against a server offering {offer:?}"
@@ -819,8 +790,8 @@ mod tests {
         let untrusted = tls_server(self_signed_leaf(&localhost_san()), &[b"http/1.1"]).await;
         let wrong_name = tls_server(leaf(&ca, &other_name), &[b"http/1.1"]).await;
         for addr in [untrusted, wrong_name] {
-            let mut connector = connector(roots.clone(), HttpVersion::Auto);
-            let error = connect_err(&mut connector, &format!("https://{addr}/")).await;
+            let connector = connector(roots.clone(), HttpVersion::Auto);
+            let error = connect_err(&connector, &format!("https://{addr}/")).await;
             assert_eq!(error, HANDSHAKE);
         }
     }
@@ -830,11 +801,11 @@ mod tests {
         let other_name = [SanType::DnsName("other.test".try_into().unwrap())];
         let addr = tls_server(self_signed_leaf(&other_name), &[b"h2", b"http/1.1"]).await;
         let tls = client_config(Verification::Insecure, HttpVersion::Auto);
-        let mut connector = Connector::new(tls, HttpVersion::Auto, LIMIT);
-        let conn = connect(&mut connector, &format!("https://{addr}/"))
+        let connector = Connector::new(tls, HttpVersion::Auto, LIMIT);
+        let conn = connect(&connector, &format!("https://{addr}/"))
             .await
             .unwrap();
-        assert!(conn.connected().is_negotiated_h2());
+        assert!(conn.is_h2());
     }
 
     #[tokio::test]
@@ -844,8 +815,8 @@ mod tests {
             Verification::Roots(RootCertStore::empty()),
             HttpVersion::Http2,
         );
-        let mut connector = Connector::new(tls, HttpVersion::Http2, Duration::from_millis(200));
-        let connecting = connector.call(uri(&format!("https://{addr}/")));
+        let connector = Connector::new(tls, HttpVersion::Http2, Duration::from_millis(200));
+        let connecting = connector.connect_to(uri(&format!("https://{addr}/")));
         let error = tokio::time::timeout(Duration::from_secs(5), connecting)
             .await
             .expect("the limit should end the connect")
@@ -857,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_port_fails_as_connect() {
         let refused = refused_port();
-        let error = connect_err(&mut plain(), &format!("http://{}/", refused.addr)).await;
+        let error = connect_err(&plain(), &format!("http://{}/", refused.addr)).await;
         assert_eq!(error, REFUSED);
     }
 
@@ -865,7 +836,7 @@ mod tests {
     async fn a_failing_resolver_fails_as_dns() {
         let empty: Resolver = Arc::new(|_, _| Box::pin(async { Ok(Vec::new()) }));
         for resolver in [failing_resolver(), empty] {
-            let error = connect_err(&mut resolving(resolver), "http://unresolvable.test/").await;
+            let error = connect_err(&resolving(resolver), "http://unresolvable.test/").await;
             assert_eq!(error, UNRESOLVED);
         }
     }
@@ -881,11 +852,11 @@ mod tests {
             let addrs = addrs.clone();
             Box::pin(async move { Ok(addrs) })
         });
-        let conn = connect(&mut resolving(resolver), "http://api.test/")
+        let conn = connect(&resolving(resolver), "http://api.test/")
             .await
             .unwrap();
         assert_eq!(*asked.lock().unwrap(), [("api.test".to_owned(), 80)]);
-        let setup = info(&conn).take_setup().unwrap();
+        let setup = conn.info().take_setup().unwrap();
         assert!(setup.dns.is_some());
         assert_eq!(setup.tls, None);
     }
@@ -898,9 +869,9 @@ mod tests {
             counter.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(Vec::new()) })
         });
-        let mut connector = resolving(counting);
+        let connector = resolving(counting);
         for url in ["ftp://127.0.0.1:1/", "ftp://unresolvable.test/"] {
-            assert_eq!(connect_err(&mut connector, url).await, UNSUPPORTED);
+            assert_eq!(connect_err(&connector, url).await, UNSUPPORTED);
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
@@ -950,20 +921,16 @@ mod tests {
         let no_h2 = tls_server(leaf(&ca, &localhost_san()), &[b"http/1.1"]).await;
 
         let mut errors = vec![
-            connect_err(&mut plain(), &format!("ftp://{}/", refused.addr)).await,
-            connect_err(
-                &mut resolving(failing_resolver()),
-                "http://unresolvable.test/",
-            )
-            .await,
-            connect_err(&mut plain(), &format!("http://{}/", refused.addr)).await,
+            connect_err(&plain(), &format!("ftp://{}/", refused.addr)).await,
+            connect_err(&resolving(failing_resolver()), "http://unresolvable.test/").await,
+            connect_err(&plain(), &format!("http://{}/", refused.addr)).await,
         ];
         for addr in [untrusted, wrong_name] {
-            let mut connector = connector(roots.clone(), HttpVersion::Auto);
-            errors.push(connect_err(&mut connector, &format!("https://{addr}/")).await);
+            let connector = connector(roots.clone(), HttpVersion::Auto);
+            errors.push(connect_err(&connector, &format!("https://{addr}/")).await);
         }
-        let mut http2 = connector(roots, HttpVersion::Http2);
-        errors.push(connect_err(&mut http2, &format!("https://{no_h2}/")).await);
+        let http2 = connector(roots, HttpVersion::Http2);
+        errors.push(connect_err(&http2, &format!("https://{no_h2}/")).await);
 
         assert_eq!(
             errors,
@@ -1045,9 +1012,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_stalled_past_the_limit_fails() {
         let url = format!("http://{}/", deaf_server().await);
-        let mut conn = connect(&mut stalling(HttpVersion::Http1), &url)
-            .await
-            .unwrap();
+        let mut conn = connect(&stalling(HttpVersion::Http1), &url).await.unwrap();
 
         let error = tokio::time::timeout(Duration::from_secs(5), write_until_error(&mut conn))
             .await
@@ -1114,12 +1079,9 @@ mod tests {
     #[tokio::test]
     async fn a_write_past_the_limit_fails_even_when_the_socket_is_ready() {
         let (addr, go, done) = late_reader().await;
-        let mut conn = connect(
-            &mut stalling(HttpVersion::Http1),
-            &format!("http://{addr}/"),
-        )
-        .await
-        .unwrap();
+        let mut conn = connect(&stalling(HttpVersion::Http1), &format!("http://{addr}/"))
+            .await
+            .unwrap();
 
         // Fill the socket until a write waits, then drop that write. The
         // wait keeps running inside the connection.
@@ -1152,9 +1114,7 @@ mod tests {
     async fn a_waiting_write_shows_in_the_connections_info() {
         let (addr, go, done) = late_reader().await;
         // The limit is far off, so the wait never fails here.
-        let mut conn = connect(&mut plain(), &format!("http://{addr}/"))
-            .await
-            .unwrap();
+        let mut conn = connect(&plain(), &format!("http://{addr}/")).await.unwrap();
         let info = conn.info();
         assert!(!info.write_waiting());
 
@@ -1189,9 +1149,7 @@ mod tests {
     #[tokio::test]
     async fn a_slow_write_that_keeps_moving_doesnt_fail() {
         let url = format!("http://{}/", slow_server().await);
-        let mut conn = connect(&mut stalling(HttpVersion::Http1), &url)
-            .await
-            .unwrap();
+        let mut conn = connect(&stalling(HttpVersion::Http1), &url).await.unwrap();
 
         let start = Instant::now();
         while start.elapsed() < 3 * STALL {
@@ -1204,9 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn an_http2_connection_has_no_stall_limit() {
         let url = format!("http://{}/", deaf_server().await);
-        let mut conn = connect(&mut stalling(HttpVersion::Http2), &url)
-            .await
-            .unwrap();
+        let mut conn = connect(&stalling(HttpVersion::Http2), &url).await.unwrap();
 
         let ended = tokio::time::timeout(3 * STALL, write_until_error(&mut conn)).await;
         assert!(ended.is_err(), "the stalled write was still waiting");
@@ -1217,11 +1173,11 @@ mod tests {
         let (roots, ca) = ca();
         let addr = tls_server(leaf(&ca, &localhost_san()), &[b"h2"]).await;
         let tls = client_config(Verification::Roots(roots), HttpVersion::Auto);
-        let mut connector = Connector::new(tls, HttpVersion::Auto, STALL);
-        let mut conn = connect(&mut connector, &format!("https://{addr}/"))
+        let connector = Connector::new(tls, HttpVersion::Auto, STALL);
+        let mut conn = connect(&connector, &format!("https://{addr}/"))
             .await
             .unwrap();
-        assert!(conn.connected().is_negotiated_h2());
+        assert!(conn.is_h2());
 
         let ended = tokio::time::timeout(3 * STALL, write_until_error(&mut conn)).await;
         assert!(ended.is_err(), "the stalled write was still waiting");
