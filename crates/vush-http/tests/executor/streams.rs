@@ -1,13 +1,16 @@
-//! The HTTP/2 stream gate under `version: http2`. A hop waits in Vush's own
-//! queue, in `connect`, until its connection has a free stream, so a hop that
-//! ends there never sends its request. Hops take streams in the order they
-//! asked, up to the server's limit as it changes. A `GOAWAY` moves the hops
-//! still waiting, and a dead connection moves them or fails them in
-//! `connect`.
+//! The HTTP/2 stream gate under `version: http2`, and under `auto` when ALPN
+//! picks HTTP/2. A hop waits in Vush's own queue, in `connect`, until its
+//! connection has a free stream, so a hop that ends there never sends its
+//! request. Hops take streams in the order they asked, up to the server's
+//! limit as it changes. A `GOAWAY` moves the hops still waiting, and a dead
+//! connection moves them or fails them in `connect`. Under `auto`, an origin
+//! keeps one HTTP/2 connection, however many hops' connects ALPN makes
+//! HTTP/2.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -17,8 +20,9 @@ use vush_core::protocol::{FailureKind, FailureStage};
 use vush_http::Executor;
 
 use crate::common::{
-    MIB, RawScript, StreamServer, TIMEOUT, TestCa, executor, failure, get, method, poll_once,
-    response, send, send_within, spawn_h2_streams, spawn_raw_h2, trusting,
+    LOCALHOST, MIB, RawScript, StreamServer, TIMEOUT, TestCa, echo, executor, failure, get, method,
+    poll_once, response, send, send_within, spawn_counted_tls, spawn_h2_streams, spawn_raw_h2,
+    trusting,
 };
 
 /// A hop on a session of its own, as a future that owns what it needs, so a
@@ -83,6 +87,12 @@ async fn an_expired_hop_never_reaches_the_server_over_http2() {
     an_expired_hop_never_reaches_the_server(HttpVersion::Http2).await;
 }
 
+/// ALPN picks `h2`, so the same holds under `auto`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_hop_never_reaches_the_server_over_auto() {
+    an_expired_hop_never_reaches_the_server(HttpVersion::Auto).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_waiting_hop_never_reaches_the_server() {
     let ca = TestCa::generate();
@@ -107,15 +117,15 @@ async fn a_dropped_waiting_hop_never_reaches_the_server() {
     assert_eq!(server.most_open(), 1);
 }
 
-/// Both hops wait on the connect that makes the connection, which takes one
-/// stream until the server's first `SETTINGS`. The first takes it, and the
-/// second runs out of time in `connect` without sending its request.
-#[tokio::test(flavor = "multi_thread")]
-async fn two_hops_at_once_on_a_new_connection_send_one_request() {
+/// Two hops are polled before any connection exists. The connection both go
+/// on takes one stream until the server's first `SETTINGS`. The first hop
+/// takes it, and the second runs out of time in `connect` without sending
+/// its request.
+async fn two_hops_at_once_send_one_request(version: HttpVersion) {
     let ca = TestCa::generate();
     let mut server = spawn_h2_streams(Some(1), Some(&ca)).await;
     let addr = server.addr;
-    let executor = Arc::new(trusting(&ca, HttpVersion::Http2));
+    let executor = Arc::new(trusting(&ca, version));
 
     let mut a = owned(
         &executor,
@@ -144,6 +154,66 @@ async fn two_hops_at_once_on_a_new_connection_send_one_request() {
     assert_eq!(c.connection, a.connection);
     assert_eq!(server.received(), ["/hold-first", "/control"]);
     assert_eq!(server.most_open(), 1);
+}
+
+/// Under `http2`, both hops wait on the one connect that makes the
+/// connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_hops_at_once_on_a_new_connection_send_one_request() {
+    two_hops_at_once_send_one_request(HttpVersion::Http2).await;
+}
+
+/// Under `auto`, each hop starts a connect of its own. The first that ALPN
+/// makes HTTP/2 becomes the origin's connection, and both hops take their
+/// places at its gate in the order they asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_hops_at_once_on_a_new_auto_connection_send_one_request() {
+    two_hops_at_once_send_one_request(HttpVersion::Auto).await;
+}
+
+/// Under `auto`, two hops polled before any connection exists each start a
+/// connect, and ALPN makes both HTTP/2. The first becomes the origin's
+/// connection, and both hops go on it. The second closes without serving a
+/// stream. The server answers only two handshakes, so a hop sent to a third
+/// connection would never be answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_keeps_one_http2_connection_per_origin() {
+    let ca = TestCa::generate();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let addr = spawn_counted_tls(
+        echo,
+        &[b"h2"],
+        Some(2),
+        ca.leaf_for_ip(LOCALHOST),
+        accepted.clone(),
+    )
+    .await;
+    let executor = Arc::new(trusting(&ca, HttpVersion::Auto));
+
+    let mut a = owned(&executor, get(format!("https://{addr}/a")), TIMEOUT);
+    let mut b = owned(&executor, get(format!("https://{addr}/b")), TIMEOUT);
+    assert!(poll_once(&mut a).await.is_pending());
+    assert!(poll_once(&mut b).await.is_pending());
+    let (a, b) = tokio::join!(a, b);
+    response(&a);
+    response(&b);
+    assert!(a.connection.is_some());
+    assert_eq!(a.connection, b.connection);
+    let setups = [&a, &b]
+        .iter()
+        .filter(|hop| hop.timing.setup.is_some())
+        .count();
+    assert_eq!(setups, 1);
+
+    // The second connect may still be on its way to the server.
+    tokio::time::timeout(TIMEOUT, async {
+        while accepted.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both connects reached the server");
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
 }
 
 /// Five hops queue in order on one connection whose server allows two
