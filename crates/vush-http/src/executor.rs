@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime};
 
+use bytes::Bytes;
 use http::header::{COOKIE, SET_COOKIE};
-use http::{Extensions, HeaderValue, Request, Version};
+use http::{Extensions, HeaderValue, Request, Response, Version};
 use http_body_util::BodyExt;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{CaptureConnection, Connected, capture_connection};
@@ -27,6 +28,7 @@ use vush_core::protocol::{
 use crate::body::CountingBody;
 use crate::capture::Capture;
 use crate::classify::{classify, connector_failure, failure, is_shared_connect, timeout};
+use crate::client::{self, BoxError, Handed, Hop};
 use crate::connector::{ConnInfo, ConnectLog, Connector};
 use crate::cookie::{Jar, Target};
 use crate::decode;
@@ -137,17 +139,31 @@ pub(crate) const HEAD_BUFFER_BYTES: usize = 417_792;
 /// client advertises it, so a server that honors it sends no more.
 pub(crate) const H2_HEADER_LIST_BYTES: u32 = 16_384;
 
-/// A pool of connections and the log of its connects. A clone shares both.
+/// A pool of connections. A clone shares it.
 #[derive(Clone)]
-pub(crate) struct Pool {
+pub(crate) enum Pool {
+    /// hyper-util's client, for `auto` and `http2`. Boxed, because it is much
+    /// larger than Vush's own pool.
+    Legacy(Box<LegacyPool>),
+    /// Vush's own pool, for `http1`.
+    Own(client::Pool),
+}
+
+/// hyper-util's client and the log of its connects. A clone shares both.
+#[derive(Clone)]
+pub(crate) struct LegacyPool {
     client: Client<Connector, CountingBody>,
     connects: ConnectLog,
 }
 
 /// Builds a pool. Every pool, pooled or per user, is built here, so each
-/// closes its idle connections after [`IDLE_TIMEOUT`]. It takes the log of
-/// its connects from `connector`, whose clones all share it.
+/// closes its idle connections after [`IDLE_TIMEOUT`]. `http1` pools are
+/// Vush's own. The others are hyper-util's, which take the log of their
+/// connects from `connector`, whose clones all share it.
 pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
+    if version == HttpVersion::Http1 {
+        return Pool::Own(client::new_pool(connector, version));
+    }
     let connects = connector.connects();
     let client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(IDLE_TIMEOUT)
@@ -156,7 +172,25 @@ pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
         .http1_max_buf_size(HEAD_BUFFER_BYTES)
         .http2_max_header_list_size(H2_HEADER_LIST_BYTES)
         .build(connector);
-    Pool { client, connects }
+    Pool::Legacy(Box::new(LegacyPool { client, connects }))
+}
+
+/// A hop's request, and the pool it goes through.
+enum Sending<'a> {
+    /// Through hyper-util's client, which names the connection it gives the
+    /// request in `capture`.
+    Legacy {
+        pool: &'a LegacyPool,
+        request: Request<CountingBody>,
+        capture: &'a CaptureConnection,
+    },
+    /// Through Vush's own pool, which counts the body bytes it hands hyper
+    /// in `sent`.
+    Own {
+        pool: &'a client::Pool,
+        request: Request<Bytes>,
+        sent: &'a Arc<AtomicU64>,
+    },
 }
 
 /// Where an executor's connections live. A clone of a pooled transport
@@ -352,9 +386,7 @@ impl Executor {
     /// hop never runs out of time.
     async fn exchange(
         &self,
-        pool: &Pool,
-        mut request: Request<CountingBody>,
-        capture: &CaptureConnection,
+        mut sending: Sending<'_>,
         deadline: Option<Instant>,
         progress: &mut Progress,
         jar: Option<(&mut Jar, &Target)>,
@@ -363,13 +395,16 @@ impl Executor {
         // connect, a pooled one, or, under `http2`, another hop's connect,
         // which hyper-util shares without running the connector for this hop.
         // Its request carries a mark that moves the marker to `headers` once
-        // hyper gives it to a connection.
+        // hyper gives it to a connection. Vush's own pool marks the request
+        // it builds itself.
         let marker = Arc::new(StageMarker::new());
         marker.set(FailureStage::Connect);
-        request
-            .extensions_mut()
-            .insert(Unwritten::new(marker.clone()));
-        let hop = self.drive(pool, request, capture, &marker, progress, jar);
+        if let Sending::Legacy { request, .. } = &mut sending {
+            request
+                .extensions_mut()
+                .insert(Unwritten::new(marker.clone()));
+        }
+        let hop = self.drive(sending, &marker, progress, jar);
         let mut hop = std::pin::pin!(hop);
         let outcome = match deadline {
             None => hop.await,
@@ -387,28 +422,40 @@ impl Executor {
         settle(outcome, deadline, Instant::now(), marker.get())
     }
 
-    /// Sends the request, waits for its head, and reads its body up to the
-    /// limit, decoding it under `decompress`. `jar` is the session's jar, if
-    /// it has one, with the target the head's `Set-Cookie` values are stored
-    /// against.
-    ///
-    /// A decoded body is decoded in steps, with a yield after each, so no
-    /// poll runs more than one step: the hop's timeout can fire between
-    /// steps, and other tasks on the worker run. A step hands back at most
-    /// 64 KiB of output, but a br step can decode up to the stream's window,
-    /// at most 16 MiB, first, because brotli writes its ring buffer out only
-    /// when it fills. Each frame
-    /// counts as received when it arrives, so a frame whose decoding a
-    /// timeout cuts short still counts whole.
+    /// Sends the request through its pool, waits for its head, and reads the
+    /// response with [`Executor::read_response`]. `jar` is the session's jar,
+    /// if it has one, with the target the head's `Set-Cookie` values are
+    /// stored against.
     async fn drive(
         &self,
-        pool: &Pool,
-        request: Request<CountingBody>,
-        capture: &CaptureConnection,
-        marker: &StageMarker,
+        sending: Sending<'_>,
+        marker: &Arc<StageMarker>,
         progress: &mut Progress,
         jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
+        let (pool, request, capture) = match sending {
+            // Vush's own pool names, in `handed`, the connection that took
+            // the request.
+            Sending::Own {
+                pool,
+                request,
+                sent,
+            } => {
+                let hop = Hop {
+                    marker,
+                    sent,
+                    handed: &mut progress.handed,
+                };
+                let head = pool.send(request, hop).await?;
+                marker.set(FailureStage::Body);
+                return self.read_response(head, progress, jar).await;
+            }
+            Sending::Legacy {
+                pool,
+                request,
+                capture,
+            } => (pool, request, capture),
+        };
         let uri = request.uri().clone();
         let mut response = pool.client.request(request);
         // hyper-util makes a waiting hop a waiter in its first poll. The
@@ -458,8 +505,34 @@ impl Executor {
                 return Err(failed);
             }
         };
-        progress.to_headers = Some(progress.start.elapsed());
         marker.set(FailureStage::Body);
+        self.read_response(head, progress, jar).await
+    }
+
+    /// Reads `head`, which has just arrived, and its body up to the limit,
+    /// decoding it under `decompress`. `jar` is the session's jar, if it has
+    /// one, with the target the head's `Set-Cookie` values are stored
+    /// against.
+    ///
+    /// A decoded body is decoded in steps, with a yield after each, so no
+    /// poll runs more than one step: the hop's timeout can fire between
+    /// steps, and other tasks on the worker run. A step hands back at most
+    /// 64 KiB of output, but a br step can decode up to the stream's window,
+    /// at most 16 MiB, first, because brotli writes its ring buffer out only
+    /// when it fills. Each frame
+    /// counts as received when it arrives, so a frame whose decoding a
+    /// timeout cuts short still counts whole.
+    async fn read_response<B>(
+        &self,
+        head: Response<B>,
+        progress: &mut Progress,
+        jar: Option<(&mut Jar, &Target)>,
+    ) -> Result<HttpResponse, Failure>
+    where
+        B: hyper::body::Body<Data = Bytes> + Unpin,
+        B::Error: Into<BoxError>,
+    {
+        progress.to_headers = Some(progress.start.elapsed());
         // Stored before the body is read, on every status, so a hop whose
         // body fails or runs out of time keeps them. The response keeps its
         // `Set-Cookie` headers.
@@ -482,7 +555,10 @@ impl Executor {
         // Every frame is read, so an HTTP/1.1 connection can be reused. A
         // corrupt compressed body fails at once.
         while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(|error| classify(&error, FailureStage::Body))?;
+            let frame = frame.map_err(|error| {
+                let error: BoxError = error.into();
+                classify(&*error, FailureStage::Body)
+            })?;
             // Trailers are dropped.
             let Ok(data) = frame.into_data() else {
                 continue;
@@ -561,12 +637,26 @@ impl HttpExecutor for Executor {
             match ready(request, jar.as_mut(), deadline, self.decompress) {
                 Err(failure) => Err(failure),
                 Ok(prepared) => {
-                    let (mut request, target) = wire_request(prepared, sent.clone());
-                    let capture = capture.insert(capture_connection(&mut request));
+                    let (request, target) = wire_request(prepared);
+                    let sending = match self.pool_of(pool.as_ref()) {
+                        Pool::Legacy(pool) => {
+                            let mut request =
+                                request.map(|body| CountingBody::new(body, sent.clone()));
+                            let capture = capture.insert(capture_connection(&mut request));
+                            Sending::Legacy {
+                                pool,
+                                request,
+                                capture,
+                            }
+                        }
+                        Pool::Own(pool) => Sending::Own {
+                            pool,
+                            request,
+                            sent: &sent,
+                        },
+                    };
                     self.exchange(
-                        self.pool_of(pool.as_ref()),
-                        request,
-                        capture,
+                        sending,
                         deadline,
                         &mut progress,
                         jar.as_mut().map(|jar| (jar, &target)),
@@ -577,23 +667,36 @@ impl HttpExecutor for Executor {
         };
 
         // A failure in `connect` names no connection: none carried the hop's
-        // request. Its capture may still name one it was queued on or handed
-        // back from.
+        // request. hyper-util's capture may still name one it was queued on
+        // or handed back from.
         let connecting = matches!(&outcome, Err(failure) if failure.stage == FailureStage::Connect);
-        let info = if connecting {
-            None
-        } else {
-            capture
-                .as_ref()
-                .and_then(|capture| capture.connection_metadata().as_ref().and_then(conn_info))
-                .or(progress.error_connection)
-        };
-        let connection = info.as_ref().map(|info| info.id);
-        // The setup the hop took for the connection it reports. Otherwise
-        // take that connection's setup now, if any is left.
-        let setup = match progress.setup.take() {
-            Some((id, setup)) if Some(id) == connection => Some(setup),
-            _ => info.and_then(|info| info.take_setup()),
+        let (connection, setup) = match &capture {
+            // Only hyper-util's client has a capture. Vush's own pool names
+            // the connection it handed the request to, with the setup the hop
+            // took then.
+            None => match progress.handed.take() {
+                Some(handed) if !connecting => (Some(handed.info.id), handed.setup),
+                _ => (None, None),
+            },
+            Some(capture) => {
+                let info = if connecting {
+                    None
+                } else {
+                    capture
+                        .connection_metadata()
+                        .as_ref()
+                        .and_then(conn_info)
+                        .or(progress.error_connection)
+                };
+                let connection = info.as_ref().map(|info| info.id);
+                // The setup the hop took for the connection it reports.
+                // Otherwise take that connection's setup now, if any is left.
+                let setup = match progress.setup.take() {
+                    Some((id, setup)) if Some(id) == connection => Some(setup),
+                    _ => info.and_then(|info| info.take_setup()),
+                };
+                (connection, setup)
+            }
         };
         let received = progress.capture.as_ref().map_or(0, Capture::received);
         HttpHop {
@@ -630,6 +733,9 @@ struct Progress {
     capture: Option<Capture>,
     /// The connection a hyper-util error names, if any.
     error_connection: Option<Arc<ConnInfo>>,
+    /// The connection Vush's own pool handed the request to, with the setup
+    /// the hop took then. A request the connection handed back clears it.
+    handed: Option<Handed>,
     /// The setup the hop took from the connection it is on, with that
     /// connection's ID. It is taken after each poll that assigns a
     /// connection, not at the end, so a hop dropped after it got its
@@ -645,6 +751,7 @@ impl Progress {
             to_headers: None,
             capture: None,
             error_connection: None,
+            handed: None,
             setup: None,
         }
     }
@@ -704,8 +811,8 @@ fn ready(
 
 /// The request for the wire, and the target its response's cookies are
 /// stored against.
-fn wire_request(prepared: Prepared, sent: Arc<AtomicU64>) -> (Request<CountingBody>, Target) {
-    let mut request = Request::new(CountingBody::new(prepared.body, sent));
+fn wire_request(prepared: Prepared) -> (Request<Bytes>, Target) {
+    let mut request = Request::new(prepared.body);
     *request.method_mut() = prepared.method;
     *request.uri_mut() = prepared.uri;
     *request.headers_mut() = prepared.headers;
