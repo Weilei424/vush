@@ -315,16 +315,16 @@
   - [x] Fix from Codex's sixth review (2026-11-26): a failure whose request never went out is in `connect`, not `headers`. That covers a new connection that closes before taking the request, and a connection that hands it back unsent.
   - [~] Own the HTTP/2 stream limit (Codex's sixth review, 2026-11-26; chosen by the user the same day). Under HTTP/2, h2 holds one request per connection until the server allows another stream, and it sends that request once a stream frees, even after its hop timed out or was dropped. Vush is to hand h2 a request only when a stream is free, so an ended hop's request never goes out. On 2026-11-27 the user picked Vush's own connection pool for this, so the work moved to P2.7.
   - [ ] CI green on all four runners after the user pushes (plan Task 5). Phase 2 is marked complete after P2.7.
-- [ ] P2.7 Own the connection pool: HTTP/1.1 on hyper's connection API, HTTP/2 on h2 with a stream gate, so a hop that ends while it waits for a stream never sends its request (design approved 2026-11-27).
+- [~] P2.7 Own the connection pool: HTTP/1.1 on hyper's connection API, HTTP/2 on h2 with a stream gate, so a hop that ends while it waits for a stream never sends its request (design approved 2026-11-27).
   - Spec: `docs/superpowers/specs/2026-11-27-phase-2-7-own-connection-pool-design.md` · Plan: `docs/superpowers/plans/2026-11-27-phase-2-7-own-connection-pool.md` (local only).
   - It changes P2.2's decision "hyper + hyper-util with Vush's own connector". It also makes HTTP/1.1 reuse certain for hops in a row, and gives every hop waiting for an `http2` connect that connect's own failure.
   - Decided 2026-11-27:
     - each HTTP/2 connection takes one stream until the server's first `SETTINGS` arrive;
     - no safety net for a server that lowers its limit later: a request handed to h2 just before can go out after its hop ended, and the docs say so;
     - a `GOAWAY` moves the hops whose requests never went out, unless the connection was fresh for the hop and never opened a stream.
-  - [ ] Pin what a server receives on each version, before the switch (plan Task 1).
-  - [ ] Vush's own pool serves `http1`, with HTTP/1.1 on hyper's connection API, certain reuse and the idle sweep (plan Task 2).
-  - [ ] The stream gate serves `http2`. An expired or dropped hop's request never reaches the server, and the connects log goes (plan Task 3).
+  - [x] Pin what a server receives on each version, before the switch (plan Task 1).
+  - [x] Vush's own pool serves `http1`, with HTTP/1.1 on hyper's connection API, certain reuse and the idle sweep (plan Task 2).
+  - [x] The stream gate serves `http2`. An expired or dropped hop's request never reaches the server, and the connects log goes (plan Task 3).
   - [ ] `auto` on the own pool, and hyper-util's client goes, along with "the shared connection attempt failed" (plan Task 4).
   - [ ] hyper-util's `client-legacy` feature and `tower-service` removed (plan Task 5).
   - [ ] Documents: `ARCHITECTURE_NOTES.md` §4.3 and §7, the implementation plan, and P7.2's note (plan Task 6).
