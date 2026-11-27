@@ -27,9 +27,9 @@ use vush_core::protocol::{
 
 use crate::body::CountingBody;
 use crate::capture::Capture;
-use crate::classify::{classify, connector_failure, failure, is_shared_connect, timeout};
+use crate::classify::{classify, failure, timeout};
 use crate::client::{self, BoxError, Handed, Hop};
-use crate::connector::{ConnInfo, ConnectLog, Connector};
+use crate::connector::{ConnInfo, Connector};
 use crate::cookie::{Jar, Target};
 use crate::decode;
 use crate::executors::{SystemRoots, build};
@@ -142,37 +142,33 @@ pub(crate) const H2_HEADER_LIST_BYTES: u32 = 16_384;
 /// A pool of connections. A clone shares it.
 #[derive(Clone)]
 pub(crate) enum Pool {
-    /// hyper-util's client, for `auto` and `http2`. Boxed, because it is much
-    /// larger than Vush's own pool.
+    /// hyper-util's client, for `auto`. Boxed, because it is much larger than
+    /// Vush's own pool.
     Legacy(Box<LegacyPool>),
-    /// Vush's own pool, for `http1`.
+    /// Vush's own pool, for `http1` and `http2`.
     Own(client::Pool),
 }
 
-/// hyper-util's client and the log of its connects. A clone shares both.
+/// hyper-util's client. A clone shares it.
 #[derive(Clone)]
 pub(crate) struct LegacyPool {
     client: Client<Connector, CountingBody>,
-    connects: ConnectLog,
 }
 
 /// Builds a pool. Every pool, pooled or per user, is built here, so each
-/// closes its idle connections after [`IDLE_TIMEOUT`]. `http1` pools are
-/// Vush's own. The others are hyper-util's, which take the log of their
-/// connects from `connector`, whose clones all share it.
+/// closes its idle connections after [`IDLE_TIMEOUT`]. `http1` and `http2`
+/// pools are Vush's own, and `auto` pools are hyper-util's.
 pub(crate) fn new_pool(connector: Connector, version: HttpVersion) -> Pool {
-    if version == HttpVersion::Http1 {
+    if version != HttpVersion::Auto {
         return Pool::Own(client::new_pool(connector, version));
     }
-    let connects = connector.connects();
     let client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(IDLE_TIMEOUT)
         .pool_timer(TokioTimer::new())
-        .http2_only(version == HttpVersion::Http2)
         .http1_max_buf_size(HEAD_BUFFER_BYTES)
         .http2_max_header_list_size(H2_HEADER_LIST_BYTES)
         .build(connector);
-    Pool::Legacy(Box::new(LegacyPool { client, connects }))
+    Pool::Legacy(Box::new(LegacyPool { client }))
 }
 
 /// A hop's request, and the pool it goes through.
@@ -184,8 +180,8 @@ enum Sending<'a> {
         request: Request<CountingBody>,
         capture: &'a CaptureConnection,
     },
-    /// Through Vush's own pool, which counts the body bytes it hands hyper
-    /// in `sent`.
+    /// Through Vush's own pool, which counts the body bytes it hands hyper or
+    /// h2 in `sent`.
     Own {
         pool: &'a client::Pool,
         request: Request<Bytes>,
@@ -219,18 +215,24 @@ pub(crate) enum Transport {
 /// - `version` sets the version mode: `auto` negotiates over TLS, `http1`
 ///   speaks only HTTP/1.1, and `http2` speaks only HTTP/2, with prior
 ///   knowledge in plaintext. Under `http2`, one hop per origin connects at a
-///   time and the others wait for it. When that connect fails, the waiting
-///   hops report its kind and text, found in the pool's log of its last 8
-///   connects, and never another connect's failure. They keep `connect` and
-///   "the shared connection attempt failed" when the connect was abandoned,
-///   when it failed in HTTP/2's own handshake, when 8 newer connects pushed
-///   it out of the log, when it started or failed during the hop's first
-///   poll, a window of microseconds, and when hyper-util sent the hop back to
-///   wait again, because the connection it got closed, or sent GOAWAY,
-///   before its request went out. Under `auto` over TLS, a connect that ALPN
-///   turns into HTTP/2 can release hops that were running their own
-///   connects. They keep `connect` too, since only `http2` connects are
-///   logged.
+///   time and the others wait for it. The connect runs on a task of its own,
+///   so it ends even when the hop that started it is dropped, and every hop
+///   that waited on it reports its own result. An origin then has one HTTP/2
+///   connection that takes new streams. A hop gets a stream there only while
+///   the streams Vush has open on it are fewer than the server allows, and
+///   otherwise waits its turn in Vush's queue, in `connect` and naming no
+///   connection, so a hop that runs out of time or is dropped while it waits
+///   never sends its request. A new connection takes one stream until the
+///   server's first `SETTINGS` arrive. A server that lowers its limit later
+///   can still be sent a request handed to h2 just before, after its hop
+///   ended. A `GOAWAY` sends the waiting hops to a new connection, while the
+///   old one finishes its open streams. A connection that dies sends them on
+///   too, except that a hop fails as `connection_closed` in `connect` when
+///   the connection came from the connect it waited on, so a server that
+///   always breaks can't keep it reconnecting. Under `auto` over TLS, a
+///   connect that ALPN turns into HTTP/2 can release hops that were running
+///   their own connects, and they keep `connect` and "the shared connection
+///   attempt failed".
 /// - `max_response_size` is the body limit. A longer body is read to the end,
 ///   its start kept up to the limit, and marked `truncated`. Its connection
 ///   is reused.
@@ -392,11 +394,11 @@ impl Executor {
         jar: Option<(&mut Jar, &Target)>,
     ) -> Result<HttpResponse, Failure> {
         // `prepare` is done, so the hop is waiting for a connection: its own
-        // connect, a pooled one, or, under `http2`, another hop's connect,
-        // which hyper-util shares without running the connector for this hop.
-        // Its request carries a mark that moves the marker to `headers` once
-        // hyper gives it to a connection. Vush's own pool marks the request
-        // it builds itself.
+        // connect, a pooled one, or, under `http2`, another hop's connect or a
+        // free stream. hyper-util's request carries a mark that moves the
+        // marker to `headers` once hyper gives it to a connection. Vush's own
+        // pool marks the request it builds itself, or moves the marker when h2
+        // takes the request.
         let marker = Arc::new(StageMarker::new());
         marker.set(FailureStage::Connect);
         if let Sending::Legacy { request, .. } = &mut sending {
@@ -456,14 +458,8 @@ impl Executor {
                 capture,
             } => (pool, request, capture),
         };
-        let uri = request.uri().clone();
         let mut response = pool.client.request(request);
-        // hyper-util makes a waiting hop a waiter in its first poll. The
-        // pool's event count on both sides of that poll tells which connect
-        // the hop waited on.
-        let before = pool.connects.events();
         let first = poll_once(&mut response).await;
-        let after = pool.connects.events();
         // hyper-util assigns the hop a connection, new or pooled, only inside
         // a poll of `response`. It assigns another when a reused connection
         // closed, or sent GOAWAY, before the request went out, so the hop
@@ -489,20 +485,7 @@ impl Executor {
             Ok(head) => head,
             Err(error) => {
                 progress.error_connection = error.connect_info().and_then(conn_info);
-                let failed = classify(&error, marker.get());
-                // A hop that waited on another hop's connect learns why it
-                // failed from the pool's log, when the log can tie a failure
-                // to that connect. A hop that got a connection was sent back
-                // to wait again, so the connect its first poll saw may not be
-                // the one that released it, and it keeps `connect`.
-                let got_connection = capture.connection_metadata().is_some();
-                if is_shared_connect(&failed)
-                    && !got_connection
-                    && let Some(cause) = pool.connects.waited_on(&uri, before, after)
-                {
-                    return Err(connector_failure(cause));
-                }
-                return Err(failed);
+                return Err(classify(&error, marker.get()));
             }
         };
         marker.set(FailureStage::Body);
@@ -1503,13 +1486,12 @@ mod tests {
         assert_eq!(waited.connection, None);
     }
 
-    /// The first connect is abandoned while a hop waits on it, which logs no
-    /// failure. A third hop then takes the free lock and fails as `dns`. The
-    /// waiting hop is woken but not polled until after that, and it keeps
-    /// `connect`, not the `dns` of a connect it didn't wait on.
+    /// The connect runs on a task of its own, so dropping the hop that
+    /// started it leaves it running. The hop waiting on it gets its failure,
+    /// and a later hop's own connect fails as `dns`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_hop_whose_connect_was_abandoned_doesnt_take_a_later_failure() {
-        let executor = flaky_http2(Duration::from_secs(60));
+    async fn a_dropped_hops_connect_still_gives_its_waiter_its_failure() {
+        let executor = flaky_http2(Duration::from_millis(100));
         let request = get("http://flaky.vush.test/".to_owned(), &[]);
         let (mut s1, mut s2, mut s3) = (
             executor.new_session(),
@@ -1520,8 +1502,18 @@ mod tests {
         assert!(poll_once(&mut connecting).await.is_pending());
         let mut waiting = Box::pin(executor.send(&mut s2, &request, NAMED_TIMEOUT));
         assert!(poll_once(&mut waiting).await.is_pending());
-        // The connect ends by being dropped, and logs nothing.
         drop(connecting);
+
+        let waited = waiting.await;
+        assert_eq!(
+            waited.outcome.as_ref().unwrap_err(),
+            &Failure {
+                kind: FailureKind::Timeout,
+                stage: FailureStage::Connect,
+                message: "the connection took too long",
+            }
+        );
+        assert_eq!(waited.connection, None);
 
         let later = executor.send(&mut s3, &request, NAMED_TIMEOUT).await;
         assert_eq!(
@@ -1532,16 +1524,5 @@ mod tests {
                 message: "the host name didn't resolve",
             }
         );
-
-        let waited = waiting.await;
-        assert_eq!(
-            waited.outcome.as_ref().unwrap_err(),
-            &Failure {
-                kind: FailureKind::Connect,
-                stage: FailureStage::Connect,
-                message: "the shared connection attempt failed",
-            }
-        );
-        assert_eq!(waited.connection, None);
     }
 }
